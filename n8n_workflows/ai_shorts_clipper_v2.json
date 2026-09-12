@@ -1,0 +1,595 @@
+{
+  "name": "AI Shorts Clipper v2",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "ai-shorts-manual"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "youtube-url",
+              "name": "youtubeUrl",
+              "value": "={{ $json.youtube_url }}",
+              "type": "string"
+            },
+            {
+              "id": "api-base",
+              "name": "apiBaseUrl",
+              "value": "http://shorts-api:8000/api",
+              "type": "string"
+            },
+            {
+              "id": "storage-mount",
+              "name": "storageMountPath",
+              "value": "/data/storage",
+              "type": "string"
+            },
+            {
+              "id": "youtube-privacy",
+              "name": "youtubePrivacy",
+              "value": "private",
+              "type": "string"
+            },
+            {
+              "id": "youtube-category",
+              "name": "youtubeCategoryId",
+              "value": "22",
+              "type": "string"
+            },
+            {
+              "id": "youtube-region",
+              "name": "youtubeRegionCode",
+              "value": "US",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.apiBaseUrl }}/jobs",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "youtube_url",
+              "value": "={{ $json.youtubeUrl }}"
+            }
+          ]
+        },
+        "method": "POST",
+        "options": {}
+      },
+      "id": "create-job",
+      "name": "Create Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 300],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge config with job ID\nconst config = $('Config').first().json;\nconst job = $input.first().json;\n\nreturn [{\n  json: {\n    ...config,\n    jobId: job.job_id\n  }\n}];"
+      },
+      "id": "store-job-id",
+      "name": "Store Job Id",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 300]
+    },
+    {
+      "parameters": {
+        "amount": 15,
+        "unit": "seconds"
+      },
+      "id": "wait-before-poll",
+      "name": "Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Store Job Id').first().json.apiBaseUrl }}/jobs/{{ $('Store Job Id').first().json.jobId }}",
+        "authentication": "none",
+        "method": "GET",
+        "options": {}
+      },
+      "id": "check-job-status",
+      "name": "Check Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 300],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equals",
+              "value2": "completed"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "if-completed",
+      "name": "IF completed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equals",
+              "value2": "failed"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "if-failed",
+      "name": "IF failed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1920, 500]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Config').first().json.apiBaseUrl }}/jobs/{{ $('Store Job Id').first().json.jobId }}",
+        "authentication": "none",
+        "method": "GET",
+        "options": {}
+      },
+      "id": "poll-again",
+      "name": "Poll Again",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1920, 100],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "amount": 10,
+        "unit": "seconds"
+      },
+      "id": "wait-poll-again",
+      "name": "Wait 10s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [2160, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Raise error with job's error message\nconst job = $input.first().json;\nthrow new Error(`Job ${job.id} failed: ${job.error_message || 'Unknown error'}`);"
+      },
+      "id": "error-failed",
+      "name": "Error Job Failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2160, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare one item per clip for upload, merging config\nconst job = $input.first().json;\nconst config = $('Config').first().json;\n\nconst clips = job.clips || [];\n\nreturn clips.map(clip => ({\n  json: {\n    ...config,\n    clip: {\n      clip_id: clip.id,\n      title: clip.title || `Short ${clip.index + 1}`,\n      description: clip.description || '',\n      hashtags: Array.isArray(clip.hashtags) ? clip.hashtags : [],\n      file_path: clip.file_path,\n      thumbnail_path: clip.thumbnail_path,\n      index: clip.index\n    }\n  }\n}));"
+      },
+      "id": "prepare-clips",
+      "name": "Prepare Clips For Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1920, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "loop-clips",
+      "name": "Loop Over Clips",
+      "type": "n8n-nodes-base.loopOverItems",
+      "typeVersion": 1,
+      "position": [2160, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Read video and optional thumbnail from shared storage into binaries\nconst fs = require('fs');\nconst path = require('path');\n\nlet item = $input.first().json;\nconst storagePath = item.storageMountPath;\nconst clip = item.clip;\n\nconst videoPath = path.join(storagePath, clip.file_path);\n\n// Build binary object\nconst binary = {};\nconst videoBuf = fs.readFileSync(videoPath);\nbinary.data = {\n  data: videoBuf.toString('base64'),\n  mimeType: 'video/mp4',\n  fileName: path.basename(videoPath)\n};\n\n// Read thumbnail if present\nlet hasThumbnail = false;\nif (clip.thumbnail_path) {\n  const thumbPath = path.join(storagePath, clip.thumbnail_path);\n  try {\n    const thumbBuf = fs.readFileSync(thumbPath);\n    binary.thumb = {\n      data: thumbBuf.toString('base64'),\n      mimeType: 'image/jpeg',\n      fileName: path.basename(thumbPath)\n    };\n    hasThumbnail = true;\n  } catch (e) {\n    // Thumbnail failed to read - continue without it\n  }\n}\n\nreturn [{\n  json: {\n    ...item,\n    hasThumbnail\n  },\n  binary\n}];"
+      },
+      "id": "read-clip-files",
+      "name": "Read Clip Files From Disk",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2400, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.hasThumbnail }}",
+              "operation": "true"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "if-thumbnail",
+      "name": "IF has thumbnail",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2640, 300]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "part": {
+          "snippet": {
+            "title": "={{ $json.clip.title }}",
+            "description": "={{ $json.clip.description }}\n\n{{ $json.clip.hashtags.join(' ') }}",
+            "categoryId": "={{ $json.youtubeCategoryId }}"
+          },
+          "status": {
+            "privacyStatus": "={{ $json.youtubePrivacy }}"
+          }
+        },
+        "media": {
+          "mimeType": "video/mp4",
+          "body": "={{ $binary.data }}"
+        },
+        "options": {}
+      },
+      "id": "upload-to-youtube",
+      "name": "Upload to YouTube",
+      "type": "n8n-nodes-base.youtube",
+      "typeVersion": 2,
+      "position": [2880, 400],
+      "credentials": {
+        "youtubeOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "YouTube OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "part": {
+          "snippet": {
+            "title": "={{ $json.clip.title }}",
+            "description": "={{ $json.clip.description }}\n\n{{ $json.clip.hashtags.join(' ') }}",
+            "categoryId": "={{ $json.youtubeCategoryId }}"
+          },
+          "status": {
+            "privacyStatus": "={{ $json.youtubePrivacy }}"
+          }
+        },
+        "media": {
+          "mimeType": "video/mp4",
+          "body": "={{ $binary.data }}"
+        },
+        "thumbnail": {
+          "mimeType": "image/jpeg",
+          "body": "={{ $binary.thumb }}"
+        },
+        "options": {}
+      },
+      "id": "upload-to-youtube-thumb",
+      "name": "Upload to YouTube With Thumbnail",
+      "type": "n8n-nodes-base.youtube",
+      "typeVersion": 2,
+      "position": [2880, 100],
+      "credentials": {
+        "youtubeOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "YouTube OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build callback payload from YouTube upload result\nconst uploadResult = $input.first().json;\n// The input should carry the clip info alongside the youtube result\nconst clip = uploadResult.clip;\n\nreturn [{\n  json: {\n    clip_id: clip.clip_id,\n    statusData: {\n      uploaded: true,\n      youtube_video_id: uploadResult.id || null,\n      upload_error: null\n    }\n  }\n}];"
+      },
+      "id": "prepare-status",
+      "name": "Prepare Upload Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3120, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Config').first().json.apiBaseUrl }}/clips/{{ $json.clip_id }}/upload-status",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.statusData) }}",
+        "method": "PATCH",
+        "options": {}
+      },
+      "id": "mark-uploaded",
+      "name": "Mark Clip Uploaded",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3360, 300],
+      "credentials": {}
+    },
+    {
+      "parameters": {},
+      "id": "noop-end",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [3600, 300]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Create Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Job": {
+      "main": [
+        [
+          {
+            "node": "Store Job Id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Job Id": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Check Job Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Job Status": {
+      "main": [
+        [
+          {
+            "node": "IF completed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF completed": {
+      "main": [
+        [
+          {
+            "node": "Prepare Clips For Upload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF failed": {
+      "main": [
+        [
+          {
+            "node": "Error Job Failed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Poll Again",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Again": {
+      "main": [
+        [
+          {
+            "node": "Wait 10s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 10s": {
+      "main": [
+        [
+          {
+            "node": "Check Job Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Clips For Upload": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Clips",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Clips": {
+      "main": [
+        [
+          {
+            "node": "Read Clip Files From Disk",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Clip Files From Disk": {
+      "main": [
+        [
+          {
+            "node": "IF has thumbnail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF has thumbnail": {
+      "main": [
+        [
+          {
+            "node": "Upload to YouTube With Thumbnail",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Upload to YouTube",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to YouTube": {
+      "main": [
+        [
+          {
+            "node": "Prepare Upload Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to YouTube With Thumbnail": {
+      "main": [
+        [
+          {
+            "node": "Prepare Upload Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Upload Status": {
+      "main": [
+        [
+          {
+            "node": "Mark Clip Uploaded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Clip Uploaded": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Job Failed": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Done": {
+      "main": []
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "2.0.0",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

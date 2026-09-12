@@ -1,0 +1,10 @@
+#! kustomization.yaml
+# Generated code, do not edit
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+    - 0-ai-shorts-generator-namespace.yaml
+    - default-network-policy.yaml
+    - shorts-api-deployment.yaml
+    - shorts-api-expose.yaml
+    - shorts-api-service.yaml

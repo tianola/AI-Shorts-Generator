@@ -1,0 +1,37 @@
+# Core dependencies
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.0.0
+sqlalchemy>=2.0.0
+aiofiles>=23.0.0
+httpx>=0.25.0
+loguru>=0.7.0
+yt-dlp>=2024.0.0
+
+# LLM Structured Output
+instructor>=1.6.0
+openai>=1.40.0
+
+# Task Queue
+arq>=0.26
+redis>=5.0.0
+
+# Image processing & Advanced vision
+Pillow>=10.0.0
+opencv-python-headless==4.10.0.84
+mediapipe>=0.10.14
+numpy>=1.26.0
+mediapipe>=0.10.14
+
+# Audio transcription & Diarization
+faster-whisper>=1.0.0
+pyannote.audio>=3.1.1
+torchaudio>=2.0.0
+
+# Database
+aiosqlite>=0.19.0
+
+# Type hints
+typing-extensions>=4.8.0

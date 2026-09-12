@@ -1,0 +1,350 @@
+{
+  "name": "Retry Failed Uploads",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://backend:8000/api/clips/pending-upload",
+        "authentication": "none",
+        "method": "GET",
+        "options": {
+          "batching": {
+            "batch": {}
+          }
+        }
+      },
+      "id": "get-pending-clips",
+      "name": "Get Pending Clips",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [460, 300],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.length }}",
+              "operation": "greater",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "check-has-clips",
+      "name": "Check Has Clips",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Get all clips as separate items\nconst clips = $input.first().json;\n\nreturn clips.map(clip => ({\n  json: { clip }\n}));"
+      },
+      "id": "split-clips",
+      "name": "Split Clips",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.clip.file_path }}",
+        "authentication": "none",
+        "method": "GET",
+        "options": {
+          "batching": {
+            "batch": {}
+          },
+          "response": {
+            "response": {
+              "responseType": "file"
+            }
+          }
+        }
+      },
+      "id": "download-clip-video",
+      "name": "Download Clip Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1120, 300],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.clip.thumbnail_path }}",
+              "operation": "notEmpty"
+            }
+          ]
+        }
+      },
+      "id": "check-has-thumbnail",
+      "name": "Check Has Thumbnail",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.clip.thumbnail_path }}",
+        "authentication": "none",
+        "method": "GET",
+        "options": {
+          "batching": {
+            "batch": {}
+          },
+          "response": {
+            "response": {
+              "responseType": "file"
+            }
+          }
+        }
+      },
+      "id": "download-clip-thumbnail",
+      "name": "Download Clip Thumbnail",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1560, 200],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare YouTube upload data\nconst clip = $input.first().json.clip;\n\nreturn [{\n  json: {\n    videoFile: $input.first().json,\n    thumbnailFile: $input.all().find(i => i.json.thumbnail_path)?.json,\n    metadata: {\n      title: clip.title || `Short ${clip.index + 1}`,\n      description: clip.description || '',\n      tags: clip.hashtags ? clip.hashtags.join(',') : '',\n      privacyStatus: 'public',\n      categoryId: '22' // People & Blogs\n    },\n    clip: clip\n  }\n}];"
+      },
+      "id": "prepare-upload-data",
+      "name": "Prepare Upload Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "videoId": "",
+        "part": {
+          "snippet": {
+            "title": "={{ $json.metadata.title }}",
+            "description": "={{ $json.metadata.description }}",
+            "tags": "={{ $json.metadata.tags }}",
+            "categoryId": "={{ $json.metadata.categoryId }}"
+          },
+          "status": {
+            "privacyStatus": "={{ $json.metadata.privacyStatus }}"
+          }
+        },
+        "media": {
+          "mimeType": "video/mp4",
+          "body": "={{ $json.videoFile }}"
+        },
+        "thumbnail": {
+          "mimeType": "image/jpeg",
+          "body": "={{ $json.thumbnailFile }}"
+        },
+        "options": {}
+      },
+      "id": "upload-to-youtube",
+      "name": "Upload to YouTube",
+      "type": "n8n-nodes-base.youtube",
+      "typeVersion": 2,
+      "position": [2000, 300],
+      "credentials": {
+        "youtubeOAuth2Api": {
+          "id": "youtube-credentials",
+          "name": "YouTube OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare upload status update\nconst uploadResult = $input.first().json;\nconst data = $input.all().find(i => i.json.clip)?.json;\nconst clip = data.clip;\n\nconst statusData = {\n  uploaded: uploadResult.id ? true : false,\n  youtube_video_id: uploadResult.id || null,\n  upload_error: uploadResult.error || null\n};\n\nreturn [{\n  json: {\n    clip_id: clip.id,\n    status_data: statusData\n  }\n}];"
+      },
+      "id": "prepare-status-update",
+      "name": "Prepare Status Update",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2220, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://backend:8000/api/clips/{{ $json.clip_id }}/upload-status",
+        "authentication": "none",
+        "method": "PATCH",
+        "body": "={{ $json.status_data }}",
+        "options": {
+          "batching": {
+            "batch": {}
+          }
+        }
+      },
+      "id": "update-upload-status",
+      "name": "Update Upload Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2440, 300],
+      "credentials": {}
+    },
+    {
+      "parameters": {
+        "functionCode": "// Log retry attempt\nconst clip = $input.all().find(i => i.json.clip)?.json.clip;\nreturn [{\n  json: {\n    message: `Retry upload for clip ${clip.id} (attempt ${clip.upload_retry_count + 1})`\n  }\n}];"
+      },
+      "id": "log-retry",
+      "name": "Log Retry",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2660, 300]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Pending Clips",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Pending Clips": {
+      "main": [
+        [
+          {
+            "node": "Check Has Clips",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Has Clips": {
+      "main": [
+        [
+          {
+            "node": "Split Clips",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Split Clips": {
+      "main": [
+        [
+          {
+            "node": "Download Clip Video",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Clip Video": {
+      "main": [
+        [
+          {
+            "node": "Check Has Thumbnail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Has Thumbnail": {
+      "main": [
+        [
+          {
+            "node": "Download Clip Thumbnail",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Download Clip Thumbnail": {
+      "main": [
+        [
+          {
+            "node": "Prepare Upload Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Upload Data": {
+      "main": [
+        [
+          {
+            "node": "Upload to YouTube",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to YouTube": {
+      "main": [
+        [
+          {
+            "node": "Prepare Status Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Status Update": {
+      "main": [
+        [
+          {
+            "node": "Update Upload Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Upload Status": {
+      "main": [
+        [
+          {
+            "node": "Log Retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1.0.0",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

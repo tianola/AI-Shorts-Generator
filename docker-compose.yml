@@ -1,0 +1,165 @@
+version: '3.8'
+
+services:
+  # ====================
+  # Backend API
+  # ====================
+  shorts-api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: ai-shorts-api
+    restart: unless-stopped
+    ports:
+      - "5000:8000"
+    volumes:
+      - ./storage:/app/storage
+      - ./backend/fonts:/usr/share/fonts/truetype/montserrat:ro
+    environment:
+      # Ollama AI Configuration
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=qwen2.5-coder:14b
+      - METADATA_OLLAMA_MODEL=qwen2.5-coder:14b
+      - WHISPER_MODEL_SIZE=tiny
+
+      # Clip selection
+      - NUM_CLIPS=10
+      - MIN_CLIP_SECONDS=20
+      - MAX_CLIP_SECONDS=75
+
+      # Captions
+      - CAPTION_GROUP_SIZE=3
+
+      # Vertical conversion
+      - VERTICAL_MODE=face_tracked
+
+      # FFmpeg
+      - FFMPEG_PRESET=veryfast
+      - FFMPEG_CRF=20
+
+      # Upload
+      - MAX_UPLOAD_RETRIES=3
+
+      # TTS
+      - TTS_ENABLED=${TTS_ENABLED:-false}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-CwhRBWXzGAHq8TQ4Fs17}
+
+      # Storage
+      - STORAGE_ROOT=/app/storage
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - ai-shorts-network
+
+  # ====================
+  # Worker
+  # ====================
+  shorts-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: ai-shorts-worker
+    restart: unless-stopped
+    command: ["python", "worker.py"]
+    volumes:
+      - ./storage:/app/storage
+    environment:
+      # Ollama AI Configuration
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=qwen2.5-coder:14b
+      - METADATA_OLLAMA_MODEL=qwen2.5-coder:14b
+      - WHISPER_MODEL_SIZE=tiny
+
+      # Clip selection
+      - NUM_CLIPS=10
+      - MIN_CLIP_SECONDS=20
+      - MAX_CLIP_SECONDS=75
+
+      # Captions
+      - CAPTION_GROUP_SIZE=3
+
+      # Vertical conversion
+      - VERTICAL_MODE=face_tracked
+
+      # FFmpeg
+      - FFMPEG_PRESET=veryfast
+      - FFMPEG_CRF=20
+
+      # Upload
+      - MAX_UPLOAD_RETRIES=3
+
+      # TTS
+      - TTS_ENABLED=${TTS_ENABLED:-false}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-CwhRBWXzGAHq8TQ4Fs17}
+
+      # Storage
+      - STORAGE_ROOT=/app/storage
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - ai-shorts-network
+    depends_on:
+      - shorts-api
+
+  # ====================
+  # n8n Workflow Automation
+  # ====================
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: ai-shorts-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./storage:/data/storage:ro
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=admin123
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - NODE_ENV=production
+      - GENERIC_TIMEZONE=Europe/Athens
+    networks:
+      - ai-shorts-network
+    depends_on:
+      - shorts-api
+
+  # ====================
+  # Omniroute Gateway
+  # ====================
+  omniroute:
+    image: diegosouzapw/omniroute:latest
+    container_name: omniroute
+    env_file:
+      - ./omniroute-encryption.env
+    ports:
+      - "3001:20128"
+    environment:
+      - REQUIRE_API_KEY=false
+      - OMNIROUTE_AUTO_FREE_FALLBACK_TO_FULL_POOL=true
+      - DISABLE_AUTH=true
+      - REQUIRE_PASSWORD=false
+      - OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=5
+      - OMNIROUTE_CHAT_ADMISSION_QUEUE_MS=30000
+      - OMNIROUTE_MEMORY_MB=8192
+      - PLAYWRIGHT_BROWSERS_PATH=/app/data/ms-playwright
+      - CLOUDFLARE_PLAYGROUND_CHROME_PATH=/app/data/ms-playwright/chromium-1228/chrome-linux64/chrome
+    volumes:
+      - omniroute_data:/app/data
+    restart: unless-stopped
+    networks:
+      - ai-shorts-network
+
+networks:
+  ai-shorts-network:
+    driver: bridge
+
+volumes:
+  n8n_data:
+    external: true
+  omniroute_data:
+    external: true

@@ -1,0 +1,45 @@
+#! shorts-api-deployment.yaml
+# Generated code, do not edit
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: shorts-api
+    namespace: ai-shorts-generator
+    labels:
+        com.docker.compose.project: ai-shorts-generator
+        com.docker.compose.service: shorts-api
+spec:
+    replicas: 1
+    selector:
+        matchLabels:
+            com.docker.compose.project: ai-shorts-generator
+            com.docker.compose.service: shorts-api
+    strategy:
+        type: Recreate
+    template:
+        metadata:
+            labels:
+                com.docker.compose.project: ai-shorts-generator
+                com.docker.compose.service: shorts-api
+                com.docker.compose.network.default: "true"
+        spec:
+            restartPolicy: unless-stopped
+            containers:
+                - name: shorts-api
+                  image: ai-shorts-generator-shorts-api
+                  imagePullPolicy: IfNotPresent
+                  ports:
+                    - name: shorts-api-8000
+                      containerPort: 8000
+                  volumeMounts:
+                    - name: app
+                      mountPath: /app
+                    - name: app-storage
+                      mountPath: /app/storage
+            volumes:
+                - name: app
+                  hostPath:
+                    path: E:\ai-shorts-generator\backend
+                - name: app-storage
+                  hostPath:
+                    path: E:\ai-shorts-generator\storage

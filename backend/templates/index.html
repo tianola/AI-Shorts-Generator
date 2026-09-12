@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Shorts Studio</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com" />
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Cormorant+Garamond:wght@500;600;700&amp;display=swap" rel="stylesheet" />
+	<link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+	<div class="bg-noise"></div>
+	<div class="page-shell">
+	  <header class="topbar">
+		<div class="brand-wrap">
+		  <div class="brand-mark">S</div>
+		  <div>
+			<div class="eyebrow">creator pipeline</div>
+			<h1>Shorts Studio</h1>
+		  </div>
+		</div>
+		<div class="topbar-actions">
+		  <button class="ghost-btn" id="refreshJobsBtn">Refresh</button>
+		  <button class="primary-btn" id="focusComposerBtn">New job</button>
+		</div>
+	  </header>
+
+	  <main class="layout">
+		<aside class="panel composer-panel">
+		  <div class="panel-header">
+			<span class="kicker">Generator</span>
+			<h2>Create a new short batch</h2>
+		  </div>
+
+		  <form id="jobForm" class="job-form">
+			<label class="field-label" for="videoUrl">Source video URL</label>
+			<input id="videoUrl" name="videoUrl" type="url" placeholder="https://... or direct mp4" required="required" />
+
+			<div class="field-row">
+			  <div>
+				<label class="field-label" for="clipCount">Target clips</label>
+				<input id="clipCount" name="clipCount" type="number" min="1" max="20" value="10" />
+			  </div>
+			  <div>
+				<label class="field-label" for="provider">AI provider</label>
+				<select id="provider" name="provider">
+				  <option value="omniroute">OmniRoute</option>
+				  <option value="ollama">Ollama</option>
+				</select>
+			  </div>
+			</div>
+
+			<div>
+			  <label class="field-label" for="stylePrompt">B-Roll / Style Prompt (Optional)</label>
+			  <textarea id="stylePrompt" name="stylePrompt" placeholder="e.g. Cinematic, fast-paced, techy, cyberpunk vibe" rows="2" style="width:100%; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); color:var(--text); border-radius:14px; padding:0.8rem; outline:none; resize:none;"></textarea>
+			</div>
+
+			<button type="submit" class="primary-btn wide-btn">
+			  <span>Generate Clips</span>
+			  <span class="arrow">&#8594;</span>
+			</button>
+			<div id="generatorStatus" class="status-box" style="margin-top:0.75rem;"></div>
+		  </form>
+
+		  <div class="quick-tips">
+			<div class="tip-item">
+			  <span class="dot pink"></span>
+			  <span>Best with direct MP4 or reliable source links.</span>
+			</div>
+			<div class="tip-item">
+			  <span class="dot cyan"></span>
+			  <span>AI picks strong moments, captions, hooks, and metadata.</span>
+			</div>
+			<div class="tip-item">
+			  <span class="dot amber"></span>
+			  <span>Queued clips can be reviewed before YouTube publish.</span>
+			</div>
+		  </div>
+		</aside>
+
+		<section class="main-stack">
+		  <div class="stats-grid">
+			<article class="stat-card cyan">
+			  <span class="stat-label">jobs</span>
+			  <strong id="jobCount">0</strong>
+			</article>
+			<article class="stat-card pink">
+			  <span class="stat-label">clips</span>
+			  <strong id="statsClipCount">0</strong>
+			</article>
+			<article class="stat-card amber">
+			  <span class="stat-label">ready for YT</span>
+			  <strong id="readyCount">0</strong>
+			</article>
+		  </div>
+
+		  <section class="panel jobs-panel">
+			<div class="panel-header compact-header">
+			  <span class="kicker">queue</span>
+			  <h2>Recent jobs</h2>
+			</div>
+			<div id="jobsList" class="jobs-list"></div>
+		  </section>
+		</section>
+	  </main>
+
+	  <section class="panel clips-panel">
+		<div class="panel-header compact-header">
+		  <span class="kicker">library</span>
+		  <h2>Generated clips</h2>
+		</div>
+		<div id="clipsGrid" class="clips-grid"></div>
+	  </section>
+	</div>
+
+	<template id="jobCardTemplate">
+	  <button class="job-card" type="button">
+		<div class="job-main">
+		  <div class="job-meta">
+			<span class="job-id">#</span>
+			<span class="job-status">status</span>
+		  </div>
+		  <div class="job-url">url</div>
+		</div>
+		<div class="job-time">time</div>
+	  </button>
+	</template>
+
+	<!-- TikTok Studio Modal -->
+	<div id="clipStudioModal" class="studio-modal-backdrop" style="display: none;">
+	  <div class="studio-modal-container">
+		<div class="studio-modal-header">
+		  <div class="studio-title-wrap">
+			<span class="kicker">TikTok Studio &amp; AI Director</span>
+			<h2 id="studioModalTitle">Clip Editor</h2>
+		  </div>
+		  <button class="ghost-btn close-studio-btn" id="closeStudioBtn">✕</button>
+		</div>
+		<div class="studio-modal-body">
+		  <div class="studio-preview-col">
+			<div class="studio-video-frame">
+			  <video id="studioVideoPlayer" controls="controls" autoplay="autoplay" loop="loop" playsinline="playsinline"></video>
+			</div>
+			<div class="studio-clip-stats">
+			  <span id="studioTimeBadge" class="badge cyan">0.0s → 0.0s</span>
+			  <span id="studioScoreBadge" class="badge pink">AI Selected</span>
+			</div>
+		  </div>
+		  <div class="studio-tabs-col">
+			<div class="studio-tabs-nav">
+			  <button class="tab-nav-btn active" data-tab="ai">🤖 OmniRoute AI Director</button>
+			  <button class="tab-nav-btn" data-tab="database">💾 Database</button>
+			  <button class="tab-nav-btn" data-tab="advanced">⚙️ Advanced</button>
+			  <button class="tab-nav-btn" data-tab="manual">✂️ Manual Precision Edit</button>
+			</div>
+			<div class="studio-tab-content" id="tabContentAi">
+			  <div class="ai-chat-box" id="studioAiChatBox">
+				<div class="ai-chat-msg system">👋 Hello! I'm your OmniRoute AI Director. Ask me to rewrite the hook, make it punchier, summarize, or adjust the edit in natural language!</div>
+			  </div>
+			  <div class="ai-quick-prompts">
+				<button class="quick-prompt-btn" data-prompt="Make the hook much punchier and exciting">🔥 Punchy Hook</button>
+				<button class="quick-prompt-btn" data-prompt="Shorten the clip by removing dead air">⚡ Trim Dead Air</button>
+				<button class="quick-prompt-btn" data-prompt="Generate viral catchy caption and hashtags">✨ Viral Caption</button>
+			  </div>
+			  <div class="ai-chat-input-row">
+				<input type="text" id="studioAiInput" placeholder="Ask AI to re-edit or refine clip..." />
+				<button class="primary-btn" id="studioAiSendBtn">Send</button>
+			  </div>
+			</div>
+			<div class="studio-tab-content" id="tabContentDatabase" style="display: none;">
+			  <div class="manual-form-group">
+				<label>SQLite Database Storage</label>
+				<p style="color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem;">Active database: <code>storage/app.db</code></p>
+				<div class="manual-form-row">
+				  <div class="manual-form-group">
+					<label>Clip Record ID</label>
+					<input type="text" id="dbClipId" class="studio-input" readonly="readonly" />
+				  </div>
+				  <div class="manual-form-group">
+					<label>Parent Job ID</label>
+					<input type="text" id="dbJobId" class="studio-input" readonly="readonly" />
+				  </div>
+				</div>
+				<div class="manual-form-group" style="margin-top: 1rem;">
+				  <label>Database State &amp; Virality Score</label>
+				  <input type="text" id="dbStateInfo" class="studio-input" readonly="readonly" />
+				</div>
+				<button class="primary-btn wide-btn" id="dbRefreshBtn" style="margin-top: 1rem;">🔄 Verify DB Sync &amp; Reload</button>
+			  </div>
+			</div>
+			<div class="studio-tab-content" id="tabContentAdvanced" style="display: none;">
+			  <div class="manual-form-group">
+				<label>Advanced Rendering &amp; AI Pipeline Options</label>
+				<div class="manual-form-row" style="margin-top: 1rem;">
+				  <div class="manual-form-group">
+					<label>FFmpeg Preset</label>
+					<input type="text" class="studio-input" value="veryfast" readonly="readonly" />
+				  </div>
+				  <div class="manual-form-group">
+					<label>Video CRF</label>
+					<input type="text" class="studio-input" value="23" readonly="readonly" />
+				  </div>
+				</div>
+				<div class="manual-form-group" style="margin-top: 1rem;">
+				  <label>AI Transcription &amp; LLM Provider</label>
+				  <input type="text" class="studio-input" value="Whisper Tiny + OmniRoute / Instructor" readonly="readonly" />
+				</div>
+				<button class="primary-btn wide-btn" id="advRerenderBtn" style="margin-top: 1rem;">⚡ Force Re-render with SFX &amp; Title</button>
+			  </div>
+			</div>
+			<div class="studio-tab-content" id="tabContentManual" style="display: none; flex-direction: column; gap: 20px;">
+			  <div class="manual-form-group">
+				<label>Clip Title / Caption</label>
+				<input type="text" id="studioEditTitle" class="studio-input" />
+			  </div>
+
+			  <div class="manual-form-group">
+				<label>Interactive Timeline Trim &amp; Scrub</label>
+				<div class="studio-timeline-editor-box" id="studioTimelineEditorBox">
+				  <div class="timeline-track-bar" id="studioTimelineTrackBar">
+					<div class="timeline-selection-range" id="studioTimelineSelectionRange"></div>
+					<div class="timeline-playhead" id="studioTimelinePlayhead"></div>
+				  </div>
+				  <div class="timeline-time-labels">
+					<span id="studioTimeStartLabel">0.0s</span>
+					<span id="studioTimeDurationLabel">Duration: 0.0s</span>
+					<span id="studioTimeEndLabel">60.0s</span>
+				  </div>
+				</div>
+			  </div>
+
+			  <div class="manual-form-row">
+				<div class="manual-form-group">
+				  <label>Start Time (s)</label>
+				  <input type="number" step="0.1" id="studioEditStart" class="studio-input" />
+				</div>
+				<div class="manual-form-group">
+				  <label>End Time (s)</label>
+				  <input type="number" step="0.1" id="studioEditEnd" class="studio-input" />
+				</div>
+			  </div>
+			  <button class="primary-btn wide-btn" id="studioSaveManualBtn">Save &amp; Apply Edits</button>
+			  <div class="manual-actions-row" style="margin-top: 16px;">
+				<button class="ghost-btn" id="studioUploadBtn">Upload to YouTube</button>
+				<a id="studioOpenRawBtn" class="ghost-btn link-btn" target="_blank" rel="noreferrer">Open Raw MP4</a>
+			  </div>
+			</div>
+		  </div>
+		</div>
+	  </div>
+	</div>
+
+	<script src="/static/app.js"></script>
+  </body>
+</html>
