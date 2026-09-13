@@ -34,4 +34,4 @@ torchaudio>=2.0.0
 aiosqlite>=0.19.0
 
 # Type hints
-typing-extensions>=4.8.0
+typing-extensions>=4.8.0ultralytics>=8.3.0
