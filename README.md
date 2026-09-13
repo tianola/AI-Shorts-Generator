@@ -1,159 +1,123 @@
-# AI Shorts Generator
+<div align="center">
+  <h1>🎬 AI Shorts Generator</h1>
+  <p><b>A local-first AI pipeline that turns long-form videos into viral vertical shorts.</b></p>
+  
+  [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
+  [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-00a393.svg)](https://fastapi.tiangolo.com/)
+  [![OpenAI](https://img.shields.io/badge/OmniRoute-Enabled-black.svg)]()
+  [![Yolov8](https://img.shields.io/badge/YOLOv8-Tracking-yellow.svg)]()
+</div>
 
-A local-first AI short-video pipeline for generating vertical shorts from long-form videos. It supports:
+<br/>
 
-- audio extraction and whisper transcription
-- clip selection and trimming
-- vertical conversion and subtitle burn-in
-- metadata generation
-- optional ElevenLabs TTS narration
-- thumbnail generation
-- job persistence to SQLite
+## ✨ Key Features
 
-## Architecture
+- 👤 **Dynamic Focus Tracking (YOLOv8):** Uses AI to track faces and objects. Intelligently performs split-screen camera changes ("one up, one down" panning) between multiple speakers.
+- 🎨 **Cinematic Motion Titles:** Generates clean, professional text overlays with soft drop-shadows, fading/sliding animations, and custom aesthetic accents without generic gray background boxes.
+- ✂️ **Smart AI Clip Selection:** Finds and extracts the most viral moments from long transcripts.
+- 🎙️ **Audio & Caption Sync:** Auto-transcribes using local **Whisper**, generating accurate word-level dynamic captions (ASS).
+- 🧹 **Clean Pipeline output:** Instead of littering your folder with 10 intermediate copies, it intelligently cleans up after itself and spits out one perfect `final_video.mp4` for you to use.
+- 🔊 **Auto SFX & Enhancements:** Adds transitions, sound effects, metadata generation, and custom YouTube/TikTok descriptions.
 
-- `backend/` — FastAPI app, worker, service layer, config, DB models
-- `storage/jobs/<job_id>/` — generated media, metadata, logs
-- `n8n_workflows/` — automation flows
-- `bridge/` — optional integration layer
+---
 
-## Requirements
+## 🏗️ Architecture
 
-Install these before running the pipeline locally:
+- **`backend/`** — Built with FastAPI. Contains the worker, API, config, service layers, and tracking algorithms.
+- **`storage/`** — SQLite databases (`app.db`) and user media (`storage/jobs/<job_id>`).
+- **`n8n_workflows/`** — Automations to trigger pipelines externally.
 
-- Python 3.11+
-- FFmpeg on PATH
-- OmniRoute OpenAI-compatible endpoint at `http://localhost:20128/v1` for all LLM prompts
-- Optional fallback: Ollama running locally on `http://host.docker.internal:11434`
-- Optional: ElevenLabs API key for TTS
+---
 
-## One-click local start
+## 🛠️ Requirements
 
-On Windows, from the repository root, run:
+Before flying, ensure you have:
+1. **Python 3.11+** installed
+2. **FFmpeg** configured on your `PATH`
+3. An **OmniRoute** or **OpenAI-compatible** API running for LLM prompts 
 
+---
+
+## 🚀 Quick Start
+
+### 1-Click Launch (Windows)
+
+From the root project directory, run:
 ```powershell
 ./start_ai_shorts.ps1
 ```
+*This script will auto-create your backend virtual env, install `pip` packages (including PyTorch, Ultralytics YOLO & Whisper), and start both the API & Worker.*
 
-This will:
+### Manual Terminal Setup
 
-- create the backend virtual environment if it is missing
-- install dependencies
-- start the API on `http://localhost:8001/docs`
-- start the worker in the background
-- write logs to `storage/logs/`
+1. **Initialize the Virtual Environment**
+   ```bash
+   cd backend
+   python -m venv .venv
+   . .venv\Scripts\activate
+   # Or on Mac/Linux: source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
 
-## Quick start
+2. **Configure Environment Variables**
+   ```bash
+   copy backend\.env.example backend\.env
+   ```
+   *Edit `.env` according to your specific setup (Example values):*
+   ```env
+   AI_PROVIDER=omniroute
+   OMNIROUTE_BASE_URL=http://localhost:20128/v1
+   OMNIROUTE_API_KEY=your_key_here
+   STORAGE_ROOT=/app/storage
+   ```
 
-1. Open a terminal in the project root.
-2. Create a virtual environment and install dependencies:
+3. **Start the API Server** (in Terminal 1)
+   ```powershell
+   cd backend
+   $env:PYTHONPATH='.'
+   python main.py
+   ```
 
-```bash
-cd backend
-python -m venv .venv
-. .venv\Scripts\activate
-pip install -r requirements.txt
-```
+4. **Start the AI Worker** (in Terminal 2)
+   ```powershell
+   cd backend
+   $env:PYTHONPATH='.'
+   python worker.py
+   ```
 
-3. Configure your environment:
+---
 
-```bash
-copy backend\.env.example backend\.env
-```
+## 📹 Generating a Short
 
-Or edit the project root `.env` directly if you want the values to be read by the app.
+You can either pass Jobs via the API/frontend, or test it programmatically. 
+Direct media (MP4) URLs usually prove more reliable than YouTube links (due to IP blocks).
 
-Example configuration values:
-
-```env
-AI_PROVIDER=omniroute
-OMNIROUTE_BASE_URL=http://localhost:20128/v1
-OMNIROUTE_API_KEY=your_omniroute_key_here
-OMNIROUTE_MODEL=auto/best-coding
-TTS_ENABLED=true
-ELEVENLABS_API_KEY=your_key_here
-ELEVENLABS_VOICE_ID=CwhRBWXzGAHq8TQ4Fs17
-WHISPER_MODEL_SIZE=small
-STORAGE_ROOT=/app/storage
-```
-
-If `AI_PROVIDER=ollama`, the app falls back to the local Ollama endpoint instead of OmniRoute.
-
-4. Start the API server:
-
-```bash
-cd backend
-$env:PYTHONPATH='.'
-python main.py
-```
-
-5. Start the worker:
-
-```bash
+```powershell
 cd backend
 $env:PYTHONPATH='.'
-python worker.py
+python .\scripts\smoke_run_job.py "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4"
 ```
 
-6. Create a job or use the smoke runner:
+## 📁 Output Artifacts
 
-```bash
-cd backend
-$env:PYTHONPATH='.'
-python .\scripts\smoke_run_job.py "https://example.com/sample.mp4"
-```
+Generated assets land directly inside: `storage/jobs/<job_id>/`
 
-## Real job examples
+A successfully processed job keeps the directory clean. You will typically find:
 
-This project works best with a direct media URL or a local file.
+- `source.mp4` (The raw video)
+- `audio.wav` & `words.json` (Extraction data)
+- **`clip_X/`**
+  - `metadata.json` (Social-ready descriptions)
+  - `thumbnail.jpg` (Custom title thumbnail)
+  - `storyboard.jpg`
+  - **`final_video.mp4` (The processed, ready-to-upload Short)**
+- `pipeline.log` (Internal event logs)
 
-### Direct MP4 file
+---
 
-```bash
-cd backend
-$env:PYTHONPATH='.'
-python -c "from database.session import SessionLocal, init_database; from database.models import Job; from worker import process_job; init_database(); db=SessionLocal(); job=Job(youtube_url='https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4', status='created'); db.add(job); db.commit(); db.refresh(job); print(job.id); db.close(); process_job(job.id)"
-```
+## 🩺 Troubleshooting / FAQ
 
-### YouTube URL
-
-YouTube downloads can fail with 403/geo/rate-limit issues depending on the environment and network. The app still supports YouTube, but direct media URLs are typically the most reliable local option.
-
-## Output location
-
-Generated artifacts land under:
-
-```text
-storage/jobs/<job_id>/
-```
-
-Typical output:
-
-- `source.mp4`
-- `audio.wav`
-- `segments.json`
-- `words.json`
-- `short_0.mp4`, `short_1.mp4`, ...
-- `final_short_0.mp4`
-- `voice_0.mp3` / `voice.mp3`
-- `metadata.json`
-- `thumbnail.jpg`
-- `pipeline.log`
-
-## TTS notes
-
-When `TTS_ENABLED=true` and a valid `ELEVENLABS_API_KEY` is configured, the worker generates a voice track for each clip and muxes it into the final video. If TTS fails, the job continues without stopping the rest of the pipeline.
-
-## Troubleshooting
-
-- No audio track found: the pipeline creates a silent WAV fallback automatically.
-- OmniRoute or Ollama unreachable: clip selection and metadata generation fall back to heuristics so the job can still finish.
-- YouTube 403: try a direct MP4/URL or a different source video.
-- Thumbnail generation failures: the pipeline warns and continues without a thumbnail.
-- Fonts missing: default Pillow/OS fonts are used automatically.
-
-## Production notes
-
-- Keep API keys in environment variables or secret storage.
-- Prefer direct media URLs or a hosted source in production when YouTube restrictions are a problem.
-- Keep the worker and API services running separately for cleaner operational behavior.
+- **Wrong/Stale Subtitles on re-run?:** Fixed in v1.1. Changing the source repository URL natively purges old cached artifacts automatically.
+- **Missing or Blank Video Screen:** Ffmpeg/Yolov8 bounding crop issues? Ensure Python's Path features correctly interpret your local drive letter.
+- **YouTube 403 / Geoblocked:** Depending on network environments, `yt-dlp` might fail. Just feed a direct MP4 file URL.
+- **No Fonts Found:** The pipeline falls back cleanly to OS-defaults (like `arial` or `liberation`), though injecting `Montserrat-ExtraBold` is advised for the best cinematic overlays.
