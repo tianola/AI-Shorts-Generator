@@ -12,6 +12,8 @@ const els = {
   videoUrl: document.getElementById('videoUrl'),
   clipCountInput: document.getElementById('clipCount'),
   provider: document.getElementById('provider'),
+  whisperModel: document.getElementById('whisperModel'),
+  hardwareInfo: document.getElementById('hardwareInfo'),
   status: document.getElementById('generatorStatus'),
   jobsList: document.getElementById('jobsList'),
   clipsGrid: document.getElementById('clipsGrid'),
@@ -19,8 +21,91 @@ const els = {
   statsClipCount: document.getElementById('statsClipCount'),
   readyCount: document.getElementById('readyCount'),
   refreshJobsBtn: document.getElementById('refreshJobsBtn'),
-  focusComposerBtn: document.getElementById('focusComposerBtn')
+  focusComposerBtn: document.getElementById('focusComposerBtn'),
+  sourceTabUrl: document.getElementById('sourceTabUrl'),
+  sourceTabUpload: document.getElementById('sourceTabUpload'),
+  sourceUrlPanel: document.getElementById('sourceUrlPanel'),
+  sourceUploadPanel: document.getElementById('sourceUploadPanel'),
+  videoFile: document.getElementById('videoFile'),
+  uploadDropZone: document.getElementById('uploadDropZone'),
+  uploadDropContent: document.getElementById('uploadDropContent'),
+  uploadFileInfo: document.getElementById('uploadFileInfo'),
+  uploadFileName: document.getElementById('uploadFileName'),
+  uploadFileSize: document.getElementById('uploadFileSize'),
+  uploadRemoveBtn: document.getElementById('uploadRemoveBtn')
 };
+
+let selectedUploadFile = null;
+let activeSourceMode = 'url'; // 'url' | 'upload'
+
+function setSourceMode(mode) {
+  activeSourceMode = mode;
+  const isUrl = mode === 'url';
+  els.sourceTabUrl?.classList.toggle('active', isUrl);
+  els.sourceTabUpload?.classList.toggle('active', !isUrl);
+  if (els.sourceUrlPanel) els.sourceUrlPanel.style.display = isUrl ? 'block' : 'none';
+  if (els.sourceUploadPanel) els.sourceUploadPanel.style.display = isUrl ? 'none' : 'block';
+}
+
+function formatFileSize(bytes) {
+  if (!bytes) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function setupSourceTabs() {
+  els.sourceTabUrl?.addEventListener('click', () => setSourceMode('url'));
+  els.sourceTabUpload?.addEventListener('click', () => setSourceMode('upload'));
+
+  // Click drop zone -> open file picker
+  els.uploadDropZone?.addEventListener('click', (e) => {
+    if (e.target.closest('.upload-remove-btn')) return;
+    els.videoFile?.click();
+  });
+
+  // Drag & drop
+  els.uploadDropZone?.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    els.uploadDropZone.classList.add('dragover');
+  });
+  els.uploadDropZone?.addEventListener('dragleave', () => {
+    els.uploadDropZone.classList.remove('dragover');
+  });
+  els.uploadDropZone?.addEventListener('drop', (e) => {
+    e.preventDefault();
+    els.uploadDropZone.classList.remove('dragover');
+    const files = e.dataTransfer?.files;
+    if (files && files.length) handleFileSelected(files[0]);
+  });
+
+  els.videoFile?.addEventListener('change', () => {
+    const file = els.videoFile.files?.[0];
+    if (file) handleFileSelected(file);
+  });
+
+  els.uploadRemoveBtn?.addEventListener('click', () => {
+    selectedUploadFile = null;
+    if (els.videoFile) els.videoFile.value = '';
+    if (els.uploadFileInfo) els.uploadFileInfo.style.display = 'none';
+    if (els.uploadDropContent) els.uploadDropContent.style.display = 'flex';
+  });
+}
+
+function handleFileSelected(file) {
+  const allowed = ['.mp4', '.webm', '.mov', '.m4v', '.mkv'];
+  const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+  if (!allowed.includes(ext)) {
+    setStatus(`Unsupported file type "${ext}". Please choose an MP4, WebM, MOV, M4V or MKV file.`, 'error');
+    return;
+  }
+  selectedUploadFile = file;
+  if (els.uploadFileName) els.uploadFileName.textContent = file.name;
+  if (els.uploadFileSize) els.uploadFileSize.textContent = formatFileSize(file.size);
+  if (els.uploadFileInfo) els.uploadFileInfo.style.display = 'flex';
+  if (els.uploadDropContent) els.uploadDropContent.style.display = 'none';
+  setStatus(`Selected: ${file.name} (${formatFileSize(file.size)})`, 'success');
+}
 
 function setStatus(message, tone = 'default') {
   if (!els.status) {
@@ -47,7 +132,7 @@ function setupWebSocket(jobId) {
     if (jobCard) {
       const progressBar = jobCard.querySelector('.progress-bar');
       if (progressBar) progressBar.style.width = `${progressData.percent}%`;
-      const stageText = jobCard.querySelector('.job-meta');
+      const stageText = jobCard.querySelector('.job-stage-text');
       if (stageText) stageText.textContent = progressData.stage;
     }
   };
@@ -60,9 +145,21 @@ function asMediaUrl(path) {
 
 function formatTimeLabel(dateString) {
   if (!dateString) return '';
-  const date = new Date(dateString);
+  
+  // Ensure the browser treats the naive backend datetime as UTC
+  let parseString = dateString;
+  if (!parseString.endsWith('Z') && !parseString.includes('+')) {
+    parseString += 'Z';
+  }
+  
+  const date = new Date(parseString);
   if (isNaN(date.getTime())) return String(dateString);
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' ' + date.toLocaleDateString();
+  
+  // Format for Greece/Europe: HH:mm DD/MM/YYYY
+  const timeStr = date.toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit', hour12: false });
+  const dateStr = date.toLocaleDateString('el-GR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  
+  return `${timeStr}  ${dateStr}`;
 }
 window.formatTimeLabel = formatTimeLabel;
 
@@ -81,6 +178,36 @@ async function fetchJson(url, options = {}) {
 }
 window.fetchJson = fetchJson;
 
+async function loadSystemInfo() {
+  try {
+    const data = await fetchJson(`${API_PREFIX}/system/info`);
+    
+    // Populate hardware info
+    if (els.hardwareInfo) {
+      els.hardwareInfo.innerHTML = `
+        <strong>PC Specs:</strong> ${data.hardware.cpu} | ${data.hardware.ram} RAM | GPU: ${data.hardware.gpu} (${data.hardware.vram})
+      `;
+    }
+    
+    // Populate models dropdown
+    if (els.whisperModel) {
+      els.whisperModel.innerHTML = '';
+      data.models.forEach(m => {
+        const option = document.createElement('option');
+        option.value = m.id;
+        option.textContent = `${m.name} - ${m.est_time} ${m.is_recommended ? '⭐ (Recommended)' : ''}`;
+        if (m.is_recommended) option.selected = true;
+        els.whisperModel.appendChild(option);
+      });
+    }
+  } catch (error) {
+    console.error('Failed to load system info:', error);
+    if (els.whisperModel) {
+      els.whisperModel.innerHTML = '<option value="tiny">Tiny (Fallback)</option>';
+    }
+  }
+}
+
 async function listJobs() {
   try {
 	const data = await fetchJson(`${API_PREFIX}/jobs?limit=8&offset=0`);
@@ -96,6 +223,13 @@ async function listJobs() {
 	if (state.activeJobId) {
 	  await loadJob(state.activeJobId);
 	}
+	
+	// Resume polling for any active jobs
+	state.jobs.forEach(job => {
+	  if (job.status === 'created' || job.status === 'processing') {
+	    pollJob(job.id);
+	  }
+	});
   } catch (error) {
 	setStatus(`Could not load jobs: ${error.message}`, 'error');
   }
@@ -152,7 +286,10 @@ function renderJobs() {
 		node.querySelector('.job-main').appendChild(progressContainer);
 
 		const stageText = document.createElement('div');
-		stageText.className = 'job-meta';
+		stageText.className = 'job-stage-text';
+		stageText.style.fontSize = '0.75rem';
+		stageText.style.color = 'var(--muted)';
+		stageText.style.marginTop = '4px';
 		stageText.textContent = job.current_stage || 'Starting...';
 		node.querySelector('.job-main').appendChild(stageText);
 	}
@@ -160,6 +297,29 @@ function renderJobs() {
 	node.querySelector('.job-id').textContent = `#${job.id}`;
 	node.querySelector('.job-url').textContent = job.youtube_url;
 	node.querySelector('.job-time').textContent = formatTimeLabel(job.created_at);
+
+	// Add direct folder open button for jobs
+	const folderBtn = document.createElement('button');
+	folderBtn.className = 'job-folder-link';
+	folderBtn.type = 'button';
+	folderBtn.title = 'Open job folder in Explorer';
+	folderBtn.innerHTML = '📁';
+	folderBtn.style.background = 'transparent';
+	folderBtn.style.border = 'none';
+	folderBtn.style.cursor = 'pointer';
+	folderBtn.style.fontSize = '0.9rem';
+	folderBtn.style.marginLeft = '8px';
+	folderBtn.style.padding = '0';
+	folderBtn.onclick = async (e) => {
+	  e.stopPropagation();
+	  try {
+		const res = await fetchJson(`${API_PREFIX}/jobs/${job.id}/open-folder`, { method: 'POST' });
+		setStatus(`Opened folder for Job #${job.id}: ${res.path}`, 'success');
+	  } catch (err) {
+		setStatus(`Failed to open folder: ${err.message}`, 'error');
+	  }
+	};
+	node.querySelector('.job-meta').appendChild(folderBtn);
 
 	node.addEventListener('click', () => {
 	  state.activeJobId = job.id;
@@ -303,9 +463,40 @@ function renderClips(clips) {
 
 async function createJob(event) {
   event.preventDefault();
-  const videoUrl = els.videoUrl.value.trim();
   const stylePrompt = document.getElementById('stylePrompt').value.trim();
+  const whisperModel = els.whisperModel ? els.whisperModel.value : 'tiny';
 
+  // --- Upload mode: send the file ---
+  if (activeSourceMode === 'upload') {
+    if (!selectedUploadFile) {
+      setStatus('Please choose a video file to upload.', 'error');
+      return;
+    }
+    setStatus(`Uploading ${selectedUploadFile.name}...`);
+    try {
+      const formData = new FormData();
+      formData.append('file', selectedUploadFile);
+      if (stylePrompt) formData.append('style_prompt', stylePrompt);
+      formData.append('whisper_model', whisperModel);
+
+      const response = await fetch(`${API_PREFIX}/jobs/upload`, { method: 'POST', body: formData });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || 'Failed to create job from upload');
+      }
+
+      setStatus(`Job #${data.job_id} created from upload. Waiting for clip generation...`);
+      state.activeJobId = data.job_id;
+      await listJobs();
+      pollJob(data.job_id);
+    } catch (error) {
+      setStatus(`Upload failed: ${error.message}`, 'error');
+    }
+    return;
+  }
+
+  // --- URL mode: existing behavior ---
+  const videoUrl = els.videoUrl.value.trim();
   if (!videoUrl) {
 	setStatus('Please enter a video URL or direct MP4 link.', 'error');
 	return;
@@ -313,7 +504,7 @@ async function createJob(event) {
 
   setStatus('Creating a new generated short batch...');
   try {
-	const params = new URLSearchParams({ youtube_url: videoUrl });
+	const params = new URLSearchParams({ youtube_url: videoUrl, whisper_model: whisperModel });
 	if (stylePrompt) params.append('style_prompt', stylePrompt);
 	const response = await fetch(`${API_PREFIX}/jobs?${params.toString()}`, { method: 'POST' });
 	const data = await response.json();
@@ -374,6 +565,7 @@ async function pollJob(jobId) {
 els.form.addEventListener('submit', createJob);
 els.refreshJobsBtn.addEventListener('click', listJobs);
 els.focusComposerBtn.addEventListener('click', () => document.getElementById('videoUrl').focus());
+setupSourceTabs();
 
 let currentStudioClip = null;
 
@@ -617,4 +809,5 @@ function openClipStudio(clip) {
 }
 
 setupStudioModal();
+loadSystemInfo();
 listJobs();

@@ -30,6 +30,41 @@ from services.audio_polish import polish_audio
 from services.broll import add_broll_overlay
 from services.sfx import add_automatic_sfx
 
+def _url_fingerprint(url: str) -> str:
+    """Return a short stable hash of a source URL for resume verification."""
+    import hashlib
+    return hashlib.sha256((url or "").strip().encode("utf-8")).hexdigest()[:16]
+
+def _clear_derived_artifacts(job_dir, job_id):
+    """Remove per-job files that derive from the source video, so a re-downloaded
+    source is never paired with stale audio/transcript/timing or old clip cuts
+    (the "wrong subtitles from an old video" bug)."""
+    import shutil
+    stale_files = [
+        "audio.wav", "words.json", "segments.json", "transcript.txt",
+        "short.mp4", "vertical.mp4", "final_short.mp4", "captions.ass",
+    ]
+    for name in stale_files:
+        p = os.path.join(str(job_dir), name)
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+                job_info(job_id, f"Removed stale derived file: {p}")
+            except Exception as e:
+                job_warning(job_id, f"Could not remove {p}: {e}")
+
+    # Old clip cuts/captions were made from a previous source — drop them too,
+    # otherwise the per-clip "already exists" skips would re-render stale content.
+    for entry in os.listdir(str(job_dir)):
+        if entry.startswith("clip_"):
+            clip_dir = os.path.join(str(job_dir), entry)
+            if os.path.isdir(clip_dir):
+                try:
+                    shutil.rmtree(clip_dir)
+                    job_info(job_id, f"Removed stale clip dir: {clip_dir}")
+                except Exception as e:
+                    job_warning(job_id, f"Could not remove {clip_dir}: {e}")
+
 def cut_clip(
     source_video: str,
     start: float,
@@ -53,11 +88,12 @@ def cut_clip(
     cmd = [
         "ffmpeg",
         "-y",
-        "-fps_mode", "cfr",
         "-ss", str(start),
         "-i", source_video,
         "-t", str(duration),
         "-c:v", "libx264",
+        "-g", "60",
+        "-fps_mode", "cfr",
         "-preset", settings.FFMPEG_PRESET,
         "-crf", str(settings.FFMPEG_CRF),
         "-c:a", "aac",
@@ -177,14 +213,33 @@ async def process_job_async(job_id: int):
         job_info(job_id, "Step 1/8: Downloading video...")
         update_progress("Downloading video", 10)
         video_path = os.path.join(str(job_dir), "source.mp4")
+        fp_path = os.path.join(str(job_dir), "source.urlhash")
 
+        # Resume a cached source ONLY when the URL fingerprint matches.
+        # Otherwise the worker would keep re-rendering the previous job's
+        # video (e.g. the "cat" source) no matter what URL the user entered.
+        cached_hash = ""
+        if os.path.exists(fp_path):
+            try:
+                with open(fp_path, "r", encoding="utf-8") as f:
+                    cached_hash = f.read().strip()
+            except Exception:
+                cached_hash = ""
 
-        if not os.path.exists(video_path):
+        if os.path.exists(video_path) and cached_hash == _url_fingerprint(job.youtube_url):
+            job_info(job_id, f"Reusing cached source for same URL: {video_path}")
+        else:
+            if os.path.exists(video_path):
+                job_info(job_id, "URL changed or unknown — re-downloading source")
+                os.remove(video_path)
+            # Derived artifacts (audio/transcript/timing + old clip cuts) were made
+            # from a previous source — drop them so the re-run renders fully fresh.
+            _clear_derived_artifacts(job_dir, job_id)
             video_path = download_youtube(job.youtube_url, job_id)
             job_info(job_id, f"Downloaded: {video_path}")
-        else:
-            job_info(job_id, f"Video already exists: {video_path}")
 
+        with open(fp_path, "w", encoding="utf-8") as f:
+            f.write(_url_fingerprint(job.youtube_url))
         # =====================
         # 2. EXTRACT AUDIO
         # =====================
@@ -209,8 +264,8 @@ async def process_job_async(job_id: int):
         words_file = os.path.join(str(job_dir), "words.json")
 
         if not os.path.exists(segments_file) or not os.path.exists(words_file):
-            # transcribe_audio_file is synchronous (faster-whisper) — call directly
-            transcribe_audio_file(audio_path, str(job_dir))
+            # transcribe_audio_file is synchronous — call directly
+            transcribe_audio_file(audio_path, str(job_dir), job.whisper_model)
             job_info(job_id, f"Transcript created: {segments_file}, {words_file}")
         else:
             job_info(job_id, f"Transcript already exists")
@@ -233,6 +288,7 @@ async def process_job_async(job_id: int):
         # =====================
         # 5. PROCESS EACH CLIP
         # =====================
+        clip_errors = []
         for index, clip in enumerate(clips):
             clip_start = clip["start"]
             clip_end = clip["end"]
@@ -306,7 +362,7 @@ async def process_job_async(job_id: int):
                         title_text = clip.get("title") or "Viral Moment"
                         if job.style_prompt:
                             title_text = f"{title_text} ({job.style_prompt})"
-                        add_broll_overlay(final_path, broll_path, title_text)
+                        add_broll_overlay(final_path, broll_path, title=title_text)
                         final_path = broll_path
                         job_info(job_id, f"B-roll overlay added: {broll_path}")
                     except Exception as e:
@@ -323,6 +379,14 @@ async def process_job_async(job_id: int):
                     clip.get("hook", "")
                 )
 
+                # Generate Platform-Specific Copy (TikTok, Instagram Reels, YouTube Shorts)
+                from services.copy_generator import generate_platform_copies
+                platform_copy = await generate_platform_copies(
+                    clip_transcript,
+                    metadata.get("title") or clip.get("title", "Viral Moment")
+                )
+                metadata["platform_copy"] = platform_copy
+
                 # Save metadata
                 metadata_path = os.path.join(str(clip_dir), "metadata.json")
                 with open(metadata_path, "w", encoding="utf-8") as f:
@@ -330,61 +394,22 @@ async def process_job_async(job_id: int):
 
                 job_info(job_id, f"Metadata generated: {metadata_path}")
 
-                # Optional: Generate TTS for clip hook/title using ElevenLabs
-                try:
-                    from services.tts_elevenlabs import synthesize_to_file
-                    from services.render import mux_tts
-                    if settings.TTS_ENABLED:
-                        tts_text = clip.get("hook") or metadata.get("title") or " ".join(clip_transcript.split()[:30])
-                        tts_file = os.path.join(str(clip_dir), "voice.mp3")
-                        tts_result = synthesize_to_file(tts_text, tts_file)
-                        if tts_result:
-                            job_info(job_id, f"TTS generated: {tts_result}")
-                            try:
-                                polished_tts = os.path.join(str(clip_dir), "voice_polished.mp3")
-                                if not os.path.exists(polished_tts):
-                                    polish_audio(tts_result, polished_tts)
-                                tts_result = polished_tts
-                            except Exception as e:
-                                job_warning(job_id, f"TTS audio polish failed: {str(e)}")
-
-                            # Save relative path in metadata for downstream upload/consumption
-                            try:
-                                relative_tts = os.path.relpath(tts_result, settings.STORAGE_ROOT)
-                            except Exception:
-                                relative_tts = tts_result
-                            metadata["tts_path"] = relative_tts
-                            # Persist metadata with tts_path
-                            with open(metadata_path, "w", encoding="utf-8") as f:
-                                json.dump(metadata, f, ensure_ascii=False, indent=2)
-
-                            # Merge TTS into final video (replace audio track)
-                            try:
-                                final_with_tts = os.path.join(str(clip_dir), "final_with_tts.mp4")
-                                mux_result = mux_tts(final_path, tts_result, final_with_tts)
-                                if mux_result:
-                                    job_info(job_id, f"Final video muxed with TTS: {mux_result}")
-                                    final_path = mux_result
-                            except Exception as e:
-                                job_warning(job_id, f"TTS mux failed: {str(e)}")
-
-                        else:
-                            job_info(job_id, "TTS generation skipped or failed")
-                except Exception as e:
-                    job_warning(job_id, f"TTS generation error: {str(e)}")
-
                 # Add top TikTok title overlay ONCE at the end of clip processing
                 final_title = metadata.get("title") or clip.get("title") or "Viral Moment"
                 title_overlay_path = os.path.join(str(clip_dir), "final_with_title.mp4")
                 try:
-                    from services.render import add_title_overlay
-                    add_title_overlay(final_path, final_title, title_overlay_path)
+                    # New: professional motion-graphic title (renders a clean PNG,
+                    # no grey box). Falls back to the old drawtext title on failure.
+                    from services.motion_title import add_motion_title
+                    try:
+                        add_motion_title(final_path, final_title, title_overlay_path)
+                    except Exception:
+                        from services.render import add_title_overlay
+                        add_title_overlay(final_path, final_title, title_overlay_path)
                     final_path = title_overlay_path
                     job_info(job_id, f"Title overlay added: {title_overlay_path}")
                 except Exception as e:
                     job_warning(job_id, f"Title overlay failed: {str(e)}")
-
-                # =====================
                 # 5g. ADD AUTOMATIC SFX
                 # =====================
                 sfx_path = os.path.join(str(clip_dir), "final_with_sfx.mp4")
@@ -403,9 +428,9 @@ async def process_job_async(job_id: int):
                     job_warning(job_id, f"Automatic SFX failed: {str(e)}")
 
                 # =====================
-                # 5h. GENERATE THUMBNAIL
+                # 5h. GENERATE THUMBNAIL & STORYBOARD
                 # =====================
-                job_info(job_id, "Generating thumbnail...")
+                job_info(job_id, "Generating thumbnail & storyboard...")
                 thumbnail_path = os.path.join(str(clip_dir), "thumbnail.jpg")
                 thumbnail_result = generate_thumbnail(
                     final_path,
@@ -413,10 +438,27 @@ async def process_job_async(job_id: int):
                     final_title
                 )
 
-                if thumbnail_result:
-                    job_info(job_id, f"Thumbnail generated: {thumbnail_path}")
-                else:
-                    job_warning(job_id, "Thumbnail generation failed (continuing without thumbnail)")
+                try:
+                    from services.storyboard import generate_storyboard
+                    generate_storyboard(final_path, str(clip_dir))
+                except Exception as e:
+                    job_warning(job_id, f"Storyboard generation failed: {str(e)}")
+
+
+                                # CLEANUP intermediary files
+                final_video_path = os.path.join(str(clip_dir), "final_video.mp4")
+                if os.path.exists(final_path):
+                    import shutil
+                    shutil.move(final_path, final_video_path)
+                    final_path = final_video_path
+                
+                for f in ["short.mp4", "vertical.mp4", "captions.ass", "final_short.mp4", "final_with_title.mp4", "final_with_sfx.mp4", "final_with_tts.mp4"]:
+                    fp = os.path.join(str(clip_dir), f)
+                    if os.path.exists(fp):
+                        try:
+                            os.remove(fp)
+                        except:
+                            pass
 
                 # =====================
                 # 5h. SAVE CLIP TO DB
@@ -431,11 +473,16 @@ async def process_job_async(job_id: int):
                     end=clip_end,
                     title=final_title,
                     hook=clip.get("hook"),
-                    score=clip.get("score"),
+                    score=clip.get("score") or clip.get("virality_score"),
+                    hook_score=clip.get("hook_score"),
+                    coherence_score=clip.get("coherence_score"),
+                    connection_score=clip.get("connection_score"),
+                    trend_score=clip.get("trend_score"),
                     file_path=relative_final_path,
                     thumbnail_path=relative_thumbnail_path,
-                    description=metadata["description"],
-                    hashtags=metadata["hashtags"],
+                    description=metadata.get("description", ""),
+                    hashtags=metadata.get("hashtags", ["#Shorts"]),
+                    platform_metadata=metadata.get("platform_copy", {}),
                     uploaded=False,
                     upload_retry_count=0
                 )
@@ -448,17 +495,33 @@ async def process_job_async(job_id: int):
                 job_info(job_id, f"Clip {index} saved to DB with ID {clip_id}")
 
             except Exception as e:
-                job_warning(job_id, f"Clip {index} failed: {str(e)}")
+                err_msg = str(e)
+                job_warning(job_id, f"Clip {index} failed: {err_msg}")
+                clip_errors.append({"index": index, "start": clip_start, "end": clip_end, "error": err_msg})
                 continue
         # =====================
         # 6. COMPLETE JOB
         # =====================
-        job.status = "completed"
-        update_progress("Completed", 100)
-        job.updated_at = datetime.utcnow()
-        db.commit()
-
-        job_info(job_id, f"Job {job_id} completed successfully")
+        if clip_errors and len(clip_errors) >= len(clips):
+            # Every clip failed — mark the job failed so the UI/n8n surfaces it
+            job.status = "failed"
+            job.error_message = f"All {len(clips)} clips failed. First error: {clip_errors[0]['error']}"
+            job.updated_at = datetime.utcnow()
+            db.commit()
+            job_error(job_id, job.error_message)
+        elif clip_errors:
+            job.status = "completed"
+            job.error_message = f"{len(clip_errors)}/{len(clips)} clips failed: {', '.join(c['error'] for c in clip_errors[:3])}"
+            update_progress("Completed", 100)
+            job.updated_at = datetime.utcnow()
+            db.commit()
+            job_info(job_id, f"Job {job_id} completed with {len(clip_errors)} clip failure(s)")
+        else:
+            job.status = "completed"
+            update_progress("Completed", 100)
+            job.updated_at = datetime.utcnow()
+            db.commit()
+            job_info(job_id, f"Job {job_id} completed successfully")
 
     except Exception as e:
         # Mark job as failed

@@ -55,11 +55,20 @@ def pick_sfx_for_clip(title: str, transcript: str, style_prompt: str = "") -> li
 
 def _find_sfx_file(sfx_name: str) -> str | None:
 	"""Locate SFX file in the assets/sfx directory."""
-	# Look in project storage/assets/sfx first
-	for base in [settings.STORAGE_ROOT, "."]:
+	# Look in project storage/assets/sfx first, then repo-root assets/sfx, then CWD
+	roots = [
+		settings.STORAGE_ROOT,
+		os.path.dirname(settings.STORAGE_ROOT),
+		os.getcwd(),
+	]
+	seen = set()
+	for base in roots:
 		sfx_dir = os.path.join(base, "assets", "sfx")
 		for ext in [".wav", ".mp3", ".ogg"]:
 			candidate = os.path.join(sfx_dir, f"{sfx_name}{ext}")
+			if candidate in seen:
+				continue
+			seen.add(candidate)
 			if os.path.exists(candidate):
 				return candidate
 	return None
@@ -86,7 +95,8 @@ def mix_sfx_into_video(
 			sfx_files.append(sfx_path)
 
 	if not sfx_files:
-		# No SFX found, just copy
+		# No SFX found — log that this is a silent no-op so it's not mistaken for a real effect
+		print(f"SFX skipped: no asset files found for {sfx_list} (looked in storage/assets/sfx, repo assets/sfx)")
 		import shutil
 		shutil.copy2(video_path, output_path)
 		return output_path

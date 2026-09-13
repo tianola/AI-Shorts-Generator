@@ -24,13 +24,13 @@ class CaptionStyle:
     outline: int = 8
     shadow: int = 4
     alignment: int = 2  # Center
-    margin_v: int = 180  # Safer lower region for vertical shorts
-    margin_l: int = 40
-    margin_r: int = 40
+    margin_v: int = 440  # Safe zone offset from bottom (avoids TikTok/Shorts UI elements)
+    margin_l: int = 100  # Left safe zone padding
+    margin_r: int = 100  # Right safe zone padding
     multicolor: bool = True
     jump: bool = True
 
-# Default TikTok-style multicolor jump look
+# Default TikTok-style multicolor jump look with strict safe-zone alignment
 DEFAULT_STYLE = CaptionStyle(
     font_name="Montserrat ExtraBold",
     font_size=48,
@@ -44,8 +44,8 @@ DEFAULT_STYLE = CaptionStyle(
     shadow=2,
     alignment=2,
     margin_v=440,
-    margin_l=80,
-    margin_r=80,
+    margin_l=100,
+    margin_r=100,
     multicolor=True,
     jump=True,
 )
@@ -105,6 +105,7 @@ def create_caption_block(
 
     # Standard bottom-center alignment with border and shadow
     # NO \pos tag so ASS wraps lines within MarginL/MarginR boundaries
+    # Dynamic safe zone: adjust margin_v based on video height if needed
     text = r"{\an2\bord4\shad2\be1\blur0.2}"
 
     base_fs = style.font_size

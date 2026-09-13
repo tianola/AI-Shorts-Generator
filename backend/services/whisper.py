@@ -5,7 +5,7 @@ with local faster-whisper as a resilient fallback.
 import json
 import os
 import subprocess
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import httpx
 from loguru import logger
@@ -14,8 +14,8 @@ from faster_whisper import WhisperModel
 from config import settings
 
 # Global model instance (loaded once, reused across jobs)
-_model: WhisperModel = None
-_model_size: str = None
+_model: Optional[WhisperModel] = None
+_model_size: Optional[str] = None
 
 
 def _approximate_words_from_text(text: str, start: float, end: float) -> List[dict]:
@@ -39,10 +39,11 @@ def _approximate_words_from_text(text: str, start: float, end: float) -> List[di
     return words
 
 
-def get_whisper_model() -> WhisperModel:
+def get_whisper_model(model_size: Optional[str] = None) -> WhisperModel:
     global _model, _model_size
 
-    model_size = settings.WHISPER_MODEL_SIZE
+    if not model_size:
+        model_size = settings.WHISPER_MODEL_SIZE
 
     if _model is None or _model_size != model_size:
         logger.info(f"Loading faster-whisper model: {model_size}")
@@ -57,8 +58,8 @@ def get_whisper_model() -> WhisperModel:
     return _model
 
 
-def _transcribe_with_local_whisper(audio_path: str, output_dir: str) -> Tuple[str, str]:
-    model = get_whisper_model()
+def _transcribe_with_local_whisper(audio_path: str, output_dir: str, model_size: Optional[str] = None) -> Tuple[str, str]:
+    model = get_whisper_model(model_size)
     segments, _ = model.transcribe(
         audio_path,
         word_timestamps=True,
@@ -199,20 +200,97 @@ def _transcribe_with_groq(audio_path: str, output_dir: str) -> Tuple[str, str]:
     return segments_file, words_file
 
 
-def transcribe_audio_file(audio_path: str, output_dir: str) -> Tuple[str, str]:
-    try:
-        provider = settings.TRANSCRIPTION_PROVIDER.lower()
-        if provider == "groq" and settings.GROQ_API_KEY:
-            logger.info("Using Groq Whisper Turbo for transcription")
-            return _transcribe_with_groq(audio_path, output_dir)
+def _transcribe_with_openai_whisper(audio_path: str, output_dir: str, model_path: str) -> Tuple[str, str]:
+    import whisper
+    import torch
+    
+    logger.info(f"Loading openai-whisper model from {model_path}")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = whisper.load_model(model_path, device=device)
+    
+    logger.info("Starting transcription with openai-whisper...")
+    result = model.transcribe(audio_path, word_timestamps=True)
+    
+    segments_list = []
+    words_list = []
+    
+    for segment in result.get("segments", []):
+        if not isinstance(segment, dict):
+            continue
+        start = float(segment.get("start", 0.0))
+        end = float(segment.get("end", 0.0))
+        text = str(segment.get("text", "")).strip()
+        
+        segments_list.append({
+            "start": start,
+            "end": end,
+            "text": text
+        })
+        
+        if "words" in segment and isinstance(segment["words"], list):
+            for word in segment["words"]:
+                if not isinstance(word, dict):
+                    continue
+                words_list.append({
+                    "word": str(word.get("word", "")).strip(),
+                    "start": float(word.get("start", start)),
+                    "end": float(word.get("end", end))
+                })
+        else:
+            words_list.extend(_approximate_words_from_text(text, start, end))
+            
+    segments_file = os.path.join(output_dir, "segments.json")
+    with open(segments_file, "w", encoding="utf-8") as f:
+        json.dump(segments_list, f, ensure_ascii=False, indent=2)
 
-        logger.info("Using local faster-whisper transcription fallback")
-        return _transcribe_with_local_whisper(audio_path, output_dir)
+    words_file = os.path.join(output_dir, "words.json")
+    with open(words_file, "w", encoding="utf-8") as f:
+        json.dump(words_list, f, ensure_ascii=False, indent=2)
+
+    logger.info(
+        f"OpenAI-Whisper transcription saved to {segments_file} and {words_file} "
+        f"({len(segments_list)} segments, {len(words_list)} words)"
+    )
+    return segments_file, words_file
+
+
+def transcribe_audio_file(audio_path: str, output_dir: str, whisper_model: Optional[str] = None) -> Tuple[str, str]:
+    try:
+        # If user explicitly selected groq
+        if whisper_model == "groq":
+            if settings.GROQ_API_KEY:
+                logger.info("Using Groq Whisper Turbo for transcription")
+                return _transcribe_with_groq(audio_path, output_dir)
+            else:
+                logger.warning("Groq selected but no API key found. Falling back to local tiny.")
+                whisper_model = "tiny"
+                
+        # If user explicitly selected a local PyTorch model (.pt)
+        if whisper_model and whisper_model.startswith("local_pt_"):
+            model_name = whisper_model.replace("local_pt_", "")
+            pt_path = os.path.join(r"E:\01-AI-PROJECTS\whisper-models", f"{model_name}.pt")
+            if os.path.exists(pt_path):
+                logger.info(f"Using local PyTorch model: {pt_path}")
+                return _transcribe_with_openai_whisper(audio_path, output_dir, pt_path)
+            else:
+                logger.warning(f"Local PyTorch model not found: {pt_path}. Falling back to faster-whisper.")
+                whisper_model = model_name # Fallback to faster-whisper equivalent
+
+        # If no specific model selected, use default logic
+        if not whisper_model:
+            provider = settings.TRANSCRIPTION_PROVIDER.lower()
+            if provider == "groq" and settings.GROQ_API_KEY:
+                logger.info("Using Groq Whisper Turbo for transcription")
+                return _transcribe_with_groq(audio_path, output_dir)
+            whisper_model = settings.WHISPER_MODEL_SIZE
+
+        logger.info(f"Using local faster-whisper transcription ({whisper_model})")
+        return _transcribe_with_local_whisper(audio_path, output_dir, whisper_model)
 
     except Exception as e:
-        logger.warning(f"Primary transcription backend failed: {e}. Falling back to local faster-whisper.")
+        logger.warning(f"Primary transcription backend failed: {e}. Falling back to local faster-whisper (tiny).")
         try:
-            return _transcribe_with_local_whisper(audio_path, output_dir)
+            return _transcribe_with_local_whisper(audio_path, output_dir, "tiny")
         except Exception as local_error:
             logger.error(f"Transcription failed: {local_error}")
             raise Exception(f"Transcription failed: {local_error}")

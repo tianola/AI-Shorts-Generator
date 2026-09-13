@@ -2,10 +2,13 @@
 Configuration management using Pydantic BaseSettings.
 All configuration is driven by environment variables.
 """
-from pydantic import Field, validator
+import os
+from pathlib import Path
+import os
+from pathlib import Path
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
-import os
 
 class Settings(BaseSettings):
     # ====================
@@ -100,19 +103,19 @@ class Settings(BaseSettings):
         default="face_tracked",
         description="Vertical conversion mode: 'static' or 'face_tracked'"
     )
-    @validator('VERTICAL_MODE')
+    @field_validator('VERTICAL_MODE')
     def validate_vertical_mode(cls, v):
         if v not in ['static', 'face_tracked']:
             raise ValueError("VERTICAL_MODE must be 'static' or 'face_tracked'")
         return v
 
-    @validator('AI_PROVIDER')
+    @field_validator('AI_PROVIDER')
     def validate_ai_provider(cls, v):
         if v not in ['omniroute', 'ollama']:
             raise ValueError("AI_PROVIDER must be 'omniroute' or 'ollama'")
         return v.lower()
 
-    @validator('TRANSCRIPTION_PROVIDER')
+    @field_validator('TRANSCRIPTION_PROVIDER')
     def validate_transcription_provider(cls, v):
         if v not in ['groq', 'local']:
             raise ValueError("TRANSCRIPTION_PROVIDER must be 'groq' or 'local'")
@@ -180,16 +183,19 @@ class Settings(BaseSettings):
         description="Root path for all storage (videos, jobs, etc.)"
     )
 
-    @validator('STORAGE_ROOT', pre=True, always=True)
+    @field_validator('STORAGE_ROOT', mode='before')
+    @classmethod
     def resolve_storage_root(cls, v):
-        # On Windows or host outside Docker, map /app/storage to local project storage dir
-        if not os.path.exists('/.dockerenv') or os.name == 'nt':
-            if not v or v.startswith('/app') or v.startswith('\\app'):
-                project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-                local_storage = os.path.join(project_root, "storage")
-                os.makedirs(local_storage, exist_ok=True)
-                return local_storage
-        return v
+            # Always return an absolute path based on the repo root (parent of backend/),
+            # never depending on CWD. In Docker keep any explicit /app path.
+            backend_dir = Path(__file__).resolve().parent          # .../backend
+            project_root = backend_dir.parent                       # repo root
+            if os.path.exists('/.dockerenv') and (not v or str(v).startswith('/app')):
+                os.makedirs(v, exist_ok=True)
+                return v
+            local_storage = os.path.join(str(project_root), "storage")
+            os.makedirs(local_storage, exist_ok=True)
+            return local_storage
 
     # ====================
     # PATHS (computed)

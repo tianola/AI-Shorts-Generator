@@ -17,6 +17,7 @@ class Job(Base):
     status = Column(String, default="created")  # created|processing|completed|failed
     error_message = Column(Text, nullable=True)
     channel_id = Column(String, nullable=True)  # Future: multi-channel support
+    whisper_model = Column(String, nullable=True, default="tiny")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -52,6 +53,10 @@ class Clip(Base):
     title = Column(String, nullable=True)
     hook = Column(String, nullable=True)
     score = Column(Float, nullable=True)  # Virality score from AI selection
+    hook_score = Column(Float, nullable=True)
+    coherence_score = Column(Float, nullable=True)
+    connection_score = Column(Float, nullable=True)
+    trend_score = Column(Float, nullable=True)
 
     # File paths (relative to STORAGE_ROOT)
     file_path = Column(String, nullable=True)  # Path to final_short_{n}.mp4
@@ -60,6 +65,7 @@ class Clip(Base):
     # Metadata
     description = Column(Text, nullable=True)  # AI-generated description
     hashtags = Column(JSON, nullable=True)  # List of hashtags
+    platform_metadata = Column(JSON, nullable=True)  # Platform-specific copy (TikTok, IG, YT)
 
     # Upload status
     uploaded = Column(Boolean, default=False)

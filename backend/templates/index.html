@@ -34,8 +34,34 @@
 		  </div>
 
 		  <form id="jobForm" class="job-form">
-			<label class="field-label" for="videoUrl">Source video URL</label>
-			<input id="videoUrl" name="videoUrl" type="url" placeholder="https://... or direct mp4" required="required" />
+			<!-- Tab switcher: URL vs Upload -->
+			<div class="source-tabs">
+			  <button type="button" class="source-tab active" data-source="url" id="sourceTabUrl">🔗 URL</button>
+			  <button type="button" class="source-tab" data-source="upload" id="sourceTabUpload">📁 Upload MP4</button>
+			</div>
+
+			<!-- URL input -->
+			<div id="sourceUrlPanel">
+			  <label class="field-label" for="videoUrl">Source video URL</label>
+			  <input id="videoUrl" name="videoUrl" type="url" placeholder="https://... or direct mp4" />
+			</div>
+
+			<!-- File upload input -->
+			<div id="sourceUploadPanel" style="display:none;">
+			  <label class="field-label">Upload video from PC</label>
+			  <div class="upload-drop-zone" id="uploadDropZone">
+				<input type="file" id="videoFile" accept=".mp4,.webm,.mov,.m4v,.mkv" style="display:none;" />
+				<div class="upload-drop-content" id="uploadDropContent">
+				  <span class="upload-icon">&#128190;</span>
+				  <span>Drop an MP4 here or <strong>click to browse</strong></span>
+				</div>
+				<div class="upload-file-info" id="uploadFileInfo" style="display:none;">
+				  <span class="upload-file-name" id="uploadFileName"></span>
+				  <span class="upload-file-size" id="uploadFileSize"></span>
+				  <button type="button" class="ghost-btn upload-remove-btn" id="uploadRemoveBtn">✕</button>
+				</div>
+			  </div>
+			</div>
 
 			<div class="field-row">
 			  <div>
@@ -49,6 +75,14 @@
 				  <option value="ollama">Ollama</option>
 				</select>
 			  </div>
+			</div>
+
+			<div>
+			  <label class="field-label" for="whisperModel">Transcription Model</label>
+			  <select id="whisperModel" name="whisperModel">
+				<option value="tiny">Loading models...</option>
+			  </select>
+			  <div id="hardwareInfo" style="font-size: 0.75rem; color: var(--muted); margin-top: 6px;"></div>
 			</div>
 
 			<div>

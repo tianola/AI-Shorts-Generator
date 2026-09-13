@@ -60,6 +60,10 @@ async def select_best_clips(segments_file: str, num_clips: int) -> list:
                 "title": "string",
                 "hook": "string",
                 "virality_score": float,
+                "hook_score": float,
+                "coherence_score": float,
+                "connection_score": float,
+                "trend_score": float,
                 "story_type": "question_answer|reveal|challenge|emotion|lesson|reaction",
                 "layout": "centered_face|split_screen|screen_share_face",
                 "cta": "string"
@@ -74,7 +78,7 @@ async def select_best_clips(segments_file: str, num_clips: int) -> list:
         response_text = await call_llm_json(
             prompt=prompt,
             system="You are an expert YouTube Shorts editor. Select the most engaging clips.",
-            model=settings.OMNIROUTE_MODEL if settings.AI_PROVIDER == "omniroute" else settings.OLLAMA_MODEL,
+            model=settings.OLLAMA_MODEL if settings.AI_PROVIDER == "ollama" else settings.OMNIROUTE_MODEL,
             temperature=0.4,
         )
 
@@ -95,6 +99,10 @@ async def select_best_clips(segments_file: str, num_clips: int) -> list:
             clip.setdefault("story_type", story_plan.get("story_type", "reaction"))
             clip.setdefault("layout", story_plan.get("recommended_layout", "centered_face"))
             clip.setdefault("cta", story_plan.get("cta", "Follow for more."))
+            clip.setdefault("hook_score", clip.get("virality_score", 0.85))
+            clip.setdefault("coherence_score", clip.get("virality_score", 0.80))
+            clip.setdefault("connection_score", clip.get("virality_score", 0.82))
+            clip.setdefault("trend_score", clip.get("virality_score", 0.78))
             valid_clips.append(clip)
 
         # Sort by score
@@ -131,7 +139,7 @@ async def select_best_clips(segments_file: str, num_clips: int) -> list:
                 "start": float(start),
                 "end": float(end),
                 "title": title,
-                "hook": "Watch this moment!",
+                "hook": " ".join(text.split()[:8]).strip()[:60] or "",
                 "virality_score": round(strength, 2),
                 "story_type": story_plan.get("story_type", "reaction"),
                 "layout": story_plan.get("recommended_layout", "centered_face"),
@@ -164,7 +172,7 @@ async def select_best_clips(segments_file: str, num_clips: int) -> list:
                     "start": float(start),
                     "end": float(end),
                     "title": f"Auto clip {i+1}",
-                    "hook": "Watch this moment!",
+                    "hook": "",
                     "virality_score": 0.5 - (i * 0.1),
                     "story_type": "reaction",
                     "layout": "centered_face",

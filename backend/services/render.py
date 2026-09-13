@@ -211,37 +211,30 @@ def add_title_overlay(
     # TikTok-style filter chain:
     # 1) Dark translucent band at top
     # 2) Yellow accent strip at bottom of band
-    # 3) 3D layered text: black shadow offset + yellow main + white highlight
+    # 3) Single clean text layer: yellow fill + black border + subtle shadow
+    #    (rendered ONCE — no stacked layers, so the title never looks doubled)
     subtitle_filter = (
         f"drawbox=x=0:y=80:w=iw:h=210:color=black@0.80:t=fill,"
         f"drawbox=x=0:y=285:w=iw:h=6:color=0xFFE500:t=fill,"
         f"drawtext=textfile='{title_file_ff}':"
         f"{font_opt}"
-        f"fontcolor=black:fontsize={fs}:"
-        f"x=(w-text_w)/2+3:y=110+3:"
-        f"borderw=0,"
-        f"drawtext=textfile='{title_file_ff}':"
-        f"{font_opt}"
         f"fontcolor=0xFFE500:fontsize={fs}:"
         f"x=(w-text_w)/2:y=110:"
-        f"borderw=4:bordercolor=0x000000,"
-        f"drawtext=textfile='{title_file_ff}':"
-        f"{font_opt}"
-        f"fontcolor=white@0.35:fontsize={fs}:"
-        f"x=(w-text_w)/2:y=109:"
-        f"borderw=0"
+        f"borderw=5:bordercolor=0x000000:"
+        f"shadowx=3:shadowy=3:shadowcolor=0x000000@0.6"
     )
 
     cmd = [
         "ffmpeg",
         "-y",
-        "-fps_mode", "cfr",
         "-i", video_path,
         "-vf", subtitle_filter,
         "-map", "0:v",
         "-map", "0:a?",
         "-c:v", "libx264",
         "-r", "30",
+        "-g", "60",
+        "-fps_mode", "cfr",
         "-preset", settings.FFMPEG_PRESET,
         "-crf", str(settings.FFMPEG_CRF),
         "-c:a", "aac",
@@ -291,12 +284,12 @@ def burn_captions(
     cmd = [
         "ffmpeg",
         "-y",
-        "-fps_mode", "cfr",
         "-i", video_path,
         "-vf", subtitle_filter,
         "-map", "0:v",
         "-map", "0:a?",
         "-c:v", "libx264",
+        "-fps_mode", "cfr",
         "-preset", settings.FFMPEG_PRESET,
         "-crf", str(settings.FFMPEG_CRF),
         "-c:a", "copy",

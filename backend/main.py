@@ -2,6 +2,7 @@
 Main FastAPI application for AI Shorts Generator.
 """
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,11 +17,18 @@ BACKEND_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BACKEND_DIR / "static"
 TEMPLATES_DIR = BACKEND_DIR / "templates"
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for application startup and shutdown."""
+    init_database()
+    yield
+
 # Create FastAPI app
 app = FastAPI(
     title="AI Shorts Generator API",
     description="API for generating YouTube Shorts from long-form videos",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan
 )
 
 # CORS middleware
@@ -37,12 +45,6 @@ app.include_router(api_router, prefix="/api")
 
 # Serve UI assets
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-# Initialize database on startup
-@app.on_event("startup")
-def startup_event():
-    """Initialize database tables on startup."""
-    init_database()
 
 @app.get("/")
 async def root():

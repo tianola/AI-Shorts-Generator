@@ -10,6 +10,38 @@ from PIL import Image, ImageDraw, ImageFont
 from config import settings
 from utils.logger import job_info, job_error, job_warning
 
+def _probe_duration(video_path: str) -> float:
+    """Return video duration in seconds (0.0 on failure)."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except Exception:
+        pass
+    return 0.0
+
+def _wrap_title(text: str, max_chars: int = 12, max_lines: int = 4) -> str:
+    """Wrap + truncate a title so it fits on a thumbnail without overflowing."""
+    words = str(text or "Viral Moment").split()
+    lines, current = [], []
+    for word in words:
+        current.append(word)
+        if len(" ".join(current)) > max_chars:
+            lines.append(" ".join(current[:-1]))
+            current = [word]
+    if current:
+        lines.append(" ".join(current))
+    # Truncate to max_lines with ellipsis
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = lines[-1][:max_chars - 1].rstrip() + "..."
+    return "\n".join(lines) if lines else "Viral Moment"
+
 def extract_frame(
     video_path: str,
     output_path: str,
@@ -36,11 +68,16 @@ def extract_frame(
     # Ensure output directory exists
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+    # Clamp timestamp to a safe range so short clips (or past-EOF values) don't
+    # produce an empty/black frame.
+    duration = _probe_duration(video_path)
+    ts = max(0.1, min(float(timestamp), duration - 0.1 if duration > 0.3 else 0.1))
+
     cmd = [
         "ffmpeg",
         "-y",
         "-i", video_path,
-        "-ss", str(timestamp),
+        "-ss", str(ts),
         "-vframes", "1",
         "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
         "-q:v", "2",
@@ -95,6 +132,9 @@ def add_text_overlay(
         img = Image.open(image_path)
         draw = ImageDraw.Draw(img)
 
+        # Wrap + truncate the title so it never overflows the thumbnail width
+        display_text = _wrap_title(text)
+
         # Load font (fallback to default if not found)
         try:
             font = ImageFont.truetype(font_path, font_size)
@@ -102,15 +142,25 @@ def add_text_overlay(
             font = ImageFont.load_default()
             job_warning(0, f"Font not found at {font_path}, using default")
 
-        # Calculate text position (centered at top)
-        try:
-            bbox = draw.textbbox((0, 0), text, font=font)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-        except AttributeError:
-            # Fallback for older Pillow versions
-            text_width, text_height = font.getsize(text)
-        margin = 100
+        # Auto-shrink font until the widest line fits the image
+        margin = 60
+        max_width = img.width - margin * 2
+        fs = font_size
+        while fs > 40:
+            try:
+                font = ImageFont.truetype(font_path, fs)
+            except IOError:
+                font = ImageFont.load_default()
+            try:
+                bbox = draw.textbbox((0, 0), display_text, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+            except AttributeError:
+                text_width, text_height = font.getsize(display_text)
+            if text_width <= max_width:
+                break
+            fs -= 4
+
         x = (img.width - text_width) // 2
         y = margin
 
@@ -120,10 +170,10 @@ def add_text_overlay(
 
         # Draw outline (4 directions)
         for dx, dy in [(-2, -2), (-2, 2), (2, -2), (2, 2)]:
-            draw.text((x + dx, y + dy), text, font=font, fill=outline_color)
+            draw.multiline_text((x + dx, y + dy), display_text, font=font, fill=outline_color, align="center")
 
         # Draw main text
-        draw.text((x, y), text, font=font, fill=fill_color)
+        draw.multiline_text((x, y), display_text, font=font, fill=fill_color, align="center")
 
         # Save
         img.save(output_path, quality=95)

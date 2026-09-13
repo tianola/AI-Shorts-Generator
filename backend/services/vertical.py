@@ -380,7 +380,11 @@ def make_vertical_face_tracked(
     height: int = 1920
 ) -> str:
     """
-    Convert video to vertical using face-tracked dynamic reframing.
+    Convert video to vertical using modern YOLO focus tracking.
+
+    Detects people/objects, builds a dynamic 9:16 crop that follows the main
+    subject and alternates between two subjects ("one up, one down" when the
+    source allows). Falls back to the old MediaPipe face tracker, then static.
 
     Args:
         input_file: Path to input video
@@ -388,49 +392,55 @@ def make_vertical_face_tracked(
 
     Returns:
         Path to output file
-
-    Note:
-        Falls back to static crop if face detection fails.
     """
     try:
-        # Sample frames and detect faces
-        face_samples = sample_frames_for_face_tracking(input_file)
+        # 1) Try the modern YOLO focus tracker first
+        try:
+            from services.focus_tracking import sample_frames, compute_yolo_trajectory
+            cmd_info = [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-show_entries", "stream=width,height",
+                "-select_streams", "v:0", "-of", "json", input_file
+            ]
+            result = subprocess.run(cmd_info, capture_output=True, text=True)
+            info = json.loads(result.stdout)
+            video_duration = float(info["format"]["duration"])
+            stream = next(s for s in info["streams"] if s.get("width"))
+            src_w = int(stream["width"])
+            src_h = int(stream["height"])
+            yolo_samples = sample_frames(input_file, sample_interval=0.5)
+            trajectory = compute_yolo_trajectory(
+                yolo_samples, src_w, src_h, width, height
+            ) if yolo_samples else []
+        except Exception as yolo_err:
+            job_info(0, f"YOLO focus tracking unavailable ({yolo_err}); using MediaPipe face tracker")
+            face_samples = sample_frames_for_face_tracking(input_file)
+            cmd_info = [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-show_entries", "stream=width,height",
+                "-select_streams", "v:0", "-of", "json", input_file
+            ]
+            result = subprocess.run(cmd_info, capture_output=True, text=True)
+            info = json.loads(result.stdout)
+            video_duration = float(info["format"]["duration"])
+            stream = next(s for s in info["streams"] if s.get("width"))
+            trajectory = compute_crop_trajectory(
+                face_samples, video_duration, width, height,
+                int(stream["width"]), int(stream["height"])
+            )
 
-        # Get video duration and dimensions
-        cmd_info = [
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-show_entries", "stream=width,height",
-            "-select_streams", "v:0",
-            "-of", "json",
-            input_file
-        ]
-        result = subprocess.run(cmd_info, capture_output=True, text=True)
-        info = json.loads(result.stdout)
-        video_duration = float(info["format"]["duration"])
-        stream = next(s for s in info["streams"] if s.get("width"))
-        src_w = int(stream["width"])
-        src_h = int(stream["height"])
-
-        # Compute trajectory
-        trajectory = compute_crop_trajectory(face_samples, video_duration, width, height, src_w, src_h)
-
-        if len(trajectory) < 2:
-            # Not enough data for face tracking, fall back to static
-            job_info(0, "Face tracking: insufficient face data, falling back to static crop")
+        if not trajectory or len(trajectory) < 2:
+            job_info(0, "Focus tracking: insufficient data, falling back to static crop")
             return make_vertical_static(input_file, output_file, width, height)
 
-        # Build time-varying crop that follows the face
         crop_filter = _build_timed_crop(trajectory)
-        logger.info(f"Face-tracked crop filter: {crop_filter[:120]}...")
+        logger.info(f"Focus-tracked crop filter: {crop_filter[:120]}...")
         vf = f"{crop_filter},scale={width}:{height}"
 
-        # FFmpeg command with time-varying crop and scale
         cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", input_file,
+            "ffmpeg", "-y", "-i", input_file,
             "-vf", vf,
             "-c:v", "libx264",
             "-preset", settings.FFMPEG_PRESET,
@@ -443,11 +453,11 @@ def make_vertical_face_tracked(
         ]
 
         subprocess.run(cmd, check=True, capture_output=True)
-        job_info(0, f"Face-tracked vertical conversion: {input_file} -> {output_file}")
+        job_info(0, f"Focus-tracked vertical conversion: {input_file} -> {output_file}")
         return output_file
 
     except Exception as e:
-        job_error(0, f"Face-tracked conversion failed: {str(e)}")
+        job_error(0, f"Focus-tracked conversion failed: {str(e)}")
         job_info(0, "Falling back to static vertical conversion")
         return make_vertical_static(input_file, output_file, width, height)
 
