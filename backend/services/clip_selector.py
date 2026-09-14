@@ -66,7 +66,10 @@ async def select_best_clips(segments_file: str, num_clips: int) -> list:
                 "trend_score": float,
                 "story_type": "question_answer|reveal|challenge|emotion|lesson|reaction",
                 "layout": "centered_face|split_screen|screen_share_face",
-                "cta": "string"
+                "cta": "string",
+                "broll_query": "string (optional - 1-2 words representing the visual subject for stock footage)",
+                "broll_start": float (optional - seconds into the video where B-roll should start),
+                "broll_duration": float (optional - duration in seconds for the B-roll, default 3)
             }}
         ]
     }}

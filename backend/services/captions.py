@@ -123,12 +123,12 @@ def create_caption_block(
         active_color = ass_color(color)
 
         if style.jump:
-            # Color highlight + quick pop scale effect (without \pos / \move)
+            # Color highlight + dynamic OpusClip bouncy pop scaling with ASS transform
             pop_tag = (
                 r"{\c" + active_color
-                + r"\fs" + str(base_fs)
-                + r"\t(" + f"{int(word_start)},{int(word_start + 60)},\\fs{peak_fs}\\c" + active_color + r")"
-                + r"\t(" + f"{int(word_end)},{int(word_end + 60)},\\fs{base_fs}\\c" + base_color + r")}"
+                + r"\t(" + f"{int(word_start)},{int(word_start + 45)},\\fscx120\\fscy120\\c" + active_color + r")"
+                + r"\t(" + f"{int(word_start + 45)},{int(word_start + 90)},\\fscx100\\fscy100\\c" + active_color + r")"
+                + r"\t(" + f"{int(word_end)},{int(word_end + 50)},\\c" + base_color + r")}"
             )
             text += pop_tag + word
         else:
