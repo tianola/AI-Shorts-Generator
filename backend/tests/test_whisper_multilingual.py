@@ -111,35 +111,60 @@ def _patch_settings(monkeypatch):
     yield ns
 
 
+@pytest.fixture(autouse=True)
+def _never_touch_ffmpeg(monkeypatch):
+    """Decoding is ffmpeg's job now; this module tests the model doubles.
+
+    Without it every local-transcription test would try to decode the 68-byte
+    fake wav and fail before reaching the assertions.
+    """
+    import numpy as np
+
+    def fake_decode(path, start=0.0, duration=None):
+        return np.zeros(int(16000 * 5), dtype="float32")
+
+    monkeypatch.setattr(whisper, "decode_audio_for_transcription", fake_decode)
+
+
 # ---------------------------------------------------------------------------
 # detect_audio_language()
 # ---------------------------------------------------------------------------
 
 def test_detect_audio_language_returns_code_and_confidence(fake_model, mock_audio, monkeypatch):
+    import numpy as np
+
     monkeypatch.setattr(whisper, "get_whisper_model", lambda size=None: fake_model)
-    # detect_audio_language imports decode_audio inside the function, so patch
-    # the underlying faster_whisper.audio module.
-    with mock.patch("faster_whisper.audio.decode_audio", return_value=__import__("numpy").zeros(16000 * 5, dtype="float32")):
-        lang, conf = whisper.detect_audio_language(mock_audio)
+    monkeypatch.setattr(whisper, "decode_audio_for_transcription",
+                        lambda path, start=0.0, duration=None: np.zeros(16000 * 5, dtype="float32"))
+
+    lang, conf = whisper.detect_audio_language(mock_audio)
     assert lang == "el"
     assert conf == 0.96
     assert fake_model.calls["detect_language"]
 
 
 def test_detect_audio_language_empty_audio_returns_none(mock_audio, monkeypatch):
+    import numpy as np
+
     model = FakeModel()
     monkeypatch.setattr(whisper, "get_whisper_model", lambda size=None: model)
-    with mock.patch("faster_whisper.audio.decode_audio", return_value=__import__("numpy").zeros(0, dtype="float32")):
-        lang, conf = whisper.detect_audio_language(mock_audio)
+    monkeypatch.setattr(whisper, "decode_audio_for_transcription",
+                        lambda path, start=0.0, duration=None: np.zeros(0, dtype="float32"))
+
+    lang, conf = whisper.detect_audio_language(mock_audio)
     assert lang is None
     assert conf is None
 
 
 def test_detect_audio_language_low_confidence_returns_none(mock_audio, monkeypatch):
+    import numpy as np
+
     model = FakeModel(confidence=0.2)
     monkeypatch.setattr(whisper, "get_whisper_model", lambda size=None: model)
-    with mock.patch("faster_whisper.audio.decode_audio", return_value=__import__("numpy").zeros(16000 * 5, dtype="float32")):
-        lang, conf = whisper.detect_audio_language(mock_audio)
+    monkeypatch.setattr(whisper, "decode_audio_for_transcription",
+                        lambda path, start=0.0, duration=None: np.zeros(16000 * 5, dtype="float32"))
+
+    lang, conf = whisper.detect_audio_language(mock_audio)
     assert lang is None
     assert conf is None
 
@@ -147,8 +172,13 @@ def test_detect_audio_language_low_confidence_returns_none(mock_audio, monkeypat
 def test_detect_audio_language_decode_error_returns_none(mock_audio, monkeypatch):
     model = FakeModel()
     monkeypatch.setattr(whisper, "get_whisper_model", lambda size=None: model)
-    with mock.patch("faster_whisper.audio.decode_audio", side_effect=RuntimeError("decode failed")):
-        lang, conf = whisper.detect_audio_language(mock_audio)
+
+    def boom(path, start=0.0, duration=None):
+        raise RuntimeError("decode failed")
+
+    monkeypatch.setattr(whisper, "decode_audio_for_transcription", boom)
+
+    lang, conf = whisper.detect_audio_language(mock_audio)
     assert lang is None
     assert conf is None
 

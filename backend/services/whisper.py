@@ -22,6 +22,7 @@ from loguru import logger
 
 from faster_whisper import WhisperModel
 from config import settings
+from services.audio import decode_audio_for_transcription
 
 # Global model instance (loaded once, reused across jobs)
 _model: Optional[WhisperModel] = None
@@ -108,11 +109,12 @@ def detect_audio_language(audio_path: str, model_size: Optional[str] = None,
         Tuple of (language_code, confidence). Both None when no speech is
         detected or the audio cannot be decoded.
     """
-    from faster_whisper.audio import decode_audio
-
     model = get_whisper_model(model_size)
     try:
-        audio = decode_audio(audio_path, sampling_rate=16000)
+        # The first 30 seconds carry enough speech to choose a language, and a
+        # multi-hour source is hundreds of megabytes of PCM we would otherwise
+        # decode just to throw most of it away.
+        audio = decode_audio_for_transcription(audio_path, duration=30.0)
     except Exception as exc:
         logger.warning(f"Could not decode audio for language detection: {exc}")
         return None, None
@@ -120,11 +122,6 @@ def detect_audio_language(audio_path: str, model_size: Optional[str] = None,
     if audio is None or len(audio) == 0:
         logger.info("Empty audio — no language detected")
         return None, None
-
-    # Trim to a reasonable detection window (~30s) if the file is longer.
-    max_samples = int(30.0 * 16000)
-    if len(audio) > max_samples:
-        audio = audio[:max_samples]
 
     try:
         language, confidence, _ = model.detect_language(
@@ -208,12 +205,16 @@ def _transcribe_with_local_whisper(
         f"confidence={language_confidence if language_confidence is not None else 'n/a'})"
     )
     segments, info = model.transcribe(
-        audio_path,
+        decode_audio_for_transcription(audio_path),
         word_timestamps=True,
         vad_filter=True,
         language=language_code,
         task=task,
         beam_size=1,
+        # Each 30-second window is transcribed on its own. Chaining the previous
+        # window's text into the next one is what makes long, silent-heavy
+        # sources slow and what sends whisper into repetition loops.
+        condition_on_previous_text=False,
     )
 
     total_dur = getattr(info, "duration", 0) or 1.0

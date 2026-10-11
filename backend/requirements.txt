@@ -28,6 +28,9 @@ numpy>=1.26.0
 ultralytics>=8.3.0
 
 # Audio transcription & Diarization
+# faster-whisper 1.2.1 passes metadata_errors= to av.open(), which PyAV 19
+# removed, so its own file decoder raises TypeError. services/audio.py decodes
+# to a numpy array with ffmpeg instead, which works with any av version.
 faster-whisper>=1.0.0
 pyannote.audio>=3.1.1
 torchaudio>=2.0.0

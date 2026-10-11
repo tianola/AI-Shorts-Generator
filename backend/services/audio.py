@@ -104,3 +104,51 @@ def extract_audio(video_path):
     print("END extract_audio", flush=True)
 
     return output_path
+
+
+TRANSCRIPTION_SAMPLE_RATE = 16000
+
+
+def decode_audio_for_transcription(audio_path: str, start: float = 0.0,
+                                   duration: float = None):
+    """Decode any media file to mono float32 PCM at 16 kHz, via ffmpeg.
+
+    faster-whisper 1.2.1 always passes metadata_errors= to av.open(), an
+    argument PyAV 19 removed, so its own decoder raises TypeError before a
+    single sample is read - every local transcription job failed. Handing the
+    model a decoded array keeps transcription on the ffmpeg binary the rest of
+    the pipeline already depends on, and works with any PyAV version.
+    """
+    import numpy as np
+
+    command = ["ffmpeg", "-v", "error"]
+    if start:
+        command += ["-ss", str(start)]
+    command += ["-i", audio_path]
+    if duration is not None:
+        command += ["-t", str(duration)]
+    command += ["-vn", "-ac", "1", "-ar", str(TRANSCRIPTION_SAMPLE_RATE), "-f", "s16le", "-"]
+
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    blocks = []
+    try:
+        while True:
+            chunk = process.stdout.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            blocks.append(np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0)
+    finally:
+        stderr = process.stderr.read()
+        process.stderr.close()
+        process.stdout.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+    if process.returncode != 0:
+        message = (stderr or b"").decode("utf-8", "replace").strip()
+        raise RuntimeError(f"ffmpeg could not decode {audio_path}: {message[:400]}")
+
+    if not blocks:
+        return np.zeros(0, dtype=np.float32)
+    return blocks[0] if len(blocks) == 1 else np.concatenate(blocks)
