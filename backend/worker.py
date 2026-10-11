@@ -6,22 +6,10 @@ Uses async/await for Cloud API calls.
 import sys
 import os
 
-# Safe stream redirection for windowless / background daemon execution
-if sys.stdout is None:
-    try:
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "storage", "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        sys.stdout = open(os.path.join(log_dir, "worker.log"), "a", encoding="utf-8")
-    except Exception:
-        sys.stdout = open(os.devnull, "w")
+# Must run before any import that pulls in loguru: see utils/daemon_streams.py
+from utils.daemon_streams import redirect_daemon_streams
 
-if sys.stderr is None:
-    try:
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "storage", "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        sys.stderr = open(os.path.join(log_dir, "worker_error.log"), "a", encoding="utf-8")
-    except Exception:
-        sys.stderr = open(os.devnull, "w")
+redirect_daemon_streams("worker")
 
 import time
 import json
@@ -40,6 +28,7 @@ from config import settings
 from loguru import logger
 from utils.logger import job_info, job_error, job_warning, job_debug
 from utils.env_check import log_media_tools, missing_media_tools
+from utils.disk import has_headroom, reclaim
 from services.youtube import download_youtube
 from services.audio import extract_audio
 from services.whisper import transcribe_audio_file
@@ -154,6 +143,32 @@ def _clear_derived_artifacts(job_dir, job_id):
                     job_info(job_id, f"Removed stale clip dir: {clip_dir}")
                 except Exception as e:
                     job_warning(job_id, f"Could not remove {clip_dir}: {e}")
+
+def _drop_transcription_input(job_dir, job_id):
+    """Delete the extracted audio once a transcript exists on disk.
+
+    words.json and segments.json are what every later stage reads; the wav is
+    only ever an input to the transcriber. A 3-hour source leaves over 1 GB of
+    it sitting in the job directory for the rest of its life.
+    """
+    if not settings.DELETE_AUDIO_AFTER_TRANSCRIPTION:
+        return 0
+
+    transcript = os.path.join(str(job_dir), "segments.json")
+    words = os.path.join(str(job_dir), "words.json")
+    if not (os.path.exists(transcript) and os.path.getsize(transcript) > 2
+            and os.path.exists(words) and os.path.getsize(words) > 2):
+        # Without a complete transcript the audio is still the only copy of the
+        # source material, so a resumed run would have nothing to work from.
+        return 0
+
+    leftovers = ["audio.wav", "audio_groq.mp3"]
+    paths = [os.path.join(str(job_dir), name) for name in leftovers]
+    freed = reclaim(paths)
+    if freed:
+        job_info(job_id, f"Removed transcription input, freed {freed / 1024**2:.1f} MB")
+    return freed
+
 
 def cut_clip(
     source_video: str,
@@ -444,6 +459,8 @@ async def process_job_async(job_id: int):
         # Load segments for duration
         with open(segments_file, "r", encoding="utf-8") as f:
             segments = json.load(f)
+
+        _drop_transcription_input(job_dir, job_id)
 
         if getattr(job, "llm_translate", False):
             # Check detected language from whisper metadata
@@ -1096,6 +1113,12 @@ def process_jobs():
                 if not missing_media_tools():
                     missing = log_media_tools()
                 time.sleep(5)
+                continue
+            if not has_headroom():
+                # Same reasoning: a download that runs out of space mid-flight
+                # leaves a truncated source.mp4 that every later stage then
+                # fails on, so the queue waits for room instead.
+                time.sleep(15)
                 continue
             # A worker that died mid-job left the row at 'processing' forever and
             # the query below only looks at 'created', so it was never retried.

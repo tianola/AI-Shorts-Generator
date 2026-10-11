@@ -252,8 +252,9 @@ class Settings(BaseSettings):
     )
     LOG_CONSOLE_LEVEL: str = Field(
         default="WARNING",
-        description="Level written to stderr. Keep it high: in windowless "
-                    "daemon mode stderr is redirected to a file that nothing rotates."
+        description="Level written to stderr. In windowless daemon mode stderr is "
+                    "redirected to storage/logs/<name>_error.log, which is rotated "
+                    "by size but still holds every warning the run produced."
     )
 
     # ====================
@@ -286,6 +287,21 @@ class Settings(BaseSettings):
         resolved = os.path.abspath(os.path.expanduser(resolved))
         os.makedirs(resolved, exist_ok=True)
         return resolved
+
+    MIN_FREE_DISK_GB: float = Field(
+        default=10.0,
+        ge=0,
+        description="Leave jobs queued while the storage volume has less than this "
+                    "much free. A source video can be tens of gigabytes, and a "
+                    "download that fills the drive also corrupts the SQLite "
+                    "database that sits on it."
+    )
+    DELETE_AUDIO_AFTER_TRANSCRIPTION: bool = Field(
+        default=True,
+        description="audio.wav is only read by the transcriber; words.json and "
+                    "segments.json carry the result onwards. A 3-hour source "
+                    "leaves over 1 GB of wav behind for no reason."
+    )
 
     # ====================
     # PATHS (computed)

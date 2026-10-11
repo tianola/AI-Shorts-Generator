@@ -4,6 +4,15 @@ from urllib.parse import urlparse
 import os
 import yt_dlp
 from config import settings
+from utils.disk import NotEnoughSpaceError, free_gb
+
+
+def _remove_partials(output_dir: Path):
+    for partial in list(output_dir.glob("*.part*")) + list(output_dir.glob("*.ytdl")):
+        try:
+            partial.unlink()
+        except OSError:
+            pass
 
 
 def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable[[str, int], None]] = None):
@@ -75,21 +84,31 @@ def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable
             # Override user_agent to match iPhone (as in original cookie logic)
             ydl_opts['user_agent'] = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
-        if progress_callback:
-            _last_hook_pct = [-1]
-            def yt_progress_hook(d):
-                if d.get("status") == "downloading":
-                    downloaded = d.get("downloaded_bytes", 0)
-                    total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
-                    dl_pct = max(1, min(99, int((downloaded / total) * 100)))
-                    if dl_pct != _last_hook_pct[0]:
-                        _last_hook_pct[0] = dl_pct
-                        overall_pct = int(2 + (dl_pct * 0.18))
-                        progress_callback(f"Downloading video ({dl_pct}%)", overall_pct)
-                elif d.get("status") == "finished":
-                    progress_callback("Video downloaded (100%)", 20)
+        _last_hook_pct = [-1]
 
-            ydl_opts["progress_hooks"] = [yt_progress_hook]
+        def yt_progress_hook(d):
+            if d.get("status") == "downloading":
+                downloaded = d.get("downloaded_bytes", 0)
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
+                dl_pct = max(1, min(99, int((downloaded / total) * 100)))
+                if dl_pct == _last_hook_pct[0]:
+                    return
+                _last_hook_pct[0] = dl_pct
+                # A multi-hour source is tens of gigabytes. Stopping here keeps
+                # the drive from filling up entirely, which would also take the
+                # SQLite database down with it.
+                if free_gb() < settings.MIN_FREE_DISK_GB:
+                    raise NotEnoughSpaceError(
+                        f"Storage volume dropped below "
+                        f"{settings.MIN_FREE_DISK_GB:.1f} GB free at "
+                        f"{dl_pct}% of the download"
+                    )
+                if progress_callback:
+                    progress_callback(f"Downloading video ({dl_pct}%)", int(2 + (dl_pct * 0.18)))
+            elif d.get("status") == "finished" and progress_callback:
+                progress_callback("Video downloaded (100%)", 20)
+
+        ydl_opts["progress_hooks"] = [yt_progress_hook]
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -110,15 +129,16 @@ def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable
                         job_warning(job_id, f"Could not write meta.json: {meta_error}")
                 # If we get here, download succeeded
                 break
+        except NotEnoughSpaceError as e:
+            # Every client would stop at the same place, so report a full drive
+            # instead of cycling through the remaining ones.
+            last_exception = e
+            _remove_partials(output_dir)
+            break
         except Exception as e:
             last_exception = e
             # Clean up any partial download so a later retry starts fresh
-            partials = list(output_dir.glob("*.part*")) + list(output_dir.glob("*.ytdl"))
-            for partial in partials:
-                try:
-                    partial.unlink()
-                except OSError:
-                    pass
+            _remove_partials(output_dir)
             # Continue to next client
             continue
     else:
@@ -127,6 +147,9 @@ def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable
             raise Exception(f"Download failed for {url}: {last_exception}")
         else:
             raise Exception(f"Download failed for {url}: Unknown error")
+
+    if isinstance(last_exception, NotEnoughSpaceError):
+        raise last_exception
 
     # Ensure source.mp4 exists (or rename if downloaded as source.mkv / source.webm)
     if not target_file.exists():

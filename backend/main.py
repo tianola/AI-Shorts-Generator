@@ -4,22 +4,10 @@ Main FastAPI application for AI Shorts Generator.
 import sys
 import os
 
-# Safe stream redirection for windowless / background daemon execution
-if sys.stdout is None:
-    try:
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "storage", "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        sys.stdout = open(os.path.join(log_dir, "api.log"), "a", encoding="utf-8")
-    except Exception:
-        sys.stdout = open(os.devnull, "w")
+# Must run before any import that pulls in loguru: see utils/daemon_streams.py
+from utils.daemon_streams import redirect_daemon_streams
 
-if sys.stderr is None:
-    try:
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "storage", "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        sys.stderr = open(os.path.join(log_dir, "api_error.log"), "a", encoding="utf-8")
-    except Exception:
-        sys.stderr = open(os.devnull, "w")
+redirect_daemon_streams("api")
 
 from contextlib import asynccontextmanager
 from pathlib import Path
