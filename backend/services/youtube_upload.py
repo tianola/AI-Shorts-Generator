@@ -209,7 +209,7 @@ def upload_clip_to_youtube(
     description: str,
     hashtags: Optional[List[str]] = None,
     source_title: Optional[str] = None,
-    privacy_status: str = "public",
+    privacy_status: str = "unlisted",
     category_id: str = "24",  # 24: Entertainment, 22: People & Blogs
     progress_callback = None,
     job_id: int = 0
@@ -312,7 +312,7 @@ def upload_clip_to_youtube(
 def upload_all_clips_for_job(
     job_id: int,
     db,
-    privacy_status: str = "public",
+    privacy_status: str = "unlisted",
     category_id: str = "24",
     clip_progress_callback = None
 ) -> Dict[str, Any]:

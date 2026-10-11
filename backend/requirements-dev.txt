@@ -1,0 +1,7 @@
+# Development / CI tooling. Install on top of backend/requirements.txt:
+#   pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+pytest>=8.0.0
+pytest-timeout>=2.2.0
+
+# Static checks; see .github/workflows/ci.yml for the rules CI enables.
+ruff>=0.6.0

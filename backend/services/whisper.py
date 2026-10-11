@@ -59,17 +59,21 @@ def get_whisper_model(model_size: Optional[str] = None) -> WhisperModel:
         logger.info(f"Loading faster-whisper model: {model_size}")
         try:
             _model = WhisperModel(model_size, device="cpu", compute_type="int8")
-        except Exception:
-            logger.warning(f"Failed to load '{model_size}', falling back to 'tiny'")
+            _model_size = model_size
+        except Exception as exc:
+            logger.warning(f"Failed to load '{model_size}' ({exc}), falling back to 'tiny'")
             _model = WhisperModel("tiny", device="cpu", compute_type="int8")
-        _model_size = model_size
+            # Cache the size actually in memory. Caching the *requested* size
+            # instead made every later call believe a large model was loaded
+            # while the tiny fallback did all the work.
+            _model_size = "tiny"
         logger.info("Whisper model loaded")
 
     return _model
 
 
 def _write_transcript_metadata(output_dir: str, language: Optional[str],
-                               language_confidence: Optional[float]) -> None:
+                               language_confidence: Optional[float]) -> str:
     """Write detected language metadata alongside segments/words (additive)."""
     meta_file = os.path.join(output_dir, "transcript_info.json")
     meta = {
@@ -104,7 +108,6 @@ def detect_audio_language(audio_path: str, model_size: Optional[str] = None,
         Tuple of (language_code, confidence). Both None when no speech is
         detected or the audio cannot be decoded.
     """
-    import numpy as np
     from faster_whisper.audio import decode_audio
 
     model = get_whisper_model(model_size)
@@ -143,6 +146,19 @@ def detect_audio_language(audio_path: str, model_size: Optional[str] = None,
         return None, None
 
     return language, float(confidence)
+
+
+def _transcript_already_written(output_dir: str) -> bool:
+    """True when a non-empty words.json from an earlier attempt is on disk."""
+    words_file = os.path.join(output_dir, "words.json")
+    if not os.path.isfile(words_file):
+        return False
+    try:
+        with open(words_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, list) and len(data) > 0
 
 
 def _write_segments_and_words(output_dir: str, segments_list: List[dict],
@@ -461,7 +477,7 @@ def transcribe_audio_file(
         # If user explicitly selected a local PyTorch model (.pt)
         if whisper_model and whisper_model.startswith("local_pt_"):
             model_name = whisper_model.replace("local_pt_", "")
-            pt_path = os.path.join(r"E:\01-AI-PROJECTS\whisper-models", f"{model_name}.pt")
+            pt_path = os.path.join(settings.WHISPER_PT_MODELS_DIR, f"{model_name}.pt")
             if os.path.exists(pt_path):
                 logger.info(f"Using local PyTorch model: {pt_path}")
                 return _transcribe_with_openai_whisper(audio_path, output_dir, pt_path, language, translate)
@@ -483,6 +499,16 @@ def transcribe_audio_file(
         )
 
     except Exception as e:
+        # A fallback run may only overwrite an empty/partial result. Without
+        # this guard a failure in a later stage (metadata write, progress hook,
+        # OOM at the very end) re-ran the tiny model over a good transcript and
+        # shipped garbled captions that looked perfectly valid downstream.
+        if _transcript_already_written(output_dir):
+            logger.error(
+                f"Transcription backend failed after a transcript was already written "
+                f"to {output_dir}: {e}. Not falling back — the existing transcript is kept."
+            )
+            raise
         logger.warning(f"Primary transcription backend failed: {e}. Falling back to local faster-whisper (tiny).")
         try:
             return _transcribe_with_local_whisper(

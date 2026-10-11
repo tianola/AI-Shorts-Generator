@@ -109,11 +109,13 @@ def build_popup_filtergraph_fragment(
     t_fadeout = round(max(t_start, t_end - 0.18), 3)
 
     # Spring overshoot scale expression: rapid scale up to 1.12x then settle to 1.00x
+    # These go inside '...' quoting, where a comma is already literal — a
+    # backslash there becomes part of the expression and breaks it.
     scale_expr = (
-        f"iw*(0.85+0.27*clip((t-{t_start})/0.15\\,0\\,1)-0.12*clip((t-{t_settle})/0.08\\,0\\,1))"
+        f"iw*(0.85+0.27*clip((t-{t_start})/0.15,0,1)-0.12*clip((t-{t_settle})/0.08,0,1))"
     )
     scale_expr_h = (
-        f"ih*(0.85+0.27*clip((t-{t_start})/0.15\\,0\\,1)-0.12*clip((t-{t_settle})/0.08\\,0\\,1))"
+        f"ih*(0.85+0.27*clip((t-{t_start})/0.15,0,1)-0.12*clip((t-{t_settle})/0.08,0,1))"
     )
 
     anim_label = f"popup_anim_{input_idx}"
@@ -125,15 +127,15 @@ def build_popup_filtergraph_fragment(
     )
 
     if position == "upper_right":
-        x_expr = f"W-w-50+80*(1-clip((t-{t_start})/0.18\\,0\\,1))"
+        x_expr = f"W-w-50+80*(1-clip((t-{t_start})/0.18,0,1))"
         y_expr = "320"
     else:  # upper_third (center)
         x_expr = "(W-w)/2"
-        y_expr = f"290+25*(1-clip((t-{t_start})/0.18\\,0\\,1))"
+        y_expr = f"290+25*(1-clip((t-{t_start})/0.18,0,1))"
 
     overlay_expr = (
         f"overlay=x='{x_expr}':y='{y_expr}':"
-        f"enable='between(t\\,{t_start}\\,{t_end})':shortest=1"
+        f"enable='between(t,{t_start},{t_end})':shortest=1"
     )
 
     return prep_filter, anim_label, overlay_expr

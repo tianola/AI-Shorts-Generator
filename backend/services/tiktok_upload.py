@@ -148,7 +148,7 @@ def upload_clip_to_tiktok(
     description: str,
     hashtags: Optional[List[str]] = None,
     source_title: Optional[str] = None,
-    privacy_level: str = "PUBLIC_TO_EVERYONE"
+    privacy_level: str = "PUBLIC_TO_SELF"
 ) -> Dict[str, Any]:
     """
     Upload a video file to TikTok.
@@ -188,7 +188,7 @@ def upload_clip_to_tiktok(
 def upload_all_clips_to_tiktok_for_job(
     job_id: int,
     db,
-    privacy_level: str = "PUBLIC_TO_EVERYONE"
+    privacy_level: str = "PUBLIC_TO_SELF"
 ) -> Dict[str, Any]:
     """
     Batch upload all rendered clips from a specific job directly to TikTok.
@@ -224,6 +224,13 @@ def upload_all_clips_to_tiktok_for_job(
     total_clips = len(clips)
 
     for idx, clip in enumerate(clips):
+        # The per-clip auto-upload in the worker already published this clip.
+        # Re-publishing produced duplicate TikTok posts from the same job.
+        if clip.tiktok_video_id:
+            results.append({"index": clip.index, "skipped": True,
+                            "reason": "already published", "tiktok_url": clip.tiktok_video_id})
+            continue
+
         # Locate video file
         video_path = None
         if clip.file_path:
@@ -265,6 +272,8 @@ def upload_all_clips_to_tiktok_for_job(
                 source_title=source_title,
                 privacy_level=privacy_level
             )
+            clip.tiktok_video_id = res.get("video_id") or res.get("tiktok_url")
+            db.commit()
             results.append({
                 "clip_id": clip.id,
                 "clip_index": clip.index,

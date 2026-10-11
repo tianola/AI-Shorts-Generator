@@ -26,16 +26,20 @@ if sys.stderr is None:
 import time
 import json
 import asyncio
+import socket
 import subprocess
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
 
+from sqlalchemy import text
 from database.session import SessionLocal
 from database.models import Job, Clip, JobProgress
 from config import settings
 from loguru import logger
 from utils.logger import job_info, job_error, job_warning, job_debug
+from utils.env_check import log_media_tools, missing_media_tools
 from services.youtube import download_youtube
 from services.audio import extract_audio
 from services.whisper import transcribe_audio_file
@@ -52,6 +56,49 @@ from services.sfx import add_automatic_sfx
 
 _REDIS_CLIENT = None
 _REDIS_CHECKED = False
+
+WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
+
+
+def claim_job(db, job_id: int) -> bool:
+    """Compare-and-swap a queued job onto this worker.
+
+    The polling loop and the arq worker (max_jobs=2) can both look at the same
+    row, and the old code set status='processing' unconditionally, so a job could
+    be rendered and published twice. The WHERE guard makes exactly one caller win.
+    """
+    now = datetime.utcnow()
+    result = db.execute(
+        text(
+            "UPDATE jobs SET status='processing', claimed_by=:wid, "
+            "claimed_at=:now, updated_at=:now "
+            "WHERE id=:jid AND status IN ('created','queued')"
+        ),
+        {"wid": WORKER_ID, "now": now, "jid": job_id},
+    )
+    db.commit()
+    return result.rowcount == 1
+
+
+def reclaim_expired_leases(db) -> int:
+    """Return abandoned jobs to the queue.
+
+    A job that was 'processing' when the worker was killed stayed invisible
+    forever: the poller only selects status='created'. The lease is refreshed by
+    update_progress while work is actually happening, so an expired one is dead.
+    """
+    cutoff = datetime.utcnow() - timedelta(minutes=settings.JOB_LEASE_MINUTES)
+    result = db.execute(
+        text(
+            "UPDATE jobs SET status='created', claimed_by=NULL, claimed_at=NULL, "
+            "error_message=COALESCE(error_message,'') || ' [lease expired, requeued]' "
+            "WHERE status='processing' AND "
+            "(claimed_at IS NULL OR claimed_at < :cutoff)"
+        ),
+        {"cutoff": cutoff},
+    )
+    db.commit()
+    return result.rowcount
 
 def _get_redis_client():
     global _REDIS_CLIENT, _REDIS_CHECKED
@@ -190,6 +237,9 @@ def get_clip_transcript(
         with open(words_file, "r", encoding="utf-8") as f:
             words = json.load(f)
     except Exception as e:
+        # An empty transcript means the clip renders without captions, so the
+        # reason (missing words.json, truncated JSON) has to be visible.
+        logger.warning(f"Could not read transcript '{words_file}': {e}")
         return ""
 
     if isinstance(words, dict) and "words" in words:
@@ -199,7 +249,10 @@ def get_clip_transcript(
     for word in words:
         w_start = word.get("start", 0)
         w_end = word.get("end", 0)
-        if w_start >= clip_start and w_end <= clip_end:
+        # Overlap test, not containment: a word that straddles clip_start or
+        # clip_end was previously dropped, cutting the first/last word off the
+        # transcript used for SFX picking and virality scoring.
+        if w_end > clip_start and w_start < clip_end:
             clip_words.append(word.get("word", ""))
 
     return " ".join(clip_words)
@@ -218,11 +271,44 @@ async def process_job_async(job_id: int):
     job = db.query(Job).filter(Job.id == job_id).first()
 
     if not job:
+        db.close()
         raise Exception(f"Job {job_id} not found")
+
+    if not claim_job(db, job_id):
+        db.close()
+        job_info(job_id, f"Job {job_id} was not claimable (another worker owns it or it is not queued); skipping")
+        return
+    db.refresh(job)
 
     # Create job directory
     job_dir = Path(settings.JOBS_DIR) / str(job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
+
+    lease_stop = threading.Event()
+
+    def _lease_heartbeat():
+        """Refresh the lease while work is running.
+
+        update_progress only fires at stage boundaries, and a single stage
+        (transcribing a long source) can sit silent for longer than
+        JOB_LEASE_MINUTES - without this the reclaim would requeue a live job.
+        """
+        while not lease_stop.wait(60):
+            hb = None
+            try:
+                hb = SessionLocal()
+                hb.execute(
+                    text("UPDATE jobs SET claimed_at=:now WHERE id=:jid AND claimed_by=:wid"),
+                    {"now": datetime.utcnow(), "jid": job_id, "wid": WORKER_ID},
+                )
+                hb.commit()
+            except Exception:
+                pass
+            finally:
+                if hb is not None:
+                    hb.close()
+
+    threading.Thread(target=_lease_heartbeat, daemon=True).start()
 
     _last_prog_time = [0.0]
     _last_prog_pct = [-1]
@@ -230,7 +316,7 @@ async def process_job_async(job_id: int):
 
     def update_progress(stage: str, percent: int):
         now = time.time()
-        # Only write to DB if stage changed, percent changed, or at least 0.5s passed (or at 0/100)
+        # Throttle: write when the value changed, otherwise at most every 0.5s.
         if percent != _last_prog_pct[0] or stage != _last_prog_stage[0] or (now - _last_prog_time[0]) >= 0.5:
             _last_prog_time[0] = now
             _last_prog_pct[0] = percent
@@ -243,6 +329,7 @@ async def process_job_async(job_id: int):
                 else:
                     progress.current_stage = stage
                     progress.progress_percent = percent
+                job.claimed_at = datetime.utcnow()
                 db.commit()
             except Exception:
                 db.rollback()
@@ -257,12 +344,13 @@ async def process_job_async(job_id: int):
     job_info(job_id, f"Starting processing for job {job_id}")
     job_info(job_id, f"YouTube URL: {job.youtube_url}")
 
-    try:
-        # Update job status
-        job.status = "processing"
-        job.updated_at = datetime.utcnow()
-        db.commit()
+    # Visibility for every automatic upload. Hardcoding "public" meant an
+    # auto-upload job went straight to a public feed with no way to review it.
+    upload_privacy = (getattr(job, "upload_privacy", None)
+                      or getattr(settings, "AUTO_UPLOAD_PRIVACY", "unlisted"))
+    tiktok_privacy = "PUBLIC_TO_EVERYONE" if upload_privacy == "public" else "PUBLIC_TO_SELF"
 
+    try:
         # =====================
         # 1. DOWNLOAD VIDEO
         # =====================
@@ -285,6 +373,15 @@ async def process_job_async(job_id: int):
         is_upload = bool(job.youtube_url and job.youtube_url.startswith("upload://"))
         if is_upload and os.path.exists(video_path):
             job_info(job_id, f"Preserving uploaded source video: {video_path}")
+        elif is_upload:
+            # The source came from a browser upload, so there is no URL to
+            # re-fetch. Falling through to download_youtube() here produced
+            # 'Unsupported url scheme: "upload"' on every restart/rerun.
+            raise Exception(
+                f"Uploaded source file is missing ({video_path}). "
+                "Restart/re-render is not available for uploaded videos — "
+                "create a new job and upload the file again."
+            )
         elif os.path.exists(video_path) and cached_hash == _url_fingerprint(job.youtube_url):
             job_info(job_id, f"Reusing cached source for same URL: {video_path}")
         else:
@@ -496,7 +593,7 @@ async def process_job_async(job_id: int):
                     try:
                         from services.smart_crop import detect_adaptive_layout
                         resolved_layout = detect_adaptive_layout(short_path)
-                        job_info(job_id, f"Auto-detected adaptive layout for clip {clip_idx}: '{resolved_layout}'")
+                        job_info(job_id, f"Auto-detected adaptive layout for clip {index}: '{resolved_layout}'")
                     except Exception as e:
                         job_info(job_id, f"Adaptive layout detection fallback: {e}")
                         resolved_layout = "single_speaker"
@@ -799,6 +896,13 @@ async def process_job_async(job_id: int):
                     coherence_score=clip.get("coherence_score"),
                     connection_score=clip.get("connection_score"),
                     trend_score=clip.get("trend_score"),
+                    score_breakdown={
+                        "llm": clip.get("llm_score_raw"),
+                        "audio": clip.get("audio_energy_score"),
+                        "keyword": clip.get("keyword_score"),
+                        "density": clip.get("semantic_density"),
+                        "structural": clip.get("structural_score"),
+                    },
                     file_path=relative_final_path,
                     thumbnail_path=relative_thumbnail_path,
                     description=metadata.get("description", ""),
@@ -821,29 +925,32 @@ async def process_job_async(job_id: int):
                 # 5i. IMMEDIATE PER-CLIP AUTO-UPLOAD (YouTube & TikTok)
                 # Uploads progressively as each clip renders (prevents batch bursts)
                 # =========================================================
-                if getattr(job, "auto_upload", True):
+                if getattr(job, "auto_upload", False):
                     # YouTube Immediate Upload
                     try:
                         from services.youtube_upload import get_youtube_auth_status, upload_clip_to_youtube
                         yt_status = get_youtube_auth_status()
                         if yt_status.get("authenticated"):
-                            job_info(job_id, f"⚡ [Auto-Upload] Uploading Clip {index + 1}/{total_clips} directly to YouTube Shorts...")
-                            yt_res = upload_clip_to_youtube(
-                                video_path=final_path,
-                                title=final_title,
-                                description=metadata.get("description", ""),
-                                hashtags=metadata.get("hashtags", ["#Shorts"]),
-                                source_title=source_title,
-                                privacy_status="public",
-                                job_id=job_id
-                            )
-                            clip_db.uploaded = True
-                            clip_db.youtube_video_id = yt_res.get("video_id")
-                            clip_db.published_at = datetime.utcnow()
-                            clip_db.upload_error = None
-                            db.commit()
-                            db.refresh(clip_db)
-                            job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} Live on YouTube: {yt_res.get('shorts_url')}")
+                            if clip_db.youtube_video_id:
+                                job_info(job_id, f"Clip {index + 1} already on YouTube ({clip_db.youtube_video_id}), skipping re-upload")
+                            else:
+                                job_info(job_id, f"⚡ [Auto-Upload] Uploading Clip {index + 1}/{total_clips} to YouTube Shorts as '{upload_privacy}'...")
+                                yt_res = upload_clip_to_youtube(
+                                    video_path=final_path,
+                                    title=final_title,
+                                    description=metadata.get("description", ""),
+                                    hashtags=metadata.get("hashtags", ["#Shorts"]),
+                                    source_title=source_title,
+                                    privacy_status=upload_privacy,
+                                    job_id=job_id
+                                )
+                                clip_db.uploaded = True
+                                clip_db.youtube_video_id = yt_res.get("video_id")
+                                clip_db.published_at = datetime.utcnow()
+                                clip_db.upload_error = None
+                                db.commit()
+                                db.refresh(clip_db)
+                                job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} on YouTube: {yt_res.get('shorts_url')}")
                     except Exception as yt_err:
                         job_warning(job_id, f"Per-clip YouTube auto-upload skipped/failed for Clip #{index + 1}: {yt_err}")
                         clip_db.upload_error = str(yt_err)
@@ -854,16 +961,24 @@ async def process_job_async(job_id: int):
                         from services.tiktok_upload import get_tiktok_auth_status, upload_clip_to_tiktok
                         tt_status = get_tiktok_auth_status()
                         if tt_status.get("authenticated"):
-                            job_info(job_id, f"⚡ [Auto-Upload] Publishing Clip {index + 1}/{total_clips} directly to TikTok...")
-                            tt_res = upload_clip_to_tiktok(
-                                video_path=final_path,
-                                title=final_title,
-                                description=metadata.get("description", ""),
-                                hashtags=metadata.get("hashtags", ["#Shorts"]),
-                                source_title=source_title,
-                                privacy_level="PUBLIC_TO_EVERYONE"
-                            )
-                            job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} Published to TikTok: {tt_res.get('tiktok_url')}")
+                            # The upload used to leave no trace, so the
+                            # on-completion sweep republished every clip.
+                            if clip_db.tiktok_video_id:
+                                job_info(job_id, f"Clip {index + 1} already on TikTok ({clip_db.tiktok_video_id}), skipping re-upload")
+                            else:
+                                job_info(job_id, f"⚡ [Auto-Upload] Publishing Clip {index + 1}/{total_clips} to TikTok as '{tiktok_privacy}'...")
+                                tt_res = upload_clip_to_tiktok(
+                                    video_path=final_path,
+                                    title=final_title,
+                                    description=metadata.get("description", ""),
+                                    hashtags=metadata.get("hashtags", ["#Shorts"]),
+                                    source_title=source_title,
+                                    privacy_level=tiktok_privacy
+                                )
+                                clip_db.tiktok_video_id = tt_res.get("video_id") or tt_res.get("tiktok_url")
+                                db.commit()
+                                db.refresh(clip_db)
+                                job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} Published to TikTok: {tt_res.get('tiktok_url')}")
                     except Exception as tt_err:
                         job_warning(job_id, f"Per-clip TikTok auto-upload skipped/failed for Clip #{index + 1}: {tt_err}")
 
@@ -906,11 +1021,11 @@ async def process_job_async(job_id: int):
 
                     # Auto upload to YouTube if authenticated
                     try:
-                        from services.youtube_upload import upload_all_clips_to_youtube_for_job, get_auth_status
-                        yt_status = get_auth_status()
+                        from services.youtube_upload import upload_all_clips_for_job, get_youtube_auth_status
+                        yt_status = get_youtube_auth_status()
                         if yt_status.get("authenticated"):
                             job_info(job_id, f"Auto-uploading to YouTube Shorts...")
-                            upload_all_clips_to_youtube_for_job(job_id, db, privacy_status="public")
+                            upload_all_clips_for_job(job_id, db, privacy_status=upload_privacy)
                             job_info(job_id, f"YouTube Shorts auto-upload complete for Job #{job_id}")
                     except Exception as yt_err:
                         job_warning(job_id, f"YouTube auto-upload failed: {yt_err}")
@@ -918,8 +1033,8 @@ async def process_job_async(job_id: int):
                     # Auto upload to TikTok
                     try:
                         from services.tiktok_upload import upload_all_clips_to_tiktok_for_job
-                        job_info(job_id, f"Auto-uploading to TikTok...")
-                        upload_all_clips_to_tiktok_for_job(job_id, db, privacy_level="PUBLIC_TO_EVERYONE")
+                        job_info(job_id, f"Auto-uploading to TikTok as '{tiktok_privacy}'...")
+                        upload_all_clips_to_tiktok_for_job(job_id, db, privacy_level=tiktok_privacy)
                         job_info(job_id, f"TikTok auto-upload complete for Job #{job_id}")
                     except Exception as tt_err:
                         job_warning(job_id, f"TikTok auto-upload failed: {tt_err}")
@@ -938,6 +1053,7 @@ async def process_job_async(job_id: int):
         raise
 
     finally:
+        lease_stop.set()
         db.close()
 
 def process_job(job_id: int):
@@ -966,11 +1082,29 @@ def process_jobs():
     Main worker loop (polling fallback or arq dispatcher).
     """
     logger.info("Worker started. Polling for jobs...")
+    missing = log_media_tools()
+
+    last_reclaim = 0.0
 
     while True:
         db = SessionLocal()
 
         try:
+            if missing:
+                # Claiming a job we cannot render would only burn it into
+                # 'failed', so leave jobs queued until the tools appear.
+                if not missing_media_tools():
+                    missing = log_media_tools()
+                time.sleep(5)
+                continue
+            # A worker that died mid-job left the row at 'processing' forever and
+            # the query below only looks at 'created', so it was never retried.
+            if time.time() - last_reclaim >= 60:
+                last_reclaim = time.time()
+                recovered = reclaim_expired_leases(db)
+                if recovered:
+                    logger.warning(f"Requeued {recovered} job(s) with an expired lease")
+
             # Find next job to process
             job = (
                 db.query(Job)

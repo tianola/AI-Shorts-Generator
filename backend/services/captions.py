@@ -208,7 +208,7 @@ def ass_color(hex_color: str) -> str:
         r = int(hex_color[2:4], 16)
         g = int(hex_color[4:6], 16)
         b = int(hex_color[6:8], 16)
-        return f"&H{a:02X}{b:02X}{g:02X}{r:02X}"
+        return f"&H{a:02X}{b:02X}{g:02X}{r:02X}&"
     else:
         r, g, b = 255, 255, 255
 
@@ -217,10 +217,13 @@ def ass_color(hex_color: str) -> str:
 
 def ass_time(seconds: float) -> str:
     """Convert seconds to ASS time format (H:MM:SS.cc)."""
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = seconds % 60
-    return f"{h}:{m:02d}:{s:06.2f}"
+    # Work in integer centiseconds: formatting seconds with %6.2f rounds
+    # 59.995 up to "60.00" and pads values under 10 with spaces, so libass
+    # got an out-of-range, whitespace-padded timestamp.
+    cs = max(0, int(round(float(seconds) * 100)))
+    h, cs = divmod(cs, 360000)
+    m, cs = divmod(cs, 6000)
+    return f"{h}:{m:02d}:{cs // 100:02d}.{cs % 100:02d}"
 
 
 def escape_ass(text: str) -> str:
@@ -239,7 +242,9 @@ from PIL import ImageFont
 
 def _get_caption_font(style: CaptionPreset):
     """Load a truetype font for layout calculations with robust cross-platform fallbacks."""
+    from services.font_resolve import find_font
     font_candidates = [
+        find_font(bold=True),
         os.path.join(settings.STORAGE_ROOT, "assets", "fonts", "Montserrat-ExtraBold.ttf"),
         os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "fonts", "Montserrat-ExtraBold.ttf"),
         "C:/Windows/Fonts/montserrat-extrabold.ttf",
@@ -351,12 +356,19 @@ def create_caption_block(
 
         if style.jump:
             # Punchy scale-pop & upward jump on higher layer (foreground z-index)
+            # The preset's pop_scale drives the peak; hardcoding 115/132 made
+            # every preset render identically.
+            peak = max(100, int(style.pop_scale))
+            settle_x = 100 + round((peak - 100) * 0.30)
+            settle_y = 100 + round((peak - 100) * 0.80)
+            settle_t = min(100, max(45, dur_ms // 4))
+            return_t = max(dur_ms - 40, settle_t + 1)
             pop_tag = (
                 f"{{\\an5\\pos({cx:.1f},{y_base})\\bord{style.outline + 1}\\shad{style.shadow + 1}"
                 f"\\c{active_color}\\3c{outline_color}\\b1"
-                f"\\t(0,45,\\fscx115\\fscy132\\pos({cx:.1f},{y_base - jump_y}))"
-                f"\\t(45,100,\\fscx108\\fscy120\\pos({cx:.1f},{y_base - jump_y + 4}))"
-                f"\\t({max(dur_ms - 40, 100)},{dur_ms},\\fscx100\\fscy100\\pos({cx:.1f},{y_base}))"
+                f"\\t(0,{settle_t},\\fscx{peak}\\fscy{peak}\\pos({cx:.1f},{y_base - jump_y}))"
+                f"\\t({settle_t},{return_t},\\fscx{settle_x}\\fscy{settle_y}\\pos({cx:.1f},{y_base - jump_y + 4}))"
+                f"\\t({return_t},{dur_ms},\\fscx100\\fscy100\\pos({cx:.1f},{y_base}))"
             )
         else:
             pop_tag = (

@@ -25,16 +25,27 @@ Pillow>=10.0.0
 opencv-python-headless==4.10.0.84
 mediapipe>=0.10.14
 numpy>=1.26.0
-mediapipe>=0.10.14
+ultralytics>=8.3.0
 
 # Audio transcription & Diarization
 faster-whisper>=1.0.0
 pyannote.audio>=3.1.1
 torchaudio>=2.0.0
 
+# YouTube upload (services/youtube_upload.py)
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.0
+
+# System diagnostics (routes /system/stats)
+psutil>=5.9.0
+
 # Database
 aiosqlite>=0.19.0
 
 # Type hints
 typing-extensions>=4.8.0
-ultralytics>=8.3.0
+
+# Optional — install only if the feature is used:
+#   fal-client          -> AI B-roll (services/broll_ai.py, needs FAL_KEY)
+#   openai-whisper      -> 'local_pt_<name>' checkpoints (services/whisper.py)

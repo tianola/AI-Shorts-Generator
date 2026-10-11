@@ -123,7 +123,17 @@ def test_open_folder_linux_no_xdg_open_returns_path(tmp_path, monkeypatch):
 
     monkeypatch.setattr(routes, "IS_WINDOWS", False)
     monkeypatch.setattr(routes, "IS_MACOS", False)
-    monkeypatch.setattr(routes.os.path, "exists", lambda p: p != "/.dockerenv" and (tmp_path / "jobs" / "42").exists() if p != "/.dockerenv" else False)
+    real_exists = routes.os.path.exists
+
+    def fake_exists(p):
+        # routes.os.path IS the global os.path module, so the replacement must
+        # delegate to the captured real function; calling Path.exists() here
+        # re-entered this lambda and blew the stack.
+        if p == "/.dockerenv":
+            return False
+        return real_exists(p)
+
+    monkeypatch.setattr(routes.os.path, "exists", fake_exists)
     monkeypatch.setattr(routes.subprocess, "run", lambda args, **k: FakeResult(returncode=1))
 
     result, exc = _run(42)

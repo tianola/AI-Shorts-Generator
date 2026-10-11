@@ -1,4 +1,37 @@
 const API_PREFIX = '/api';
+
+// Every value below comes from the API or the local filesystem and is spliced
+// into innerHTML templates; without this a video title such as
+// "<img src=x onerror=alert(1)>" runs in the page.
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Breakdown signals arrive as 0..1 floats; render them honestly (a missing
+// signal is 'n/a', never an invented 50%).
+function pct(value) {
+  return (value === null || value === undefined) ? 'n/a' : `${Math.round(value * 100)}%`;
+}
+
+// YouTube video ids are exactly 11 characters. Older builds stored placeholders
+// such as 'queued', which produced links to a video that does not exist.
+function isYouTubeVideoId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{11}$/.test(value);
+}
+
+// Same escaping, plus a scheme allow-list, for values used inside href="".
+function safeUrl(value) {
+  const url = String(value || '').trim();
+  if (!/^(https?:)?\/\//i.test(url) && !/^data:image\//i.test(url)) return '#';
+  return escapeHtml(url);
+}
+
 const state = {
   jobs: [],
   activeJobId: null,
@@ -393,7 +426,7 @@ function updateTranscriptionEstimateBadge(durationSec) {
       est = calcSec < 60 ? `~${calcSec} sec` : `~${(calcSec / 60).toFixed(1).replace('.0', '')} min`;
     }
     els.transcriptionEstimate.style.display = 'block';
-    els.transcriptionEstimate.innerHTML = `⏱️ <strong>Estimated Transcription:</strong> ${est} for ${formatDuration(durationSec)} video (${modelObj.name})`;
+    els.transcriptionEstimate.innerHTML = `⏱️ <strong>Estimated Transcription:</strong> ${est} for ${formatDuration(durationSec)} video (${escapeHtml(modelObj.name)})`;
   }
 }
 
@@ -424,7 +457,7 @@ async function loadSystemInfo() {
     const data = await fetchJson(`${API_PREFIX}/system/info`);
     if (els.hardwareInfo) {
       els.hardwareInfo.innerHTML = `
-        <strong>PC Specs:</strong> ${data.hardware.cpu} | ${data.hardware.ram} RAM | GPU: ${data.hardware.gpu} (${data.hardware.vram})
+        <strong>PC Specs:</strong> ${escapeHtml(data.hardware.cpu)} | ${escapeHtml(data.hardware.ram)} RAM | GPU: ${escapeHtml(data.hardware.gpu)} (${escapeHtml(data.hardware.vram)})
       `;
     }
     if (data.models) {
@@ -541,8 +574,8 @@ function renderJobs(jobs) {
 	    actionsDiv.className = 'job-actions';
 	    actionsDiv.innerHTML = `
 	      <button class="job-control-btn start-btn" title="Start Job" ${job.status === 'processing' || job.status === 'created' ? 'disabled' : ''}>▶️ Start</button>
-	      <button class="job-control-btn resume-btn" title="Resume Job" ${job.status === 'failed' || job.status === 'completed' ? '' : 'disabled'}'>🔁 Resume</button>
-	      <button class="job-control-btn restart-btn" title="Restart Job" ${job.status === 'failed' || job.status === 'completed' ? '' : 'disabled'}'>🔄 Restart</button>
+	      <button class="job-control-btn resume-btn" title="Resume Job" ${job.status === 'failed' || job.status === 'completed' ? 'disabled' : ''}>🔁 Resume</button>
+	      <button class="job-control-btn restart-btn" title="Restart Job" ${job.status === 'failed' || job.status === 'completed' ? 'disabled' : ''}>🔄 Restart</button>
 	    `;
 	    if (!clone.querySelector('.job-actions')) {
 	      const footer = clone.querySelector('.job-card-footer') || clone.querySelector('.job-card');
@@ -673,12 +706,16 @@ function renderClips(clips) {
 	  badge.className = 'overlay-badge';
 	  const rawScore = clip.score || 0.85;
 	  const viralityVal = rawScore > 1.0 ? Math.round(rawScore) : Math.round(rawScore * 100);
-	  const llmPct = Math.round((clip.virality_score || rawScore) * 100);
-	  const audioPct = Math.round((clip.audio_energy_score || 0.5) * 100);
-	  const kwPct = Math.round((clip.keyword_score || 0.5) * 100);
-	  const densityPct = Math.round((clip.semantic_density || 0.5) * 100);
-	  const structPct = Math.round((clip.structural_score || 0.5) * 100);
-	  const tooltipText = `Virality Breakdown:\n• LLM: ${llmPct}% (40%)\n• Audio: ${audioPct}% (25%)\n• Keywords: ${kwPct}% (20%)\n• Density: ${densityPct}% (10%)\n• Structure: ${structPct}% (5%)`;
+	  const bd = clip.score_breakdown;
+	  const tooltipText = bd
+	    ? `Virality Breakdown:
+• LLM: ${pct(bd.llm)} (40%)
+• Audio: ${pct(bd.audio)} (25%)
+• Keywords: ${pct(bd.keyword)} (20%)
+• Density: ${pct(bd.density)} (10%)
+• Structure: ${pct(bd.structural)} (5%)`
+	    : `Composite virality score ${viralityVal}/100
+(No per-signal breakdown stored for this clip)`;
 	  badge.title = tooltipText;
 	  badge.style.cursor = 'help';
 	  badge.innerHTML = `<span class="dot pink"></span> <span>${viralityVal}/100 VIRAL</span>`;
@@ -718,13 +755,13 @@ function renderClips(clips) {
 	  studioBtn.addEventListener('click', () => openClipStudio(clip));
 	  actions.appendChild(studioBtn);
 
-	  if (clip.uploaded && clip.youtube_video_id) {
+	  if (isYouTubeVideoId(clip.youtube_video_id)) {
 		const ytBtn = document.createElement('a');
 		ytBtn.className = 'primary-btn';
 		ytBtn.style.padding = '0.55rem 0.85rem';
 		ytBtn.style.fontSize = '0.78rem';
 		ytBtn.style.background = 'linear-gradient(135deg, #FF0000, #CC0000)';
-		ytBtn.href = `https://youtube.com/shorts/${clip.youtube_video_id}`;
+		ytBtn.href = `https://youtube.com/shorts/${encodeURIComponent(clip.youtube_video_id)}`;
 		ytBtn.target = '_blank';
 		ytBtn.rel = 'noreferrer';
 		ytBtn.innerHTML = '🔴 <strong>Shorts</strong>';
@@ -916,7 +953,7 @@ if (els.videoUrl) {
           state.currentVideoDuration = data.duration;
           if (els.urlMetaBadge) {
             els.urlMetaBadge.style.display = 'block';
-            els.urlMetaBadge.innerHTML = `🎥 <strong>${data.title}</strong> — Duration: <strong>${data.duration_formatted}</strong> (${data.duration}s)`;
+            els.urlMetaBadge.innerHTML = `🎥 <strong>${escapeHtml(data.title)}</strong> — Duration: <strong>${escapeHtml(data.duration_formatted)}</strong> (${data.duration}s)`;
           }
           renderModelOptions(data.duration);
         }
@@ -1025,10 +1062,13 @@ function setupStudioModal() {
       if (statusEl) statusEl.textContent = '⏳ Rendering fast preview with new style & layout...';
 
       try {
-        const updated = await fetchJson(`${API_PREFIX}/clips/${currentStudioClip.id}/rerender`, {
+        // The endpoint answers {message, clip:{...}} — reading updated.file_path
+        // left the preview pointing at the old render after every re-render.
+        const res = await fetchJson(`${API_PREFIX}/clips/${currentStudioClip.id}/rerender`, {
           method: 'POST',
           body: JSON.stringify({ caption_style: captionStyle, layout_mode: layoutMode, title: title, karaoke: karaoke, motion_title: motionTitle, thumbnail_template: thumbnailTemplate })
         });
+      const updated = res.clip || res;
       if (statusEl) statusEl.textContent = '✅ Re-render complete!';
       if (videoPlayer && updated.file_path) {
         videoPlayer.src = asMediaUrl(updated.file_path) + `?t=${Date.now()}`;
@@ -1092,17 +1132,13 @@ function setupStudioModal() {
 
   document.getElementById('studioUploadBtn')?.addEventListener('click', async () => {
     if (!currentStudioClip) return;
-    try {
-      setStatus(`Queuing clip #${currentStudioClip.id} for YouTube upload...`);
-      await fetchJson(`${API_PREFIX}/clips/${currentStudioClip.id}/upload-status`, {
-        method: 'PATCH',
-        body: JSON.stringify({ uploaded: true, youtube_video_id: 'queued', upload_error: null })
-      });
-      setStatus(`Clip #${currentStudioClip.id} queued for YouTube upload.`, 'success');
-      await loadJob(state.activeJobId);
-    } catch (err) {
-      setStatus(`Upload failed: ${err.message}`, 'error');
-    }
+    // This used to PATCH uploaded=true with youtube_video_id='queued'. That
+    // wrote a fake publish into the database: the clip card rendered a dead
+    // youtube.com/shorts/queued link and the worker's duplicate-upload guard
+    // (which skips any clip that already has a video id) then refused to
+    // upload it for real. Run the actual upload flow instead.
+    document.querySelector('.tab-nav-btn[data-tab="youtube"]')?.click();
+    document.getElementById('ytDoUploadBtn')?.click();
   });
 }
 
@@ -1131,7 +1167,7 @@ async function sendStudioAiPrompt() {
       method: 'POST',
       body: JSON.stringify({ prompt: promptText })
     });
-    thinkingMsg.innerHTML = `✨ <strong>Success!</strong><br/>${res.message || 'Clip updated successfully.'}`;
+    thinkingMsg.innerHTML = `✨ <strong>Success!</strong><br/>${escapeHtml(res.message || 'Clip updated successfully.')}`;
     chatBox.scrollTop = chatBox.scrollHeight;
     setStatus(`AI edit applied successfully!`, 'success');
     await loadJob(state.activeJobId);
@@ -1244,10 +1280,14 @@ function openClipStudio(clip) {
   if (ytHashtagsInput) ytHashtagsInput.value = tagsStr;
 
   if (ytStatusEl) {
-    if (clip.uploaded && clip.youtube_video_id) {
-      ytStatusEl.innerHTML = `🟢 <strong>Live on YouTube:</strong> <a href="https://youtube.com/shorts/${clip.youtube_video_id}" target="_blank" style="color: #38bdf8; text-decoration: underline;">youtube.com/shorts/${clip.youtube_video_id}</a>`;
+    if (isYouTubeVideoId(clip.youtube_video_id)) {
+      ytStatusEl.innerHTML = `🟢 <strong>Live on YouTube:</strong> <a href="https://youtube.com/shorts/${encodeURIComponent(clip.youtube_video_id)}" target="_blank" style="color: #38bdf8; text-decoration: underline;">youtube.com/shorts/${escapeHtml(clip.youtube_video_id)}</a>`;
+    } else if (clip.uploaded) {
+      // Legacy rows were written with uploaded=true and a placeholder id by the
+      // old "queue upload" button; they were never actually published.
+      ytStatusEl.innerHTML = '<span style="color: #f59e0b;">⚠️ Marked uploaded, but no YouTube video id was recorded — re-upload this clip.</span>';
     } else if (clip.upload_error) {
-      ytStatusEl.innerHTML = `<span style="color: #ef4444;">⚠️ Last upload error: ${clip.upload_error}</span>`;
+      ytStatusEl.innerHTML = `<span style="color: #ef4444;">⚠️ Last upload error: ${escapeHtml(clip.upload_error)}</span>`;
     } else {
       ytStatusEl.textContent = '';
     }
@@ -1317,7 +1357,7 @@ function openClipStudio(clip) {
   modal.style.display = 'flex';
 }
 
-let youtubeStatus = { authenticated: false, channel_title: '', has_client_secrets: false };
+let youtubeStatus = { authenticated: false, channel_name: '', has_client_secrets: false };
 
 async function checkYouTubeStatus() {
   try {
@@ -1333,9 +1373,9 @@ async function checkYouTubeStatus() {
 
     if (res.authenticated) {
       if (topbarDot) topbarDot.style.background = '#22c55e';
-      if (topbarLabel) topbarLabel.textContent = `YouTube: ${res.channel_title || 'Connected'}`;
-      if (bannerText) bannerText.innerHTML = `🟢 <strong>Connected:</strong> <span style="color: #22c55e;">${res.channel_title || 'YouTube Channel'}</span>`;
-      if (modalHeading) modalHeading.innerHTML = `🟢 Connected Channel: ${res.channel_title || 'Active'}`;
+      if (topbarLabel) topbarLabel.textContent = `YouTube: ${res.channel_name || 'Connected'}`;
+      if (bannerText) bannerText.innerHTML = `🟢 <strong>Connected:</strong> <span style="color: #22c55e;">${escapeHtml(res.channel_name || 'YouTube Channel')}</span>`;
+      if (modalHeading) modalHeading.innerHTML = `🟢 Connected Channel: ${escapeHtml(res.channel_name || 'Active')}`;
       if (modalSub) modalSub.textContent = 'Ready to upload shorts instantly!';
     } else {
       if (res.has_client_secrets) {
@@ -1408,10 +1448,12 @@ function setupYouTubeIntegration() {
 
   // Listen for callback window success message
   window.addEventListener('message', (event) => {
+    // The OAuth popup is served by this same app, so anything else is not our callback.
+    if (event.origin !== window.location.origin) return;
     if (event.data && event.data.type === 'YOUTUBE_AUTH_SUCCESS') {
       const channel = event.data.channel || 'YouTube Channel';
       const progressEl = document.getElementById('ytModalAuthProgress');
-      if (progressEl) progressEl.innerHTML = `<span style="color: #22c55e; font-weight: 600;">🎉 Successfully Connected as ${channel}!</span>`;
+      if (progressEl) progressEl.innerHTML = `<span style="color: #22c55e; font-weight: 600;">🎉 Successfully Connected as ${escapeHtml(channel)}!</span>`;
       checkYouTubeStatus();
       setTimeout(() => { if (modal) modal.style.display = 'none'; }, 1500);
     }
@@ -1453,7 +1495,7 @@ function setupYouTubeIntegration() {
               clearInterval(authPollInterval);
               authPollInterval = null;
               if (authProgressEl) {
-                authProgressEl.innerHTML = `<span style="color: #22c55e; font-weight: 600;">🎉 Channel Connected: ${statusData.channel_name || 'YouTube'}</span>`;
+                authProgressEl.innerHTML = `<span style="color: #22c55e; font-weight: 600;">🎉 Channel Connected: ${escapeHtml(statusData.channel_name || 'YouTube')}</span>`;
               }
               getAuthUrlBtn.textContent = '✅ Connected Successfully!';
               checkYouTubeStatus();
@@ -1471,7 +1513,7 @@ function setupYouTubeIntegration() {
     } catch (err) {
       alert(`Error: ${err.message}`);
       getAuthUrlBtn.textContent = '🚀 Connect YouTube Channel (1-Click)';
-      if (authProgressEl) authProgressEl.innerHTML = `<span style="color: #ef4444;">❌ ${err.message}</span>`;
+      if (authProgressEl) authProgressEl.innerHTML = `<span style="color: #ef4444;">❌ ${escapeHtml(err.message)}</span>`;
     } finally {
       getAuthUrlBtn.disabled = false;
     }
@@ -1498,14 +1540,14 @@ function setupYouTubeIntegration() {
       });
       const data = await resp.json();
       if (resp.ok && data.success) {
-        if (authResult) authResult.innerHTML = `<span style="color: #22c55e;">🎉 Authorized as <strong>${data.channel_title || 'YouTube Channel'}</strong>!</span>`;
+        if (authResult) authResult.innerHTML = `<span style="color: #22c55e;">🎉 Authorized as <strong>${escapeHtml(data.channel_name || 'YouTube Channel')}</strong>!</span>`;
         checkYouTubeStatus();
         setTimeout(() => { if (modal) modal.style.display = 'none'; }, 1500);
       } else {
-        if (authResult) authResult.innerHTML = `<span style="color: #ef4444;">❌ ${data.detail || 'Authorization failed'}</span>`;
+        if (authResult) authResult.innerHTML = `<span style="color: #ef4444;">❌ ${escapeHtml(data.detail || 'Authorization failed')}</span>`;
       }
     } catch (err) {
-      if (authResult) authResult.innerHTML = `<span style="color: #ef4444;">❌ Error: ${err.message}</span>`;
+      if (authResult) authResult.innerHTML = `<span style="color: #ef4444;">❌ Error: ${escapeHtml(err.message)}</span>`;
     } finally {
       submitCodeBtn.disabled = false;
     }
@@ -1518,7 +1560,7 @@ function setupYouTubeIntegration() {
     const title = document.getElementById('ytUploadTitle')?.value.trim() || '';
     const desc = document.getElementById('ytUploadDesc')?.value.trim() || '';
     const hashtagsRaw = document.getElementById('ytUploadHashtags')?.value.trim() || '';
-    const privacy = document.getElementById('ytUploadPrivacy')?.value || 'public';
+    const privacy = document.getElementById('ytUploadPrivacy')?.value || 'unlisted';
     const statusEl = document.getElementById('ytUploadStatus');
 
     // Parse hashtags
@@ -1546,17 +1588,17 @@ function setupYouTubeIntegration() {
       if (res.success && res.video_id) {
         const shortUrl = res.url || `https://youtube.com/shorts/${res.video_id}`;
         if (statusEl) {
-          statusEl.innerHTML = `🎉 <strong>Uploaded Successfully!</strong> <a href="${shortUrl}" target="_blank" style="color: #38bdf8; text-decoration: underline; font-weight: bold;">View YouTube Short ↗</a>`;
+          statusEl.innerHTML = `🎉 <strong>Uploaded Successfully!</strong> <a href="${safeUrl(shortUrl)}" target="_blank" style="color: #38bdf8; text-decoration: underline; font-weight: bold;">View YouTube Short ↗</a>`;
         }
         currentStudioClip.uploaded = true;
         currentStudioClip.youtube_video_id = res.video_id;
         setStatus(`Clip #${currentStudioClip.id} uploaded to YouTube!`, 'success');
         await loadJob(state.activeJobId);
       } else {
-        if (statusEl) statusEl.innerHTML = `<span style="color: #ef4444;">❌ Upload failed: ${res.error || 'Unknown error'}</span>`;
+        if (statusEl) statusEl.innerHTML = `<span style="color: #ef4444;">❌ Upload failed: ${escapeHtml(res.error || 'Unknown error')}</span>`;
       }
     } catch (err) {
-      if (statusEl) statusEl.innerHTML = `<span style="color: #ef4444;">❌ Upload error: ${err.message}</span>`;
+      if (statusEl) statusEl.innerHTML = `<span style="color: #ef4444;">❌ Upload error: ${escapeHtml(err.message)}</span>`;
     } finally {
       doUploadBtn.disabled = false;
     }
@@ -1578,7 +1620,7 @@ async function checkTikTokStatus() {
     if (res.authenticated) {
       if (topbarLabel) topbarLabel.textContent = `TikTok: ${res.username || 'Connected'}`;
       if (topbarDot) topbarDot.style.background = '#00f2fe';
-      if (banner) banner.innerHTML = `🟢 <strong>Connected:</strong> <span style="color: #00f2fe;">${res.username}</span>`;
+      if (banner) banner.innerHTML = `🟢 <strong>Connected:</strong> <span style="color: #00f2fe;">${escapeHtml(res.username)}</span>`;
       if (usernameInput) usernameInput.value = res.username || '';
       if (disconnectBtn) disconnectBtn.style.display = 'block';
     } else {
@@ -1639,7 +1681,7 @@ function setupTikTokIntegration() {
       });
 
       if (res.success) {
-        if (resultMsg) resultMsg.innerHTML = `<span style="color: #22c55e;">🎉 Connected as <strong>${res.username}</strong>!</span>`;
+        if (resultMsg) resultMsg.innerHTML = `<span style="color: #22c55e;">🎉 Connected as <strong>${escapeHtml(res.username)}</strong>!</span>`;
         if (sessionInput) sessionInput.value = '';
         await checkTikTokStatus();
         setTimeout(() => {
@@ -1648,7 +1690,7 @@ function setupTikTokIntegration() {
         }, 1200);
       }
     } catch (err) {
-      if (resultMsg) resultMsg.innerHTML = `<span style="color: #ef4444;">❌ Failed: ${err.message}</span>`;
+      if (resultMsg) resultMsg.innerHTML = `<span style="color: #ef4444;">❌ Failed: ${escapeHtml(err.message)}</span>`;
     } finally {
       saveBtn.disabled = false;
       saveBtn.textContent = '✅ Connect TikTok Account';
@@ -1710,7 +1752,7 @@ function setupBatchUpload() {
     if (kicker) kicker.textContent = 'YouTube Shorts Automation';
     if (heading) heading.textContent = '🚀 Batch Uploading to YouTube';
 
-    const privacy = privacySelect?.value || 'public';
+    const privacy = privacySelect?.value || 'unlisted';
     if (modal) modal.style.display = 'flex';
     if (resultsList) resultsList.innerHTML = '<div style="color: var(--muted); font-size: 0.85rem;">⏳ Preparing clips and generating viral SEO tags...</div>';
     if (statusText) statusText.textContent = `🚀 Uploading all clips from Job #${state.activeJobId} to YouTube (${privacy})...`;
@@ -1751,16 +1793,16 @@ function setupBatchUpload() {
           if (r.status === 'uploaded') {
             item.innerHTML = `
               <div style="font-size: 0.85rem; font-weight: 600; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px;">
-                🎬 ${r.title}
+                🎬 ${escapeHtml(r.title)}
               </div>
-              <a href="${r.shorts_url}" target="_blank" style="background: linear-gradient(135deg, #FF0000, #CC0000); color: #fff; text-decoration: none; font-size: 0.75rem; font-weight: 700; padding: 5px 12px; border-radius: 6px; box-shadow: 0 2px 6px rgba(255,0,0,0.3); white-space: nowrap;">
+              <a href="${safeUrl(r.shorts_url)}" target="_blank" style="background: linear-gradient(135deg, #FF0000, #CC0000); color: #fff; text-decoration: none; font-size: 0.75rem; font-weight: 700; padding: 5px 12px; border-radius: 6px; box-shadow: 0 2px 6px rgba(255,0,0,0.3); white-space: nowrap;">
                 View Short ↗
               </a>
             `;
           } else {
             item.innerHTML = `
               <div style="font-size: 0.85rem; font-weight: 600; color: #ef4444;">
-                ❌ ${r.title}: ${r.error || 'Failed'}
+                ❌ ${escapeHtml(r.title)}: ${escapeHtml(r.error || 'Failed')}
               </div>
             `;
           }
@@ -1772,7 +1814,7 @@ function setupBatchUpload() {
       setStatus(`Batch YouTube upload completed for Job #${state.activeJobId}!`, 'success');
 
     } catch (err) {
-      if (statusText) statusText.innerHTML = `<span style="color: #ef4444;">❌ Batch upload failed: ${err.message}</span>`;
+      if (statusText) statusText.innerHTML = `<span style="color: #ef4444;">❌ Batch upload failed: ${escapeHtml(err.message)}</span>`;
       if (progressBar) progressBar.style.width = '0%';
     } finally {
       batchYtBtn.disabled = false;
@@ -1811,7 +1853,7 @@ function setupBatchUpload() {
       const res = await fetchJson(`${API_PREFIX}/jobs/${state.activeJobId}/upload-all-tiktok`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ privacy_level: 'PUBLIC_TO_EVERYONE' })
+        body: JSON.stringify({ privacy_level: (document.getElementById('batchPrivacySelect')?.value || 'unlisted') === 'public' ? 'PUBLIC_TO_EVERYONE' : 'PUBLIC_TO_SELF' })
       });
 
       if (progressBar) progressBar.style.width = '100%';
@@ -1838,16 +1880,16 @@ function setupBatchUpload() {
           if (r.status === 'uploaded') {
             item.innerHTML = `
               <div style="font-size: 0.85rem; font-weight: 600; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px;">
-                🎵 ${r.title}
+                🎵 ${escapeHtml(r.title)}
               </div>
-              <a href="${r.tiktok_url}" target="_blank" style="background: linear-gradient(135deg, #00f2fe, #4facfe); color: #000; text-decoration: none; font-size: 0.75rem; font-weight: 700; padding: 5px 12px; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,242,254,0.3); white-space: nowrap;">
+              <a href="${safeUrl(r.tiktok_url)}" target="_blank" style="background: linear-gradient(135deg, #00f2fe, #4facfe); color: #000; text-decoration: none; font-size: 0.75rem; font-weight: 700; padding: 5px 12px; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,242,254,0.3); white-space: nowrap;">
                 View on TikTok ↗
               </a>
             `;
           } else {
             item.innerHTML = `
               <div style="font-size: 0.85rem; font-weight: 600; color: #ef4444;">
-                ❌ ${r.title}: ${r.error || 'Failed'}
+                ❌ ${escapeHtml(r.title)}: ${escapeHtml(r.error || 'Failed')}
               </div>
             `;
           }
@@ -1859,7 +1901,7 @@ function setupBatchUpload() {
       setStatus(`Batch TikTok upload completed for Job #${state.activeJobId}!`, 'success');
 
     } catch (err) {
-      if (statusText) statusText.innerHTML = `<span style="color: #ef4444;">❌ TikTok batch upload failed: ${err.message}</span>`;
+      if (statusText) statusText.innerHTML = `<span style="color: #ef4444;">❌ TikTok batch upload failed: ${escapeHtml(err.message)}</span>`;
       if (progressBar) progressBar.style.width = '0%';
     } finally {
       batchTikTokBtn.disabled = false;

@@ -3,6 +3,7 @@
 Run from backend/:  PYTHONPATH=. python -m pytest tests/test_single_pass_unified.py -v
 """
 import os
+import shutil
 import sys
 import tempfile
 
@@ -161,6 +162,7 @@ def tiny_source():
     shutil.rmtree(d, ignore_errors=True)
 
 
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="requires ffmpeg on PATH")
 def test_render_single_pass_end_to_end(tiny_source):
     from services.render import render_single_pass
     from services.vertical import build_vertical_filter

@@ -3,6 +3,7 @@
 Run from backend/:  PYTHONPATH=. python -m pytest tests/ -x -q
 """
 import os
+import shutil
 import sys
 import json
 import tempfile
@@ -117,6 +118,13 @@ def test_pending_upload_param():
 # ---------------------------------------------------------------------------
 # Test 6: SFX missing files -> graceful copy
 # ---------------------------------------------------------------------------
+needs_ffmpeg = pytest.mark.skipif(
+    not (shutil.which("ffmpeg") and shutil.which("ffprobe")),
+    reason="requires ffmpeg and ffprobe on PATH",
+)
+
+
+@needs_ffmpeg
 def test_sfx_missing_assets_noop():
     from services.sfx import add_automatic_sfx
     d = tempfile.mkdtemp(prefix="sfx_")
@@ -141,6 +149,7 @@ def test_sfx_missing_assets_noop():
 # ---------------------------------------------------------------------------
 # Test 7: storyboard works on a short clip
 # ---------------------------------------------------------------------------
+@needs_ffmpeg
 def test_storyboard_short_clip():
     from services.storyboard import generate_storyboard
     d = tempfile.mkdtemp(prefix="story_")
@@ -164,6 +173,7 @@ def test_storyboard_short_clip():
 # ---------------------------------------------------------------------------
 # Test 8: thumbnail generation on a very short clip
 # ---------------------------------------------------------------------------
+@needs_ffmpeg
 def test_thumbnail_short_clip():
     from services.thumbnail import generate_thumbnail
     d = tempfile.mkdtemp(prefix="thumb_")

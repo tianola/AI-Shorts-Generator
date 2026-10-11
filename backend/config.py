@@ -61,6 +61,11 @@ class Settings(BaseSettings):
         default="tiny",
         description="Transcription model size (faster-whisper): tiny, base, small, medium, large"
     )
+    WHISPER_PT_MODELS_DIR: str = Field(
+        default=r"E:\01-AI-PROJECTS\whisper-models",
+        description="Directory holding OpenAI-whisper .pt checkpoints for the "
+                    "'local_pt_<name>' transcription backend"
+    )
 
     # ====================
     # CLIP SELECTION
@@ -133,10 +138,10 @@ class Settings(BaseSettings):
         description="FFmpeg CRF value (visually lossless quality)"
     )
     FFMPEG_THREADS: int = Field(
-        default=2,
-        ge=1,
-        le=16,
-        description="Number of threads ffmpeg may use per encode (-threads N) to limit memory usage."
+        default=0,
+        ge=0,
+        le=64,
+        description="x264 worker threads for the final render (-threads N). 0 lets ffmpeg use all logical cores; lower it only if encode RAM is the limit, since the cap costs ~2x wall time on a 16-thread machine."
     )
     FFMPEG_SCALE_FILTER: str = Field(
         default="scale=trunc(iw/2)*2:trunc(ih/2)*2",
@@ -167,6 +172,28 @@ class Settings(BaseSettings):
         ge=0,
         le=10,
         description="Maximum number of upload retries"
+    )
+    AUTO_UPLOAD_PRIVACY: str = Field(
+        default="unlisted",
+        description="Visibility for automatic uploads: 'public', 'unlisted' or 'private'"
+    )
+
+    @field_validator('AUTO_UPLOAD_PRIVACY')
+    def validate_upload_privacy(cls, v):
+        allowed = ['public', 'unlisted', 'private']
+        if v.lower() not in allowed:
+            raise ValueError(f"AUTO_UPLOAD_PRIVACY must be one of {allowed}")
+        return v.lower()
+
+    # ====================
+    # WORKER
+    # ====================
+    JOB_LEASE_MINUTES: int = Field(
+        default=90,
+        ge=1,
+        le=1440,
+        description="Minutes after which a job still marked 'processing' with no "
+                    "heartbeat is assumed abandoned and returned to the queue."
     )
 
     # ====================
@@ -206,28 +233,59 @@ class Settings(BaseSettings):
         le=65535,
         description="Port for the FastAPI server"
     )
+    CORS_ORIGINS: str = Field(
+        default="http://localhost:5001,http://127.0.0.1:5001",
+        description="Comma-separated browser origins allowed to call the API. "
+                    "Use '*' to open it up (credentials are then disabled automatically)."
+    )
+
+    @property
+    def cors_origin_list(self) -> list:
+        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    # ====================
+    # LOGGING
+    # ====================
+    LOG_LEVEL: str = Field(
+        default="INFO",
+        description="Level written to the rotating storage/logs/app.log sink."
+    )
+    LOG_CONSOLE_LEVEL: str = Field(
+        default="WARNING",
+        description="Level written to stderr. Keep it high: in windowless "
+                    "daemon mode stderr is redirected to a file that nothing rotates."
+    )
 
     # ====================
     # STORAGE
     # ====================
     STORAGE_ROOT: str = Field(
         default="/app/storage",
-        description="Root path for all storage (videos, jobs, etc.)"
+        description="Root path for all storage (videos, jobs, etc.). "
+                    "Left unset outside Docker it resolves to <repo>/storage."
     )
 
     @field_validator('STORAGE_ROOT', mode='before')
     @classmethod
     def resolve_storage_root(cls, v):
-            # Always return an absolute path based on the repo root (parent of backend/),
-            # never depending on CWD. In Docker keep any explicit /app path.
-            backend_dir = Path(__file__).resolve().parent          # .../backend
-            project_root = backend_dir.parent                       # repo root
-            if os.path.exists('/.dockerenv') and (not v or str(v).startswith('/app')):
-                os.makedirs(v, exist_ok=True)
-                return v
-            local_storage = os.path.join(str(project_root), "storage")
-            os.makedirs(local_storage, exist_ok=True)
-            return local_storage
+        # Honour an explicit operator value; only substitute the repo-local
+        # storage directory for the packaged "/app" default on a dev machine.
+        # Silently rewriting every configured path made an external volume
+        # impossible to point at.
+        backend_dir = Path(__file__).resolve().parent          # .../backend
+        project_root = backend_dir.parent                       # repo root
+        configured = str(v).strip() if v else ""
+
+        in_docker = os.path.exists('/.dockerenv')
+        is_packaged_default = configured in ("", "/app/storage", "/app")
+        if in_docker or not is_packaged_default:
+            resolved = configured or "/app/storage"
+        else:
+            resolved = os.path.join(str(project_root), "storage")
+
+        resolved = os.path.abspath(os.path.expanduser(resolved))
+        os.makedirs(resolved, exist_ok=True)
+        return resolved
 
     # ====================
     # PATHS (computed)
@@ -235,6 +293,10 @@ class Settings(BaseSettings):
     @property
     def JOBS_DIR(self) -> str:
         return os.path.join(self.STORAGE_ROOT, "jobs")
+
+    @property
+    def LOGS_DIR(self) -> str:
+        return os.path.join(self.STORAGE_ROOT, "logs")
 
     # ====================
     # YOUTUBE DOWNLOAD (cookies + JS challenge)
@@ -252,9 +314,22 @@ class Settings(BaseSettings):
         description="yt-dlp remote components for JS challenge solving (ejs:github or ejs:npm)"
     )
 
+    FONTS_DIR: str = Field(
+        default_factory=lambda: (
+            "C:/Windows/Fonts" if os.name == "nt"
+            else "/usr/share/fonts/truetype/montserrat"
+        ),
+        description="Directory searched last for caption/title fonts"
+    )
+
     @property
-    def FONTS_DIR(self) -> str:
-        return "/usr/share/fonts/truetype/montserrat"
+    def fonts_search_paths(self) -> list:
+        """Font directories in priority order: bundled assets first, then OS."""
+        return [
+            os.path.join(self.STORAGE_ROOT, "assets", "fonts"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts"),
+            self.FONTS_DIR,
+        ]
 
     model_config = SettingsConfigDict(
         env_file=".env",

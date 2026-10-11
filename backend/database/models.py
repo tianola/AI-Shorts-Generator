@@ -15,6 +15,10 @@ class Job(Base):
     youtube_url = Column(String, nullable=False)
     style_prompt = Column(Text, nullable=True)
     status = Column(String, default="created")  # created|processing|completed|failed
+    # Lease bookkeeping. A worker that died mid-job left the row at 'processing'
+    # forever, because the poller only queries 'created' and never reclaimed it.
+    claimed_by = Column(String, nullable=True)
+    claimed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
     channel_id = Column(String, nullable=True)  # Future: multi-channel support
     whisper_model = Column(String, nullable=True, default="tiny")
@@ -29,7 +33,12 @@ class Job(Base):
     # Content safety: smart blur of unsafe objects
     smart_blur_enabled = Column(Boolean, nullable=True, default=False)
     target_clips = Column(Integer, nullable=True, default=10)
-    auto_upload = Column(Boolean, nullable=True, default=True)
+    # Publishing is opt-in. The previous default of True meant a job created by
+    # an API client that never mentioned auto_upload (n8n, curl, scripts) was
+    # pushed straight to public YouTube/TikTok feeds.
+    auto_upload = Column(Boolean, nullable=True, default=False)
+    # "public" | "unlisted" | "private"; NULL falls back to AUTO_UPLOAD_PRIVACY
+    upload_privacy = Column(String, nullable=True, default=None)
     llm_translate = Column(Boolean, nullable=True, default=False)
     hook_style_list = Column(JSON, nullable=True)
     is_zero_view_diagnostic = Column(Boolean, nullable=True, default=False)
@@ -72,6 +81,10 @@ class Clip(Base):
     coherence_score = Column(Float, nullable=True)
     connection_score = Column(Float, nullable=True)
     trend_score = Column(Float, nullable=True)
+    # Individual signals behind `score` (llm / audio / keyword / density /
+    # structural). The studio tooltip used to read per-signal columns that no
+    # code ever wrote, so every clip displayed the same invented percentages.
+    score_breakdown = Column(JSON, nullable=True)
 
     # Style and layout configurations
     caption_style = Column(String, nullable=True, default="mrbeast")
@@ -95,6 +108,9 @@ class Clip(Base):
     # Upload status
     uploaded = Column(Boolean, default=False)
     youtube_video_id = Column(String, nullable=True)
+    # Records the TikTok publish. Without it the per-clip upload left no trace
+    # and the on-completion sweep republished the same clip.
+    tiktok_video_id = Column(String, nullable=True)
     upload_error = Column(Text, nullable=True)
     upload_retry_count = Column(Integer, default=0)
     published_at = Column(DateTime, nullable=True)  # Scheduled publish time

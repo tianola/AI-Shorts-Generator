@@ -6,6 +6,8 @@ import asyncio
 import redis.asyncio as redis
 import os
 import json
+import re
+import html as html_escape_mod
 import logging
 import shutil
 import subprocess
@@ -19,11 +21,72 @@ from sqlalchemy.orm import Session
 from pathlib import Path
 
 from database.models import Job, Clip, JobProgress
-from database.session import get_database
+from database.session import SessionLocal, get_database
 from config import settings
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
+
+
+def esc_html(value: object) -> str:
+    """Escape a value before splicing it into one of the inline HTML responses.
+
+    Google controls the ``error`` query parameter and the channel title, so
+    these must not reach the browser as markup.
+    """
+    return html_escape_mod.escape("" if value is None else str(value), quote=True)
+
+
+def esc_js(value: object) -> str:
+    """Encode a value as a JS string literal safe inside an inline <script>.
+
+    json.dumps keeps '<' verbatim, so a '</script>' inside the data would close
+    the block early; those get written as \\u003c / \\u003e instead.
+    """
+    return json.dumps("" if value is None else str(value)).replace("<", "\\u003c").replace(">", "\\u003e")
+
+
+def clip_payload(clip: Clip) -> dict:
+    """Single wire shape for a clip, used by every endpoint that returns one.
+
+    Three hand-copied variants used to drift (platform_metadata, tiktok_video_id
+    and the score breakdown were missing from some of them), so the frontend
+    received different fields depending on which endpoint it called.
+    """
+    return {
+        "id": clip.id,
+        "job_id": clip.job_id,
+        "index": clip.index,
+        "start": clip.start,
+        "end": clip.end,
+        "title": clip.title,
+        "hook": clip.hook,
+        "score": clip.score,
+        "hook_score": clip.hook_score,
+        "coherence_score": clip.coherence_score,
+        "connection_score": clip.connection_score,
+        "trend_score": clip.trend_score,
+        "score_breakdown": clip.score_breakdown,
+        "caption_style": clip.caption_style or "mrbeast",
+        "layout_mode": clip.layout_mode or "single_speaker",
+        "virality_explanation": clip.virality_explanation,
+        "trim_start": clip.trim_start,
+        "trim_end": clip.trim_end,
+        "translated_transcript": clip.translated_transcript,
+        "file_path": clip.file_path,
+        "thumbnail_path": clip.thumbnail_path,
+        "description": clip.description,
+        "hashtags": clip.hashtags,
+        "platform_metadata": clip.platform_metadata,
+        "uploaded": clip.uploaded,
+        "youtube_video_id": clip.youtube_video_id,
+        "tiktok_video_id": clip.tiktok_video_id,
+        "upload_error": clip.upload_error,
+        "upload_retry_count": clip.upload_retry_count,
+        "published_at": clip.published_at,
+        "created_at": clip.created_at,
+    }
+
 
 # Platform detection captured at import time. Kept as module attributes so tests
 # can patch them WITHOUT mutating sys.platform/os.name process-wide (which breaks
@@ -126,10 +189,34 @@ class JobResponse(BaseModel):
 class JobListResponse(BaseModel):
     jobs: List[JobResponse]
 
+# YouTube ids are exactly 11 characters of [A-Za-z0-9_-]. Callers used to post
+# placeholders such as "queued" here, which marked a clip as published and made
+# the worker duplicate-guard skip the real upload forever.
+YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
 class ClipUploadStatus(BaseModel):
     uploaded: bool
     youtube_video_id: Optional[str] = None
     upload_error: Optional[str] = None
+
+    @field_validator("youtube_video_id")
+    @classmethod
+    def normalize_video_id(cls, v):
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if not YOUTUBE_VIDEO_ID_RE.match(v):
+            raise ValueError("youtube_video_id must be an 11-character YouTube video id")
+        return v
+
+    @model_validator(mode="after")
+    def published_needs_an_id(self):
+        if self.uploaded and not self.youtube_video_id:
+            raise ValueError("uploaded=true requires the real youtube_video_id")
+        return self
 
 class ClipResponse(BaseModel):
     id: int
@@ -390,33 +477,42 @@ async def list_clips(
     clips = query.order_by(Clip.id.desc()).offset(offset).limit(limit).all()
 
     return {
-        "clips": [{
-            "id": c.id,
-            "job_id": c.job_id,
-            "index": c.index,
-            "start": c.start,
-            "end": c.end,
-            "title": c.title,
-            "hook": c.hook,
-            "score": c.score,
-            "hook_score": c.hook_score,
-            "coherence_score": c.coherence_score,
-            "connection_score": c.connection_score,
-            "trend_score": c.trend_score,
-            "caption_style": c.caption_style or "mrbeast",
-            "layout_mode": c.layout_mode or "single_speaker",
-            "virality_explanation": c.virality_explanation,
-            "file_path": c.file_path,
-            "thumbnail_path": c.thumbnail_path,
-            "description": c.description,
-            "hashtags": c.hashtags,
-            "uploaded": c.uploaded,
-            "youtube_video_id": c.youtube_video_id,
-            "upload_error": c.upload_error,
-            "created_at": c.created_at
-        } for c in clips],
+        "clips": [clip_payload(c) for c in clips],
         "total": len(clips)
     }
+
+
+@router.get("/clips/pending-upload")
+async def get_pending_uploads(
+    max_retries: Optional[int] = Query(None, description="Max retries"),
+    db: Session = Depends(get_database)
+):
+    """Get clips that need to be uploaded.
+
+    Declared before /clips/{clip_id}: FastAPI matches in registration order,
+    so as a later route "pending-upload" was captured by {clip_id} and died on
+    int parsing (live 422).
+    """
+    if max_retries is None:
+        max_retries = settings.MAX_UPLOAD_RETRIES
+
+    clips = db.query(Clip).join(Job).filter(
+        Clip.uploaded == False,
+        Clip.upload_retry_count < max_retries,
+        Job.status == "completed"
+    ).all()
+
+    return [{
+        "id": clip.id,
+        "job_id": clip.job_id,
+        "file_path": clip.file_path,
+        "thumbnail_path": clip.thumbnail_path,
+        "title": clip.title,
+        "description": clip.description,
+        "hashtags": clip.hashtags,
+        "upload_retry_count": clip.upload_retry_count,
+        "upload_error": clip.upload_error
+    } for clip in clips]
 
 
 @router.get("/clips/{clip_id}")
@@ -428,36 +524,7 @@ async def get_clip(
     clip = db.query(Clip).filter(Clip.id == clip_id).first()
     if not clip:
         raise HTTPException(status_code=404, detail=f"Clip {clip_id} not found")
-    return {
-        "clip": {
-            "id": clip.id,
-            "job_id": clip.job_id,
-            "index": clip.index,
-            "start": clip.start,
-            "end": clip.end,
-            "title": clip.title,
-            "hook": clip.hook,
-            "score": clip.score,
-            "hook_score": clip.hook_score,
-            "coherence_score": clip.coherence_score,
-            "connection_score": clip.connection_score,
-            "trend_score": clip.trend_score,
-            "caption_style": clip.caption_style or "mrbeast",
-            "layout_mode": clip.layout_mode or "single_speaker",
-            "virality_explanation": clip.virality_explanation,
-            "file_path": clip.file_path,
-            "thumbnail_path": clip.thumbnail_path,
-            "description": clip.description,
-            "hashtags": clip.hashtags,
-            "platform_metadata": clip.platform_metadata,
-            "uploaded": clip.uploaded,
-            "youtube_video_id": clip.youtube_video_id,
-            "upload_error": clip.upload_error,
-            "upload_retry_count": clip.upload_retry_count,
-            "published_at": clip.published_at,
-            "created_at": clip.created_at
-        }
-    }
+    return {"clip": clip_payload(clip)}
 
 
 @router.patch("/clips/{clip_id}/update-bounds")
@@ -530,36 +597,6 @@ async def update_clip_caption(
     }
 
 
-@router.get("/clips/pending-upload")
-async def get_pending_uploads(
-    max_retries: int = Query(None, description="Max retries"),
-    db: Session = Depends(get_database)
-):
-    """Get clips that need to be uploaded."""
-    if max_retries is None:
-        max_retries = settings.MAX_UPLOAD_RETRIES
-
-    clips = db.query(Clip).join(Job).filter(
-        Clip.uploaded == False,
-        Clip.upload_retry_count < max_retries,
-        Job.status == "completed"
-    ).all()
-
-    result = [{
-        "id": clip.id,
-        "job_id": clip.job_id,
-        "file_path": clip.file_path,
-        "thumbnail_path": clip.thumbnail_path,
-        "title": clip.title,
-        "description": clip.description,
-        "hashtags": clip.hashtags,
-        "upload_retry_count": clip.upload_retry_count,
-        "upload_error": clip.upload_error
-    } for clip in clips]
-
-    return result
-
-
 @router.post("/jobs/{job_id}/start")
 async def start_job(job_id: int, db: Session = Depends(get_database)):
     """Manually start a created job so the worker can pick it up."""
@@ -596,13 +633,26 @@ async def restart_job(job_id: int, db: Session = Depends(get_database)):
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
-    # Perform cleanup: delete all artifacts and recreate a clean job directory
+
     job_dir = Path(settings.JOBS_DIR) / str(job_id)
+
+    # An upload:// job has no URL to re-fetch, so wiping source.mp4 made
+    # restart permanently fatal. Carry the source across the cleanup.
+    preserved_source = None
+    if job_dir.exists():
+        source_file = job_dir / "source.mp4"
+        if source_file.exists() and (job.youtube_url or "").startswith("upload://"):
+            staging = job_dir.parent / f"job_{job_id}_source.keep"
+            source_file.replace(staging)
+            preserved_source = staging
+
     if job_dir.exists():
         shutil.rmtree(job_dir, ignore_errors=True)
     job_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    if preserved_source is not None and preserved_source.exists():
+        preserved_source.replace(job_dir / "source.mp4")
+
     # Reset status
     job.status = "created"
     job.error_message = None
@@ -637,28 +687,39 @@ async def suggest_clips_for_job(
     return {"clips": clips}
 
 
-@router.post("/jobs")
+def _resolve_upload_privacy(value: Optional[str]) -> str:
+    """Validate the per-job upload visibility, falling back to the configured default."""
+    allowed = {"public", "unlisted", "private"}
+    if value is None:
+        return settings.AUTO_UPLOAD_PRIVACY
+    normalized = value.lower().strip()
+    if normalized not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid upload_privacy '{value}'. Allowed: {', '.join(sorted(allowed))}"
+        )
+    return normalized
 
-@router.post("/test/zero-view-diagnostic")
-async def zero_view_diagnostic_endpoint(
-    youtube_url: Optional[str] = None,
+
+@router.post("/jobs")
+async def create_job(
+    youtube_url: str,
     style_prompt: Optional[str] = None,
     whisper_model: Optional[str] = "tiny",
     caption_style: Optional[str] = "mrbeast",
     layout_mode: Optional[str] = "auto",
     target_clips: Optional[int] = 10,
-    auto_upload: Optional[bool] = True,
+    auto_upload: Optional[bool] = False,
     llm_translate: Optional[bool] = False,
-    file: Optional[UploadFile] = File(None),
+    upload_privacy: Optional[str] = None,
     db: Session = Depends(get_database)
 ):
-    """Create and start a test job with 10 clips to diagnose zero view issues.
-    If youtube_url is provided, uses it; otherwise expects a file upload via form 'file'.
-    Returns the job id and sets the job up for zero-view diagnostic (with varied hook styles).
-    """
-    # Create job
+    """Create a new video processing job."""
+    if not youtube_url.strip():
+        raise HTTPException(status_code=400, detail="youtube_url must not be empty")
+
     job = Job(
-        youtube_url=youtube_url or f"upload://{file.filename if file else 'unknown'}",
+        youtube_url=youtube_url,
         style_prompt=style_prompt,
         whisper_model=whisper_model,
         default_caption_style=caption_style,
@@ -666,6 +727,54 @@ async def zero_view_diagnostic_endpoint(
         target_clips=target_clips or 10,
         auto_upload=bool(auto_upload),
         llm_translate=bool(llm_translate),
+        upload_privacy=_resolve_upload_privacy(upload_privacy),
+        status="created"
+    )
+
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    return JobCreateResponse(
+        job_id=job.id,
+        status=job.status,
+        url=job.youtube_url
+    )
+
+
+@router.post("/test/zero-view-diagnostic")
+async def zero_view_diagnostic_endpoint(
+    youtube_url: Optional[str] = Form(None),
+    style_prompt: Optional[str] = Form(None),
+    whisper_model: Optional[str] = Form("tiny"),
+    caption_style: Optional[str] = Form("mrbeast"),
+    layout_mode: Optional[str] = Form("auto"),
+    target_clips: Optional[int] = Form(10),
+    auto_upload: Optional[bool] = Form(False),
+    llm_translate: Optional[bool] = Form(False),
+    upload_privacy: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_database)
+):
+    """Create a diagnostic job whose clips each use a different hook style.
+    Takes either a youtube_url or a multipart file upload.
+    """
+    if not youtube_url and not file:
+        raise HTTPException(status_code=400, detail="Provide either youtube_url or a 'file' upload")
+
+    num_clips = target_clips or 10
+
+    # Create job
+    job = Job(
+        youtube_url=youtube_url or f"upload://{file.filename if file else 'unknown'}",
+        style_prompt=style_prompt,
+        whisper_model=whisper_model,
+        default_caption_style=caption_style,
+        default_layout_mode=layout_mode,
+        target_clips=num_clips,
+        auto_upload=bool(auto_upload),
+        llm_translate=bool(llm_translate),
+        upload_privacy=_resolve_upload_privacy(upload_privacy),
         status="created"
     )
     db.add(job)
@@ -681,51 +790,16 @@ async def zero_view_diagnostic_endpoint(
 
     # Set up for zero-view diagnostic: varied hook styles
     base_styles = ["aggressive", "curiosity", "story-driven"]
-    repeat_times = (target_clips + len(base_styles) - 1) // len(base_styles)
-    hook_style_list = (base_styles * repeat_times)[:target_clips]
-    job.hook_style_list = hook_style_list
+    repeat_times = (num_clips + len(base_styles) - 1) // len(base_styles)
+    job.hook_style_list = (base_styles * repeat_times)[:num_clips]
     job.is_zero_view_diagnostic = True
     db.commit()
     db.refresh(job)
 
     return {
         "job_id": job.id,
-        "message": "Zero-view diagnostic job created. The worker will process it and generate 10 clips with varied hook styles."
+        "message": f"Zero-view diagnostic job created with {num_clips} clips using varied hook styles."
     }
-
-async def create_job(
-    youtube_url: str,
-    style_prompt: Optional[str] = None,
-    whisper_model: Optional[str] = "tiny",
-    caption_style: Optional[str] = "mrbeast",
-    layout_mode: Optional[str] = "auto",
-    target_clips: Optional[int] = 10,
-    auto_upload: Optional[bool] = True,
-    llm_translate: Optional[bool] = False,
-    db: Session = Depends(get_database)
-):
-    """Create a new video processing job."""
-    job = Job(
-        youtube_url=youtube_url,
-        style_prompt=style_prompt,
-        whisper_model=whisper_model,
-        default_caption_style=caption_style,
-        default_layout_mode=layout_mode,
-        target_clips=target_clips or 10,
-        auto_upload=bool(auto_upload),
-        llm_translate=bool(llm_translate),
-        status="created"
-    )
-
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-
-    return JobCreateResponse(
-        job_id=job.id,
-        status=job.status,
-        url=job.youtube_url
-    )
 
 
 @router.post("/jobs/upload")
@@ -736,8 +810,9 @@ async def create_job_from_upload(
     caption_style: Optional[str] = Form("mrbeast"),
     layout_mode: Optional[str] = Form("auto"),
     target_clips: Optional[int] = Form(10),
-    auto_upload: Optional[bool] = Form(True),
+    auto_upload: Optional[bool] = Form(False),
     llm_translate: Optional[bool] = Form(False),
+    upload_privacy: Optional[str] = Form(None),
     db: Session = Depends(get_database)
 ):
     """Create a new job from a locally uploaded video file."""
@@ -758,6 +833,7 @@ async def create_job_from_upload(
         target_clips=target_clips or 10,
         auto_upload=bool(auto_upload),
         llm_translate=bool(llm_translate),
+        upload_privacy=_resolve_upload_privacy(upload_privacy),
         status="created"
     )
     db.add(job)
@@ -809,33 +885,7 @@ async def get_job(
         updated_at=job.updated_at,
         current_stage=progress.current_stage if progress else None,
         progress_percent=progress.progress_percent if progress else None,
-        clips=[{
-            "id": clip.id,
-            "job_id": clip.job_id,
-            "index": clip.index,
-            "start": clip.start,
-            "end": clip.end,
-            "title": clip.title,
-            "hook": clip.hook,
-            "score": clip.score,
-            "hook_score": clip.hook_score,
-            "coherence_score": clip.coherence_score,
-            "connection_score": clip.connection_score,
-            "trend_score": clip.trend_score,
-            "caption_style": clip.caption_style or "mrbeast",
-            "layout_mode": clip.layout_mode or "single_speaker",
-            "virality_explanation": clip.virality_explanation,
-            "file_path": clip.file_path,
-            "thumbnail_path": clip.thumbnail_path,
-            "description": clip.description,
-            "hashtags": clip.hashtags,
-            "uploaded": clip.uploaded,
-            "youtube_video_id": clip.youtube_video_id,
-            "upload_error": clip.upload_error,
-            "upload_retry_count": clip.upload_retry_count,
-            "published_at": clip.published_at,
-            "created_at": clip.created_at
-        } for clip in clips]
+        clips=[clip_payload(clip) for clip in clips]
     )
 
 
@@ -875,7 +925,10 @@ async def update_clip_upload_status(
         )
 
     clip.uploaded = status_data.uploaded
-    clip.youtube_video_id = status_data.youtube_video_id
+    # Keep an existing id when a caller only reports a failure (id=None); a
+    # blanket assignment wiped the id of a clip that had genuinely published.
+    if status_data.youtube_video_id is not None:
+        clip.youtube_video_id = status_data.youtube_video_id
     clip.upload_error = status_data.upload_error
 
     if not status_data.uploaded:
@@ -947,7 +1000,7 @@ async def youtube_oauth2_callback(
         <html><head><title>Authentication Cancelled</title>
         <style>body{{font-family:system-ui,-apple-system,sans-serif;background:#0b0f19;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}}
         .card{{background:#131b2e;border:1px solid #ef4444;padding:2rem;border-radius:16px;text-align:center;max-width:440px;}}</style>
-        </head><body><div class="card"><h2>❌ Access Denied</h2><p style="color:#94a3b8;">Google returned an error: {error}</p>
+        </head><body><div class="card"><h2>❌ Access Denied</h2><p style="color:#94a3b8;">Google returned an error: {esc_html(error)}</p>
         <button onclick="window.close()" style="padding:8px 16px;border-radius:8px;border:none;background:#ef4444;color:#fff;cursor:pointer;">Close</button></div></body></html>
         """, status_code=400)
 
@@ -974,13 +1027,13 @@ async def youtube_oauth2_callback(
           <div class="card">
             <div style="font-size: 3.5rem; margin-bottom: 0.8rem;">🎉</div>
             <h1>YouTube Connected!</h1>
-            <p>Your YouTube channel <strong>{channel_title}</strong> is now successfully linked to AI Shorts Generator.</p>
+            <p>Your YouTube channel <strong>{esc_html(channel_title)}</strong> is now successfully linked to AI Shorts Generator.</p>
             <button class="btn" onclick="window.close()">Close Window</button>
           </div>
           <script>
             try {{
               if (window.opener) {{
-                window.opener.postMessage({{ type: 'YOUTUBE_AUTH_SUCCESS', channel: '{channel_title}' }}, '*');
+                window.opener.postMessage({{ type: 'YOUTUBE_AUTH_SUCCESS', channel: {esc_js(channel_title)} }}, window.location.origin);
               }}
             }} catch(e) {{}}
             setTimeout(() => {{ window.close(); }}, 2500);
@@ -994,7 +1047,7 @@ async def youtube_oauth2_callback(
         <html><head><title>Auth Failed</title>
         <style>body{{font-family:sans-serif;background:#0b0f19;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;}}
         .card{{background:#131b2e;border:1px solid #ef4444;padding:2rem;border-radius:12px;text-align:center;max-width:440px;}}</style>
-        </head><body><div class="card"><h2>❌ Authorization Failed</h2><p style="color:#ef4444;">{str(e)}</p>
+        </head><body><div class="card"><h2>❌ Authorization Failed</h2><p style="color:#ef4444;">{esc_html(str(e))}</p>
         <button onclick="window.close()" style="padding:8px 16px;border-radius:6px;border:none;background:#334155;color:#fff;cursor:pointer;">Close</button></div></body></html>
         """, status_code=500)
 
@@ -1006,7 +1059,9 @@ async def submit_youtube_auth_code(req: YouTubeCodeRequest):
     try:
         redirect = req.redirect_uri or DEFAULT_REDIRECT_URI
         status_info = exchange_code_for_token(req.code.strip(), redirect_uri=redirect)
-        return {"success": True, "status": status_info}
+        # channel_name is repeated at the top level because the client read it
+        # from the response root, where it never was.
+        return {"success": True, "channel_name": status_info.get("channel_name"), "status": status_info}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to authorize code: {str(e)}")
 
@@ -1069,7 +1124,7 @@ async def upload_clip_to_youtube_endpoint(
     title = req.title or clip.title or "Viral Moment"
     description = req.description or clip.description or "Watch this amazing clip!"
     hashtags = req.hashtags if req.hashtags is not None else (clip.hashtags or ["#Shorts", "#Viral"])
-    privacy = req.privacy_status or "public"
+    privacy = _resolve_upload_privacy(req.privacy_status)
 
     try:
         result = upload_clip_to_youtube(
@@ -1106,7 +1161,7 @@ async def upload_clip_to_youtube_endpoint(
 
 
 class BatchYouTubeUploadRequest(BaseModel):
-    privacy_status: Optional[str] = "public"
+    privacy_status: Optional[str] = None
     category_id: Optional[str] = "24"
 
 
@@ -1130,7 +1185,7 @@ async def upload_all_clips_to_youtube_endpoint(
         result = upload_all_clips_for_job(
             job_id=job_id,
             db=db,
-            privacy_status=req.privacy_status or "public",
+            privacy_status=_resolve_upload_privacy(req.privacy_status),
             category_id=req.category_id or "24"
         )
         return result
@@ -1463,10 +1518,23 @@ async def disconnect_tiktok_endpoint():
     return {"success": success, "authenticated": False}
 
 
+_TIKTOK_PRIVACY = {"public": "PUBLIC_TO_EVERYONE",
+                   "unlisted": "PUBLIC_TO_SELF",
+                   "private": "PRIVATE"}
+
+
+def _resolve_tiktok_privacy(value: Optional[str]) -> str:
+    """Map a YouTube-style visibility to its TikTok equivalent."""
+    normalized = (value or settings.AUTO_UPLOAD_PRIVACY).lower().strip()
+    if normalized not in _TIKTOK_PRIVACY:
+        raise HTTPException(status_code=400, detail=f"Invalid privacy_level '{value}'")
+    return _TIKTOK_PRIVACY[normalized]
+
+
 @router.post("/clips/{clip_id}/upload-tiktok")
 async def upload_clip_to_tiktok_endpoint(
     clip_id: int,
-    privacy_level: str = "PUBLIC_TO_EVERYONE",
+    privacy_level: Optional[str] = None,
     db: Session = Depends(get_database)
 ):
     """Publish a single clip directly to TikTok."""
@@ -1523,8 +1591,11 @@ async def upload_clip_to_tiktok_endpoint(
             description=description,
             hashtags=hashtags,
             source_title=source_title,
-            privacy_level=privacy_level
+            privacy_level=_resolve_tiktok_privacy(privacy_level)
         )
+        if res.get("video_id") or res.get("tiktok_url"):
+            clip.tiktok_video_id = res.get("video_id") or res.get("tiktok_url")
+            db.commit()
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"TikTok upload failed: {str(e)}")
@@ -1533,13 +1604,14 @@ async def upload_clip_to_tiktok_endpoint(
 @router.post("/jobs/{job_id}/upload-all-tiktok")
 async def upload_all_clips_to_tiktok_endpoint(
     job_id: int,
-    privacy_level: str = "PUBLIC_TO_EVERYONE",
+    privacy_level: Optional[str] = None,
     db: Session = Depends(get_database)
 ):
     """Batch upload all clips from a job to TikTok."""
     from services.tiktok_upload import upload_all_clips_to_tiktok_for_job
+    resolved = _resolve_tiktok_privacy(privacy_level)
     try:
-        res = upload_all_clips_to_tiktok_for_job(job_id, db, privacy_level=privacy_level)
+        res = upload_all_clips_to_tiktok_for_job(job_id, db, privacy_level=resolved)
         return res
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

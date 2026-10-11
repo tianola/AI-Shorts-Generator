@@ -28,7 +28,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from config import settings
-from utils.logger import job_info, job_error
+from utils.logger import job_info, job_error, logger
 
 
 # ---------------------------------------------------------------------------

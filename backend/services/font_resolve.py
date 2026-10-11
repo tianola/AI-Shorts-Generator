@@ -35,12 +35,30 @@ _CANDIDATES_REGULAR = [
 ]
 
 
+def _project_font_dirs() -> list:
+    """Bundled/user font directories, searched before the OS font folder."""
+    try:
+        from config import settings
+        return list(settings.fonts_search_paths)
+    except Exception:
+        return []
+
+
 def find_font(bold: bool = True) -> str:
     """Return the absolute path of the first font file that exists on disk.
 
     If nothing is found, returns an empty string — callers should handle
     this gracefully (e.g. omit fontfile and let ffmpeg/PIL use its default).
     """
+    names = (["Montserrat-ExtraBold.ttf", "arialbd.ttf", "impact.ttf",
+              "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf"] if bold
+             else ["Montserrat-Regular.ttf", "arial.ttf", "DejaVuSans.ttf"])
+    for directory in _project_font_dirs():
+        for name in names:
+            path = os.path.join(directory, name)
+            if os.path.isfile(path):
+                return path
+
     candidates = _CANDIDATES_BOLD if bold else _CANDIDATES_REGULAR
     for path in candidates:
         if os.path.isfile(path):

@@ -230,7 +230,9 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 if energies:
                     clip["audio_energy_score"] = round(sum(energies) / len(energies), 4)
 
-            # Composite Virality Score — replaces raw LLM virality_score
+            # Composite Virality Score — replaces raw LLM virality_score.
+            # Keep the raw signal so the UI can show a truthful breakdown.
+            clip["llm_score_raw"] = float(clip.get("virality_score", 0.75))
             clip["virality_score"] = _composite_score({**clip})
 
             # Tone & Context Gating
@@ -290,6 +292,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 "title": title[:45],
                 "hook": " ".join(text.split()[:8])[:60],
                 "virality_score": h_composite,
+                "llm_score_raw": round(min(0.95, strength), 2),
                 "audio_energy_score": h_audio,
                 "keyword_score": h_kw,
                 "semantic_density": h_density,

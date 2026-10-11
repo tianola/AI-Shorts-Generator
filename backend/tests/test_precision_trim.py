@@ -24,6 +24,13 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Every test here builds real media with ffmpeg/ffprobe; without the binaries
+# they all error out at the same subprocess call and hide genuine regressions.
+pytestmark = pytest.mark.skipif(
+    not (shutil.which("ffmpeg") and shutil.which("ffprobe")),
+    reason="requires ffmpeg and ffprobe on PATH",
+)
+
 
 def _make_source(duration: float = 6.0, fps: int = 30, with_audio: bool = True,
                  keyframe_interval: int = 30, seed: int = 1, codec: str = "libx264") -> str:

@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from database.session import init_database
+from utils.env_check import log_media_tools
 from api.routes import router as api_router
 from api.features import router as features_router
 from config import settings
@@ -46,6 +47,7 @@ ALLOWED_MEDIA_EXTENSIONS = {
 async def lifespan(app: FastAPI):
     """Lifespan context manager for application startup and shutdown."""
     init_database()
+    log_media_tools()
     yield
 
 # Create FastAPI app
@@ -57,10 +59,15 @@ app = FastAPI(
 )
 
 # CORS middleware
+# "*" alongside allow_credentials=True is rejected by browsers and, more
+# importantly, lets any page on the LAN reach this unauthenticated API.
+_cors_origins = settings.cors_origin_list
+_allow_wildcard = "*" in _cors_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["*"] if _allow_wildcard else _cors_origins,
+    allow_credentials=not _allow_wildcard,
     allow_methods=["*"],
     allow_headers=["*"]
 )

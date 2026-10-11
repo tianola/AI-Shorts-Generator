@@ -10,7 +10,19 @@ import subprocess
 from typing import List, Tuple, Dict, Any, Optional
 from pathlib import Path
 from config import settings
-from utils.logger import job_info, job_error, job_warning
+from utils.logger import job_info, job_error, job_warning, logger
+
+def _probe_size(video_path: str) -> Tuple[int, int]:
+    """Return (width, height) of a video, releasing the capture on every path."""
+    cap = cv2.VideoCapture(video_path)
+    try:
+        if not cap.isOpened():
+            return 1920, 1080
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+        return w, h
+    finally:
+        cap.release()
 
 _mp_face_detector = None
 
@@ -93,19 +105,18 @@ def sample_frames_for_face_tracking(
     results = []
     frame_idx = 0
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if frame_idx % frame_interval == 0:
-            timestamp = frame_idx / fps
-            faces = detect_faces_in_frame(frame)
-            results.append((timestamp, faces))
-
-        frame_idx += 1
-
-    cap.release()
+    try:
+        while True:
+            if frame_idx % frame_interval == 0:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                results.append((frame_idx / fps, detect_faces_in_frame(frame)))
+            elif not cap.grab():
+                break
+            frame_idx += 1
+    finally:
+        cap.release()
     return results
 
 def compute_crop_box(
@@ -139,6 +150,30 @@ def compute_crop_box(
     crop_y = max(0, min(frame_height - crop_height, crop_y))
 
     return (crop_x, crop_y, crop_width, crop_height)
+
+def _piecewise_expr(points: list, coord_idx: int) -> str:
+    """Nested if(lt(t, ...)) expression interpolating one coordinate over time.
+
+    ffmpeg's if() takes exactly three arguments, so the timeline is walked
+    backwards: each keyframe wraps the previous result, and the innermost value
+    holds the last keyframe. The clip() in every segment clamps the
+    interpolation, which also freezes the first position before t0.
+    """
+    def seg_expr(p1, p2):
+        t1, a1 = p1[0], p1[coord_idx]
+        t2, a2 = p2[0], p2[coord_idx]
+        if t2 <= t1:
+            return f"{int(a1)}"
+        return (
+            f"{int(a1)}+({int(a2)}-{int(a1)})*"
+            f"(clip((t-{t1:.3f})/{t2 - t1:.3f},0,1))"
+        )
+
+    expr = str(int(points[-1][coord_idx]))
+    for i in range(len(points) - 1, 0, -1):
+        expr = f"if(lt(t,{points[i][0]:.3f}),{seg_expr(points[i - 1], points[i])},{expr})"
+    return expr
+
 
 def _build_timed_crop(trajectory: list) -> str:
     """
@@ -176,35 +211,8 @@ def _build_timed_crop(trajectory: list) -> str:
     if cw < 2 or ch < 2:
         return ""
 
-    def seg_expr(p1, p2, coord_idx):
-        """Build a linear-interpolation expression between two keyframes."""
-        t1, a1 = p1[0], p1[coord_idx]
-        t2, a2 = p2[0], p2[coord_idx]
-        if t2 <= t1:
-            return f"{int(a1)}"
-        return (
-            f"{int(a1)}+({int(a2)}-{int(a1)})*"
-            f"(clip((t-{t1:.3f})/{t2 - t1:.3f},0,1))"
-        )
-
-    # x and y piecewise-linear expressions over the timeline
-    x_parts = []
-    y_parts = []
-    for i in range(len(points)):
-        if i == 0:
-            # Hold the first position until the first keyframe
-            x_parts.append(f"if(lt(t,{points[0][0]:.3f}),{int(points[0][1])},")
-            y_parts.append(f"if(lt(t,{points[0][0]:.3f}),{int(points[0][2])},")
-        else:
-            x_parts.append(seg_expr(points[i - 1], points[i], 1))
-            y_parts.append(seg_expr(points[i - 1], points[i], 2))
-            if i < len(points) - 1:
-                x_parts.append(",")
-                y_parts.append(",")
-
-    # Close the if( chains with zeros (value ignored after last keyframe)
-    x_expr = "".join(x_parts) + ("0" * (len(points) - 1)) + ")"
-    y_expr = "".join(y_parts) + ("0" * (len(points) - 1)) + ")"
+    x_expr = _piecewise_expr(points, 1)
+    y_expr = _piecewise_expr(points, 2)
 
     return f"crop={cw}:{ch}:x='{x_expr}':y='{y_expr}'"
 
@@ -230,12 +238,19 @@ def build_vertical_filter(
         from services.smart_crop import detect_adaptive_layout
         mode = detect_adaptive_layout(input_video)
 
+    from services.focus_tracking import (
+        sample_frames,
+        build_split_screen_filter,
+        build_face_crop_filter,
+        build_blurred_fit_filter as _build_blur,
+    )
+
     if mode == "fit_blur":
-            from services.focus_tracking import build_blurred_fit_filter as _build_blur
-            return _build_blur(
-                src_w=1920, src_h=1080,
-                target_w=target_width, target_h=target_height,
-            ).replace("[outv]", "[vsingle]")
+        src_w, src_h = _probe_size(input_video)
+        return _build_blur(
+            src_w=src_w, src_h=src_h,
+            target_w=target_width, target_h=target_height,
+        ).replace("[outv]", "[vsingle]")
 
     if mode == "split_screen":
         try:
@@ -248,37 +263,29 @@ def build_vertical_filter(
                     persons_list = p
                     break
             if len(persons_list) >= 2:
-                # Probe real source dimensions — never assume 1920x1080
-                _cap = cv2.VideoCapture(input_video)
-                _src_w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if _cap.isOpened() else 1920
-                _src_h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) if _cap.isOpened() else 1080
-                _cap.release()
+                _src_w, _src_h = _probe_size(input_video)
                 return build_split_screen_filter(
                     persons_list[0]["box"], persons_list[1]["box"],
                     src_w=_src_w, src_h=_src_h,
                     target_w=target_width, target_h=target_height,
                 ).replace("[outv]", "[vsingle]")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"split_screen reframing unavailable, falling back to static crop: {e}")
         # fall through to static
 
     if mode in ("face_tracked", "single_speaker"):
         try:
-            cap = cv2.VideoCapture(input_video)
-            if cap.isOpened():
-                src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                cap.release()
-                samples = sample_frames(input_video, sample_interval=0.5)
-                if samples:
-                    frag = build_face_crop_filter(
-                        samples, src_w, src_h,
-                        target_width, target_height,
-                    )
-                    if frag:
-                        return f"[0:v]{frag},scale={target_width}:{target_height}:force_original_aspect_ratio=decrease[vsingle]"
-        except Exception:
-            pass
+            src_w, src_h = _probe_size(input_video)
+            samples = sample_frames(input_video, sample_interval=0.5)
+            if samples:
+                frag = build_face_crop_filter(
+                    samples, src_w, src_h,
+                    target_width, target_height,
+                )
+                if frag:
+                    return f"[0:v]{frag},scale={target_width}:{target_height}:force_original_aspect_ratio=decrease[vsingle]"
+        except Exception as e:
+            logger.warning(f"face-tracked reframing unavailable, falling back to static crop: {e}")
         # fall through to static
 
     # 'static' + all fallbacks: uniform center crop to 9:16
@@ -385,8 +392,11 @@ def make_vertical_blurred_fit(
     """
     Convert video to 9:16 using blurred background fit.
     """
+    # Half-resolution backdrop blur, upscaled afterwards - same look, ~4x less
+    # filter work (see build_blurred_fit_filter for the measurement).
+    bg_w, bg_h = target_width // 2, target_height // 2
     filter_complex = (
-        f"[0:v]scale={target_width}:{target_height}:force_original_aspect_ratio=increase,crop={target_width}:{target_height},boxblur=25:5[bg];"
+        f"[0:v]scale={bg_w}:{bg_h}:force_original_aspect_ratio=increase,crop={bg_w}:{bg_h},boxblur=16:2,scale={target_width}:{target_height}[bg];"
         f"[0:v]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
     )

@@ -31,6 +31,12 @@ def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable
         base_ydl_opts.update({
             "format": "bestvideo[protocol=https][height<=1080]+bestaudio[protocol=https]/bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[ext=mp4][height<=1080]/best[height<=1080]/best",
         })
+        # YouTube now serves an unsigned-"n" parameter that must be solved by
+        # the EJS remote component. The configured value was never passed to
+        # yt-dlp, so downloads failed once the challenge was enforced.
+        components = {c.strip() for c in (settings.YT_REMOTE_COMPONENTS or "").split(",") if c.strip()}
+        if components:
+            base_ydl_opts["remote_components"] = components
     else:
         # Direct media links (MP4/WebM/MOV etc.)
         base_ydl_opts.update({
@@ -99,8 +105,9 @@ def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable
                                 "tags": info.get("tags", []),
                                 "channel": info.get("uploader", "") or info.get("channel", ""),
                             }, mf, ensure_ascii=False, indent=2)
-                    except Exception:
-                        pass
+                    except Exception as meta_error:
+                        from utils.logger import job_warning
+                        job_warning(job_id, f"Could not write meta.json: {meta_error}")
                 # If we get here, download succeeded
                 break
         except Exception as e:
@@ -128,7 +135,15 @@ def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable
         if video_candidates and video_candidates[0] != target_file:
             video_candidates[0].rename(target_file)
 
-    # After download, verify the video title matches expectation
+    # yt-dlp can report success without producing a file (e.g. it only fetched
+    # metadata). Fail here instead of letting ffprobe choke on a missing path.
+    if not target_file.exists():
+        raise Exception(
+            f"Download reported success but {target_file} was not created "
+            f"(directory: {output_dir})"
+        )
+
+    # Log whatever title ffmpeg embedded in the downloaded container
     try:
         import subprocess
         result = subprocess.run(

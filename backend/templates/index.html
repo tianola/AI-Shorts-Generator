@@ -131,7 +131,7 @@
 			</div>
 
 			<div style="margin-top: 10px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; background: rgba(34, 197, 94, 0.08); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(34, 197, 94, 0.2);">
-			  <input type="checkbox" id="autoUploadCheck" checked style="accent-color: #22c55e; width: 16px; height: 16px; cursor: pointer;" />
+			  <input type="checkbox" id="autoUploadCheck" style="accent-color: #22c55e; width: 16px; height: 16px; cursor: pointer;" />
 			  <label for="autoUploadCheck" style="font-size: 0.84rem; color: #f1f5f9; cursor: pointer; user-select: none;">
 				⚡ <strong>Auto-Upload as Rendered:</strong> Automatically publish each clip to YouTube & TikTok right after it renders (one-by-one)
 			  </label>
@@ -229,8 +229,8 @@
 		  </div>
 		  <div id="jobBatchActions" style="display: none; align-items: center; gap: 8px; flex-wrap: wrap;">
 			<select id="batchPrivacySelect" class="studio-select" style="padding: 6px 10px; font-size: 0.8rem; background: #131b2e; border: 1px solid #1e293b; color: #fff; border-radius: 6px; cursor: pointer;">
-			  <option value="public" selected>🌐 Public</option>
-			  <option value="unlisted">🔒 Unlisted</option>
+			  <option value="public">🌐 Public</option>
+			  <option value="unlisted" selected>🔒 Unlisted</option>
 			  <option value="private">👁️ Private</option>
 			</select>
 			<button type="button" class="primary-btn" id="batchUploadYtBtn" style="background: linear-gradient(135deg, #FF0000 0%, #CC0000 100%); font-weight: 600; padding: 7px 14px; font-size: 0.85rem; display: flex; align-items: center; gap: 6px; border-radius: 8px; box-shadow: 0 4px 12px rgba(255,0,0,0.3); border: none; cursor: pointer;">
@@ -464,8 +464,8 @@
 				<div class="manual-form-group">
 				  <label>Privacy Setting</label>
 				  <select id="ytUploadPrivacy" class="studio-input">
-					<option value="public" selected>Public (Instant Live)</option>
-					<option value="unlisted">Unlisted</option>
+					<option value="public">Public (Instant Live)</option>
+					<option value="unlisted" selected>Unlisted</option>
 					<option value="private">Private</option>
 				  </select>
 				</div>

@@ -140,6 +140,7 @@ class TestMakeVerticalSplitScreen:
     This was a guaranteed crash before the fix (missing required args).
     """
 
+    @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="requires ffmpeg on PATH")
     def test_make_vertical_split_screen_no_crash(self, tmp_path):
         from services.vertical import make_vertical_split_screen
 

@@ -1,8 +1,8 @@
 """
 Database session management.
-SQLAlchemy session factory with proper configuration and safe column auto-migrations.
+SQLAlchemy session factory with schema sync driven by the ORM models themselves.
 """
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, inspect as sa_inspect, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from config import settings
@@ -33,6 +33,21 @@ def get_engine():
 
 engine = get_engine()
 
+
+@event.listens_for(engine, "connect")
+def _apply_sqlite_pragmas(dbapi_conn, _conn_record):
+    """busy_timeout is per-connection, so it must be set on every new one.
+    Setting it once inside init_database() only protected that single pooled
+    connection, leaving the rest of the pool able to fail with 'database is
+    locked' while the API and worker write concurrently."""
+    cursor = dbapi_conn.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cursor.close()
+
+
 # Session factory
 SessionLocal = sessionmaker(
     autocommit=False,
@@ -41,79 +56,98 @@ SessionLocal = sessionmaker(
 )
 
 
+def _literal_default(column):
+    """Render a Python-side scalar column default as a SQLite literal.
+
+    Callable defaults (datetime.utcnow) and missing defaults return None: the
+    column is added nullable and existing rows get NULL, which is what the ORM
+    already assumes for every optional column here.
+    """
+    default = column.default
+    if default is None or not default.is_scalar:
+        return None
+    value = default.arg
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _sync_columns(conn):
+    """Add columns that the models declare but an existing database lacks.
+
+    derive_from: Base.metadata, so adding a Column to models.py is enough. The
+    previous hand-maintained list silently fell behind, and a missing column
+    made every ORM query fail with OperationalError - which the worker polling
+    loop swallowed and retried at ~10Hz, writing 1.2GB of logs while processing
+    nothing.
+    """
+    import database.models  # noqa: F401  (register mappers on Base)
+
+    inspector = sa_inspect(conn)
+    known_tables = set(inspector.get_table_names())
+    added = []
+
+    for table_name, table in Base.metadata.tables.items():
+        if table_name not in known_tables:
+            continue  # create_all() owns whole-table creation
+        existing = {col["name"] for col in inspector.get_columns(table_name)}
+        for column in table.columns:
+            if column.name in existing:
+                continue
+            col_type = column.type.compile(dialect=engine.dialect)
+            ddl = f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {col_type}'
+            literal = _literal_default(column)
+            if literal is not None:
+                ddl += f" DEFAULT {literal}"
+            conn.execute(text(ddl))
+            added.append((table_name, column.name))
+
+    return added
+
+
 def init_database():
-    """Initialize database tables and apply lightweight column migrations."""
+    """Create missing tables, then add missing columns from the models."""
+    import database.models  # noqa: F401
+
     Base.metadata.create_all(bind=engine)
 
-    # Safe auto-migration for SQLite
-    with engine.connect() as conn:
-        # Inspect columns for 'clips'
-        try:
-            res = conn.execute(text("PRAGMA table_info(clips)"))
-            existing_cols = [row[1] for row in res.fetchall()]
-            if "caption_style" not in existing_cols:
-                conn.execute(text("ALTER TABLE clips ADD COLUMN caption_style TEXT DEFAULT 'hormozi'"))
-            if "layout_mode" not in existing_cols:
-                conn.execute(text("ALTER TABLE clips ADD COLUMN layout_mode TEXT DEFAULT 'single_speaker'"))
-            if "virality_explanation" not in existing_cols:
-                conn.execute(text("ALTER TABLE clips ADD COLUMN virality_explanation TEXT"))
-            conn.commit()
-        except Exception:
-            pass
+    with engine.begin() as conn:
+        added = _sync_columns(conn)
 
-        # Inspect columns for 'jobs'
-        try:
-            res = conn.execute(text("PRAGMA table_info(jobs)"))
-            existing_cols = [row[1] for row in res.fetchall()]
-            if "default_caption_style" not in existing_cols:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN default_caption_style TEXT DEFAULT 'hormozi'"))
-            if "default_layout_mode" not in existing_cols:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN default_layout_mode TEXT DEFAULT 'single_speaker'"))
-            if "default_karaoke" not in existing_cols:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN default_karaoke BOOLEAN DEFAULT 1"))
-            if "default_motion_title" not in existing_cols:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN default_motion_title BOOLEAN DEFAULT 1"))
-            if "transcription_task" not in existing_cols:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN transcription_task TEXT DEFAULT 'transcribe'"))
-            if "source_language" not in existing_cols:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN source_language TEXT"))
-            if "keep_native_transcript" not in existing_cols:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN keep_native_transcript BOOLEAN DEFAULT 0"))
-            if "smart_blur_enabled" not in existing_cols:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN smart_blur_enabled BOOLEAN DEFAULT 0"))
-            if "target_clips" not in existing_cols:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN target_clips INTEGER DEFAULT 10"))
-            if "auto_upload" not in existing_cols:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN auto_upload BOOLEAN DEFAULT 0"))
-            if "llm_translate" not in existing_cols:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN llm_translate BOOLEAN DEFAULT 0"))
-            conn.commit()
-        except Exception:
-            pass
+    for table_name, column_name in added:
+        print(f"[db] added missing column {table_name}.{column_name}")
 
-        # Inspect columns for 'clips' (trim + translated transcript + API integration)
-        try:
-            res = conn.execute(text("PRAGMA table_info(clips)"))
-            existing_cols = [row[1] for row in res.fetchall()]
-            if "trim_start" not in existing_cols:
-                conn.execute(text("ALTER TABLE clips ADD COLUMN trim_start FLOAT"))
-            if "trim_end" not in existing_cols:
-                conn.execute(text("ALTER TABLE clips ADD COLUMN trim_end FLOAT"))
-            if "translated_transcript" not in existing_cols:
-                conn.execute(text("ALTER TABLE clips ADD COLUMN translated_transcript TEXT"))
-            conn.commit()
-        except Exception:
-            pass
-
-        # Enable SQLite WAL mode and busy timeout for concurrent API & worker safety
-        try:
-            conn.execute(text("PRAGMA journal_mode=WAL;"))
-            conn.execute(text("PRAGMA busy_timeout=5000;"))
-            conn.commit()
-        except Exception:
-            pass
+    # A schema the models do not match is not survivable: every ORM query would
+    # raise, and the caller would look healthy while doing nothing.
+    remaining = _missing_columns_report()
+    if remaining:
+        raise RuntimeError(
+            "Database schema is still missing columns after sync: "
+            + ", ".join(f"{t}.{c}" for t, c in remaining)
+        )
 
     print("Database tables created/verified with migrations")
+
+
+def _missing_columns_report():
+    import database.models  # noqa: F401
+
+    missing = []
+    with engine.connect() as conn:
+        inspector = sa_inspect(conn)
+        known = set(inspector.get_table_names())
+        for table_name, table in Base.metadata.tables.items():
+            if table_name not in known:
+                continue
+            existing = {col["name"] for col in inspector.get_columns(table_name)}
+            for column in table.columns:
+                if column.name not in existing:
+                    missing.append((table_name, column.name))
+    return missing
 
 
 def get_database():
