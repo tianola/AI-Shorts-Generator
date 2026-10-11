@@ -1,5 +1,6 @@
 import json
 import subprocess
+import os
 
 
 def _video_has_audio(video_path):
@@ -54,13 +55,13 @@ def _video_duration_seconds(video_path):
 
 
 def extract_audio(video_path):
-
     print("START extract_audio", flush=True)
 
-    output_path = video_path.replace(
-        "source.mp4",
-        "audio.wav"
-    )
+    output_path = video_path.replace("source.mp4", "audio.wav")
+
+    creationflags = 0
+    if os.name == 'nt':
+        creationflags = 0x08000000
 
     if not _video_has_audio(video_path):
         duration = _video_duration_seconds(video_path)
@@ -80,7 +81,7 @@ def extract_audio(video_path):
             output_path,
         ]
         print("Running silent-audio fallback command:", silent_command, flush=True)
-        subprocess.run(silent_command, check=True)
+        subprocess.run(silent_command, check=True, creationflags=creationflags)
         print("END extract_audio", flush=True)
         return output_path
 
@@ -96,13 +97,9 @@ def extract_audio(video_path):
         "16000",
         output_path,
     ]
-
     print("Running command:", command, flush=True)
 
-    subprocess.run(
-        command,
-        check=True
-    )
+    subprocess.run(command, check=True, creationflags=creationflags)
 
     print("END extract_audio", flush=True)
 

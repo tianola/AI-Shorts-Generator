@@ -3,6 +3,7 @@
 *.env
 *.env.backup
 .vs/
+.venv/
 backend/.venv/
 storage/
 backend/storage/
@@ -14,3 +15,15 @@ __pycache__/
 .hermes/
 *.pt
 *.log
+
+# YouTube cookies (never commit)
+*.cookies.txt
+cookies.txt
+
+# Windows-reserved name created by a `> nul` redirect in a bash script.
+# git cannot index it ("short read while indexing nul"), so exclude it.
+nul
+
+# Ad-hoc shell redirect leftovers and stale probe output
+api_out.txt
+health_check_results.json

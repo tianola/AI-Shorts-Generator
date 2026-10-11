@@ -3,10 +3,10 @@
   <head>
 	<meta charset="UTF-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-	<title>Shorts Studio</title>
+	<title>Shorts Studio | OpusClip AI Generator</title>
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
-	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Cormorant+Garamond:wght@500;600;700&amp;display=swap" rel="stylesheet" />
+	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Montserrat:wght@700;800;900&amp;display=swap" rel="stylesheet" />
 	<link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -16,11 +16,19 @@
 		<div class="brand-wrap">
 		  <div class="brand-mark">S</div>
 		  <div>
-			<div class="eyebrow">creator pipeline</div>
+			<div class="eyebrow">OpusClip-Grade AI Workflow</div>
 			<h1>Shorts Studio</h1>
 		  </div>
 		</div>
 		<div class="topbar-actions">
+		  <button class="ghost-btn" id="topbarYtStatusBtn" style="display: flex; align-items: center; gap: 6px;">
+			<span id="topbarYtDot" style="width: 8px; height: 8px; border-radius: 50%; background: #64748b; display: inline-block;"></span>
+			<span id="topbarYtLabel">YouTube Auth</span>
+		  </button>
+		  <button class="ghost-btn" id="topbarTikTokStatusBtn" style="display: flex; align-items: center; gap: 6px;">
+			<span id="topbarTikTokDot" style="width: 8px; height: 8px; border-radius: 50%; background: #64748b; display: inline-block;"></span>
+			<span id="topbarTikTokLabel">TikTok Auth</span>
+		  </button>
 		  <button class="ghost-btn" id="refreshJobsBtn">Refresh</button>
 		  <button class="primary-btn" id="focusComposerBtn">New job</button>
 		</div>
@@ -30,7 +38,7 @@
 		<aside class="panel composer-panel">
 		  <div class="panel-header">
 			<span class="kicker">Generator</span>
-			<h2>Create a new short batch</h2>
+			<h2>Create a new viral batch</h2>
 		  </div>
 
 		  <form id="jobForm" class="job-form">
@@ -44,6 +52,7 @@
 			<div id="sourceUrlPanel">
 			  <label class="field-label" for="videoUrl">Source video URL</label>
 			  <input id="videoUrl" name="videoUrl" type="url" placeholder="https://... or direct mp4" />
+			  <div id="urlMetaBadge" style="font-size: 0.8rem; color: #38bdf8; margin-top: 6px; display: none;"></div>
 			</div>
 
 			<!-- File upload input -->
@@ -77,21 +86,59 @@
 			  </div>
 			</div>
 
+			<div class="field-row">
+			  <div>
+				<label class="field-label" for="captionStyle">Subtitle Preset</label>
+				<select id="captionStyle" name="captionStyle">
+				  <option value="mrbeast" selected>MrBeast Impact (Multi-Color Viral Pop)</option>
+				  <option value="hormozi">Alex Hormozi Viral (Yellow Pop)</option>
+				  <option value="capcut_aqua">CapCut Aqua Glow (Cyan Neon)</option>
+				  <option value="cyber_neon">Cyber Neon (Hot Pink / Purple)</option>
+				  <option value="clean_box">Clean Minimal Box</option>
+				  <option value="underline_wave">Underline Wave</option>
+				</select>
+			  </div>
+			  <div>
+				<label class="field-label" for="layoutMode">Reframing Layout</label>
+				<select id="layoutMode" name="layoutMode">
+				  <option value="auto" selected>🤖 Auto Adaptive AI (Context & Speaker Aware)</option>
+				  <option value="single_speaker">Solo Speaker Follow</option>
+				  <option value="split_screen">Podcast Split-Screen (9:16)</option>
+				  <option value="fit_blur">Blurred Background Fit</option>
+				</select>
+			  </div>
+			</div>
+
 			<div>
 			  <label class="field-label" for="whisperModel">Transcription Model</label>
 			  <select id="whisperModel" name="whisperModel">
 				<option value="tiny">Loading models...</option>
 			  </select>
 			  <div id="hardwareInfo" style="font-size: 0.75rem; color: var(--muted); margin-top: 6px;"></div>
+			  <div id="transcriptionEstimate" style="font-size: 0.8rem; color: #68f0b3; margin-top: 5px; font-weight: 500; display: none;"></div>
 			</div>
 
 			<div>
 			  <label class="field-label" for="stylePrompt">B-Roll / Style Prompt (Optional)</label>
-			  <textarea id="stylePrompt" name="stylePrompt" placeholder="e.g. Cinematic, fast-paced, techy, cyberpunk vibe" rows="2" style="width:100%; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); color:var(--text); border-radius:14px; padding:0.8rem; outline:none; resize:none;"></textarea>
+			  <textarea id="stylePrompt" name="stylePrompt" placeholder="e.g. Cinematic, fast-paced, high energy" rows="2" style="width:100%; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); color:var(--text); border-radius:14px; padding:0.8rem; outline:none; resize:none;"></textarea>
+			</div>
+
+			<div style="margin-top: 10px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; background: rgba(56, 189, 248, 0.08); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(56, 189, 248, 0.2);">
+			  <input type="checkbox" id="llmTranslateCheck" checked style="accent-color: #38bdf8; width: 16px; height: 16px; cursor: pointer;" />
+			  <label for="llmTranslateCheck" style="font-size: 0.84rem; color: #f1f5f9; cursor: pointer; user-select: none;">
+				🌍 <strong>Auto-Translate to English:</strong> Recognize any language and smoothly translate subtitles to English (LLM)
+			  </label>
+			</div>
+
+			<div style="margin-top: 10px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; background: rgba(34, 197, 94, 0.08); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(34, 197, 94, 0.2);">
+			  <input type="checkbox" id="autoUploadCheck" checked style="accent-color: #22c55e; width: 16px; height: 16px; cursor: pointer;" />
+			  <label for="autoUploadCheck" style="font-size: 0.84rem; color: #f1f5f9; cursor: pointer; user-select: none;">
+				⚡ <strong>Auto-Upload as Rendered:</strong> Automatically publish each clip to YouTube & TikTok right after it renders (one-by-one)
+			  </label>
 			</div>
 
 			<button type="submit" class="primary-btn wide-btn">
-			  <span>Generate Clips</span>
+			  <span>Generate Viral Clips</span>
 			  <span class="arrow">&#8594;</span>
 			</button>
 			<div id="generatorStatus" class="status-box" style="margin-top:0.75rem;"></div>
@@ -100,15 +147,15 @@
 		  <div class="quick-tips">
 			<div class="tip-item">
 			  <span class="dot pink"></span>
-			  <span>Best with direct MP4 or reliable source links.</span>
+			  <span>100% natural voice audio preserved (0dB ducking).</span>
 			</div>
 			<div class="tip-item">
 			  <span class="dot cyan"></span>
-			  <span>AI picks strong moments, captions, hooks, and metadata.</span>
+			  <span>Animated karaoke pop &amp; auto-emoji subtitles.</span>
 			</div>
 			<div class="tip-item">
 			  <span class="dot amber"></span>
-			  <span>Queued clips can be reviewed before YouTube publish.</span>
+			  <span>Instant 1-click preset switching &amp; re-rendering.</span>
 			</div>
 		  </div>
 		</aside>
@@ -129,20 +176,70 @@
 			</article>
 		  </div>
 
+		  <!-- Live Active Progress Panel -->
+		  <section id="activeJobProgressPanel" class="panel active-progress-panel" style="display: none; border: 1px solid rgba(56, 189, 248, 0.35); background: radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 70%), var(--surface-bg, rgba(20, 24, 33, 0.85)); border-radius: 16px; padding: 1.1rem; margin-bottom: 1.25rem;">
+			<div class="progress-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+			  <div style="display: flex; align-items: center; gap: 0.6rem;">
+				<span class="live-pulse" style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #38bdf8; box-shadow: 0 0 10px #38bdf8;"></span>
+				<h3 style="margin: 0; font-size: 1.05rem; font-weight: 700; color: #fff;">
+				  Live Job Progress <span id="activeJobIdBadge" style="color: #38bdf8;">#--</span>
+				</h3>
+			  </div>
+			  <span id="activeJobPercentText" style="font-size: 1.25rem; font-weight: 800; color: #68f0b3; font-family: monospace;">0%</span>
+			</div>
+
+			<div style="margin-bottom: 0.5rem; display: flex; justify-content: space-between; font-size: 0.85rem;">
+			  <span id="activeJobStageLabel" style="color: #cbd5e1; font-weight: 500;">⚡ Initializing job pipeline...</span>
+			  <span id="activeJobClipsCount" style="color: #94a3b8; font-size: 0.8rem;"></span>
+			</div>
+
+			<!-- Progress Track -->
+			<div class="progress-track" style="height: 10px; background: rgba(255,255,255,0.06); border-radius: 999px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); position: relative; margin-bottom: 0.9rem;">
+			  <div id="activeJobProgressBar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #38bdf8, #818cf8, #34d399); border-radius: 999px; transition: width 0.35s ease, background 0.3s ease; box-shadow: 0 0 12px rgba(56, 189, 248, 0.5);"></div>
+			</div>
+
+			<!-- Step Breadcrumbs -->
+			<div class="steps-breadcrumbs" style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.4rem; font-size: 0.72rem; text-align: center;">
+			  <div id="stepDownload" class="step-pill" style="padding: 0.35rem 0.2rem; border-radius: 8px; background: rgba(255,255,255,0.04); color: #94a3b8; border: 1px solid rgba(255,255,255,0.05);">1. Download</div>
+			  <div id="stepAudio" class="step-pill" style="padding: 0.35rem 0.2rem; border-radius: 8px; background: rgba(255,255,255,0.04); color: #94a3b8; border: 1px solid rgba(255,255,255,0.05);">2. Audio</div>
+			  <div id="stepTranscribe" class="step-pill" style="padding: 0.35rem 0.2rem; border-radius: 8px; background: rgba(255,255,255,0.04); color: #94a3b8; border: 1px solid rgba(255,255,255,0.05);">3. Transcribe</div>
+			  <div id="stepAI" class="step-pill" style="padding: 0.35rem 0.2rem; border-radius: 8px; background: rgba(255,255,255,0.04); color: #94a3b8; border: 1px solid rgba(255,255,255,0.05);">4. AI Select</div>
+			  <div id="stepRender" class="step-pill" style="padding: 0.35rem 0.2rem; border-radius: 8px; background: rgba(255,255,255,0.04); color: #94a3b8; border: 1px solid rgba(255,255,255,0.05);">5. 9:16 Render</div>
+			</div>
+		  </section>
+
 		  <section class="panel jobs-panel">
 			<div class="panel-header compact-header">
 			  <span class="kicker">queue</span>
 			  <h2>Recent jobs</h2>
 			</div>
 			<div id="jobsList" class="jobs-list"></div>
+			<button type="button" id="toggleJobsListBtn" class="ghost-btn" style="width: 100%; margin-top: 8px; font-size: 0.8rem; padding: 7px; text-align: center; display: none; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; color: #94a3b8; cursor: pointer;">
+			  📂 Show All Jobs
+			</button>
 		  </section>
 		</section>
 	  </main>
 
 	  <section class="panel clips-panel">
-		<div class="panel-header compact-header">
-		  <span class="kicker">library</span>
-		  <h2>Generated clips</h2>
+		<div class="panel-header compact-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+		  <div>
+			<span class="kicker">library</span>
+			<h2>Generated clips</h2>
+		  </div>
+		  <div id="jobBatchActions" style="display: none; align-items: center; gap: 8px; flex-wrap: wrap;">
+			<select id="batchPrivacySelect" class="studio-select" style="padding: 6px 10px; font-size: 0.8rem; background: #131b2e; border: 1px solid #1e293b; color: #fff; border-radius: 6px; cursor: pointer;">
+			  <option value="public" selected>🌐 Public</option>
+			  <option value="unlisted">🔒 Unlisted</option>
+			  <option value="private">👁️ Private</option>
+			</select>
+			<button type="button" class="primary-btn" id="batchUploadYtBtn" style="background: linear-gradient(135deg, #FF0000 0%, #CC0000 100%); font-weight: 600; padding: 7px 14px; font-size: 0.85rem; display: flex; align-items: center; gap: 6px; border-radius: 8px; box-shadow: 0 4px 12px rgba(255,0,0,0.3); border: none; cursor: pointer;">
+			  <span>🚀 Upload All to YouTube</span>
+			</button>
+			<button type="button" class="primary-btn" id="batchUploadTikTokBtn" style="background: linear-gradient(135deg, #00f2fe 0%, #4facfe 50%, #111 100%); font-weight: 600; padding: 7px 14px; font-size: 0.85rem; display: flex; align-items: center; gap: 6px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,242,254,0.3); border: none; cursor: pointer; color: #fff;">
+			  <span>🎵 Upload All to TikTok</span>
+			</button>
+		  </div>
 		</div>
 		<div id="clipsGrid" class="clips-grid"></div>
 	  </section>
@@ -156,6 +253,10 @@
 			<span class="job-status">status</span>
 		  </div>
 		  <div class="job-url">url</div>
+		  <div class="job-stage-text" style="font-size: 0.76rem; color: #38bdf8; margin-top: 4px; display: none; text-align: left;"></div>
+		  <div class="job-progress-wrap" style="display: none; height: 5px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden; margin-top: 6px; width: 100%;">
+		    <div class="job-card-progress-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #38bdf8, #34d399); transition: width 0.3s ease;"></div>
+		  </div>
 		</div>
 		<div class="job-time">time</div>
 	  </button>
@@ -166,7 +267,7 @@
 	  <div class="studio-modal-container">
 		<div class="studio-modal-header">
 		  <div class="studio-title-wrap">
-			<span class="kicker">TikTok Studio &amp; AI Director</span>
+			<span class="kicker">OpusClip Studio &amp; AI Director</span>
 			<h2 id="studioModalTitle">Clip Editor</h2>
 		  </div>
 		  <button class="ghost-btn close-studio-btn" id="closeStudioBtn">✕</button>
@@ -180,15 +281,113 @@
 			  <span id="studioTimeBadge" class="badge cyan">0.0s → 0.0s</span>
 			  <span id="studioScoreBadge" class="badge pink">AI Selected</span>
 			</div>
+			<!-- Virality Explanation Box -->
+			<div class="virality-card" id="studioViralityCard" style="margin-top: 14px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 12px;">
+			  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+				<span style="font-size: 0.75rem; text-transform: uppercase; color: var(--muted); letter-spacing: 0.1em;">Virality Rationale</span>
+				<strong id="studioViralityScoreVal" style="color: var(--pink); font-size: 0.95rem;">92/100</strong>
+			  </div>
+			  <p id="studioViralityExplanation" style="font-size: 0.82rem; color: #d0d7e5; line-height: 1.4;"></p>
+			</div>
 		  </div>
 		  <div class="studio-tabs-col">
 			<div class="studio-tabs-nav">
-			  <button class="tab-nav-btn active" data-tab="ai">🤖 OmniRoute AI Director</button>
-			  <button class="tab-nav-btn" data-tab="database">💾 Database</button>
-			  <button class="tab-nav-btn" data-tab="advanced">⚙️ Advanced</button>
-			  <button class="tab-nav-btn" data-tab="manual">✂️ Manual Precision Edit</button>
+			  <button class="tab-nav-btn active" data-tab="style">🎨 Opus Style &amp; Layout</button>
+			  <button class="tab-nav-btn" data-tab="youtube">🚀 YouTube Shorts</button>
+			  <button class="tab-nav-btn" data-tab="ai">🤖 AI Director</button>
+			  <button class="tab-nav-btn" data-tab="manual">✂️ Precision Trim</button>
+			  <button class="tab-nav-btn" data-tab="database">💾 Details</button>
 			</div>
-			<div class="studio-tab-content" id="tabContentAi">
+
+			<!-- Tab 1: Style & Layout Presets -->
+			<div class="studio-tab-content" id="tabContentStyle" style="display: flex; flex-direction: column; gap: 16px;">
+			  <div class="manual-form-group">
+				<label>Subtitle Animation Preset</label>
+				<div class="preset-grid" id="presetSelectorGrid" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 8px;">
+				  <button type="button" class="preset-card active" data-style="hormozi">
+					<span class="preset-badge" style="background:#FFE500; color:#000;">YELLOW</span>
+					<span class="preset-title">Hormozi Viral</span>
+				  </button>
+				  <button type="button" class="preset-card" data-style="capcut_aqua">
+					<span class="preset-badge" style="background:#00F0FF; color:#000;">AQUA</span>
+					<span class="preset-title">CapCut Aqua Glow</span>
+				  </button>
+				  <button type="button" class="preset-card" data-style="mrbeast">
+					<span class="preset-badge" style="background:#FF2D55; color:#fff;">BEAST</span>
+					<span class="preset-title">MrBeast Impact</span>
+				  </button>
+				  <button type="button" class="preset-card" data-style="cyber_neon">
+					<span class="preset-badge" style="background:#FF007F; color:#fff;">NEON</span>
+					<span class="preset-title">Cyber Neon</span>
+				  </button>
+				  <button type="button" class="preset-card" data-style="clean_box">
+					<span class="preset-badge" style="background:#FFFFFF; color:#000;">BOX</span>
+					<span class="preset-title">Clean Minimal Box</span>
+				  </button>
+				  <button type="button" class="preset-card" data-style="underline_wave">
+					<span class="preset-badge" style="background:#38BDF8; color:#000;">WAVE</span>
+					<span class="preset-title">Underline Wave</span>
+				  </button>
+				</div>
+			  </div>
+
+			  <div class="manual-form-group">
+				<label>Camera Reframing Mode</label>
+				<div class="preset-grid" id="layoutSelectorGrid" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px;">
+				  <button type="button" class="layout-card active" data-layout="single_speaker">
+					<span>👤 Solo Speaker</span>
+				  </button>
+				  <button type="button" class="layout-card" data-layout="split_screen">
+					<span>👥 Podcast Split</span>
+				  </button>
+				  <button type="button" class="layout-card" data-layout="fit_blur">
+					<span>🖼️ Blurred Fit</span>
+				  </button>
+				</div>
+			  </div>
+
+			  <div class="manual-form-group" style="display: flex; gap: 24px; flex-wrap: wrap; align-items: center; margin-top: 8px;">
+				<label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.85rem;">
+				  <input type="checkbox" id="studioKaraokeToggle" checked />
+				  <span>🎤 Word-by-Word Karaoke Pop</span>
+				</label>
+				<label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.85rem;">
+				  <input type="checkbox" id="studioMotionTitleToggle" checked />
+				  <span>🎬 Motion Title</span>
+				</label>
+			  </div>
+
+			  <div class="manual-form-group">
+				<label>Thumbnail Visual Template</label>
+				<div class="preset-grid" id="thumbnailTemplateSelectorGrid" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px;">
+				  <button type="button" class="template-card active" data-template="0" style="padding: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: #fff; cursor: pointer; text-align: center;">
+					<span style="display: block; font-size: 0.72rem; font-weight: 700; color: #FF2D78;">NEON GLOW</span>
+					<span style="font-size: 0.68rem; color: #94a3b8;">Style #0</span>
+				  </button>
+				  <button type="button" class="template-card" data-template="1" style="padding: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: #fff; cursor: pointer; text-align: center;">
+					<span style="display: block; font-size: 0.72rem; font-weight: 700; color: #38bdf8;">BOLD SPLIT</span>
+					<span style="font-size: 0.68rem; color: #94a3b8;">Style #1</span>
+				  </button>
+				  <button type="button" class="template-card" data-template="2" style="padding: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: #fff; cursor: pointer; text-align: center;">
+					<span style="display: block; font-size: 0.72rem; font-weight: 700; color: #f8fafc;">MINIMAL CLEAN</span>
+					<span style="font-size: 0.68rem; color: #94a3b8;">Style #2</span>
+				  </button>
+				</div>
+			  </div>
+
+			  <div class="manual-form-group">
+				<label>Clip Title / Headline</label>
+				<input type="text" id="studioStyleTitle" class="studio-input" placeholder="Viral Headline" />
+			  </div>
+
+			  <button class="primary-btn wide-btn" id="studioApplyStyleBtn" style="margin-top: 8px;">
+				<span>⚡ Apply Style &amp; Fast Re-Render</span>
+			  </button>
+			  <div id="studioRerenderStatus" style="font-size: 0.85rem; color: var(--muted); text-align: center;"></div>
+			</div>
+
+			<!-- Tab 2: AI Director -->
+			<div class="studio-tab-content" id="tabContentAi" style="display: none;">
 			  <div class="ai-chat-box" id="studioAiChatBox">
 				<div class="ai-chat-msg system">👋 Hello! I'm your OmniRoute AI Director. Ask me to rewrite the hook, make it punchier, summarize, or adjust the edit in natural language!</div>
 			  </div>
@@ -202,50 +401,11 @@
 				<button class="primary-btn" id="studioAiSendBtn">Send</button>
 			  </div>
 			</div>
-			<div class="studio-tab-content" id="tabContentDatabase" style="display: none;">
+
+			<!-- Tab 3: Precision Edit -->
+			<div class="studio-tab-content" id="tabContentManual" style="display: none; flex-direction: column; gap: 16px;">
 			  <div class="manual-form-group">
-				<label>SQLite Database Storage</label>
-				<p style="color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem;">Active database: <code>storage/app.db</code></p>
-				<div class="manual-form-row">
-				  <div class="manual-form-group">
-					<label>Clip Record ID</label>
-					<input type="text" id="dbClipId" class="studio-input" readonly="readonly" />
-				  </div>
-				  <div class="manual-form-group">
-					<label>Parent Job ID</label>
-					<input type="text" id="dbJobId" class="studio-input" readonly="readonly" />
-				  </div>
-				</div>
-				<div class="manual-form-group" style="margin-top: 1rem;">
-				  <label>Database State &amp; Virality Score</label>
-				  <input type="text" id="dbStateInfo" class="studio-input" readonly="readonly" />
-				</div>
-				<button class="primary-btn wide-btn" id="dbRefreshBtn" style="margin-top: 1rem;">🔄 Verify DB Sync &amp; Reload</button>
-			  </div>
-			</div>
-			<div class="studio-tab-content" id="tabContentAdvanced" style="display: none;">
-			  <div class="manual-form-group">
-				<label>Advanced Rendering &amp; AI Pipeline Options</label>
-				<div class="manual-form-row" style="margin-top: 1rem;">
-				  <div class="manual-form-group">
-					<label>FFmpeg Preset</label>
-					<input type="text" class="studio-input" value="veryfast" readonly="readonly" />
-				  </div>
-				  <div class="manual-form-group">
-					<label>Video CRF</label>
-					<input type="text" class="studio-input" value="23" readonly="readonly" />
-				  </div>
-				</div>
-				<div class="manual-form-group" style="margin-top: 1rem;">
-				  <label>AI Transcription &amp; LLM Provider</label>
-				  <input type="text" class="studio-input" value="Whisper Tiny + OmniRoute / Instructor" readonly="readonly" />
-				</div>
-				<button class="primary-btn wide-btn" id="advRerenderBtn" style="margin-top: 1rem;">⚡ Force Re-render with SFX &amp; Title</button>
-			  </div>
-			</div>
-			<div class="studio-tab-content" id="tabContentManual" style="display: none; flex-direction: column; gap: 20px;">
-			  <div class="manual-form-group">
-				<label>Clip Title / Caption</label>
+				<label>Clip Title</label>
 				<input type="text" id="studioEditTitle" class="studio-input" />
 			  </div>
 
@@ -275,12 +435,200 @@
 				</div>
 			  </div>
 			  <button class="primary-btn wide-btn" id="studioSaveManualBtn">Save &amp; Apply Edits</button>
-			  <div class="manual-actions-row" style="margin-top: 16px;">
-				<button class="ghost-btn" id="studioUploadBtn">Upload to YouTube</button>
-				<a id="studioOpenRawBtn" class="ghost-btn link-btn" target="_blank" rel="noreferrer">Open Raw MP4</a>
+			</div>
+
+			<!-- Tab 4: YouTube Shorts Upload -->
+			<div class="studio-tab-content" id="tabContentYoutube" style="display: none; flex-direction: column; gap: 14px;">
+			  <div id="ytAuthBanner" style="padding: 12px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between; align-items: center;">
+				<div id="ytAuthStatusText">
+				  <span style="font-size: 0.85rem; color: var(--muted);">Checking YouTube status...</span>
+				</div>
+				<button type="button" class="ghost-btn" id="ytConnectBtn" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;">🔗 Channel Settings</button>
+			  </div>
+
+			  <div class="manual-form-group">
+				<label>Shorts Title (Max 100 chars)</label>
+				<input type="text" id="ytUploadTitle" class="studio-input" placeholder="Viral Hook Title #Shorts" maxlength="100" />
+			  </div>
+
+			  <div class="manual-form-group">
+				<label>SEO Description &amp; Hashtags</label>
+				<textarea id="ytUploadDesc" class="studio-input" rows="4" style="resize: vertical; font-family: inherit; font-size: 0.85rem;" placeholder="Engaging description + hashtags..."></textarea>
+			  </div>
+
+			  <div class="manual-form-row">
+				<div class="manual-form-group">
+				  <label>Hashtags</label>
+				  <input type="text" id="ytUploadHashtags" class="studio-input" placeholder="#Shorts #Viral #Trending" />
+				</div>
+				<div class="manual-form-group">
+				  <label>Privacy Setting</label>
+				  <select id="ytUploadPrivacy" class="studio-input">
+					<option value="public" selected>Public (Instant Live)</option>
+					<option value="unlisted">Unlisted</option>
+					<option value="private">Private</option>
+				  </select>
+				</div>
+			  </div>
+
+			  <button type="button" class="primary-btn wide-btn" id="ytDoUploadBtn" style="background: linear-gradient(135deg, #FF0000, #CC0000); margin-top: 4px;">
+				<span>🚀 Upload to YouTube Shorts Now</span>
+			  </button>
+			  <div id="ytUploadStatus" style="font-size: 0.85rem; text-align: center; color: var(--muted);"></div>
+			</div>
+
+			<!-- Tab 5: Database / Info -->
+			<div class="studio-tab-content" id="tabContentDatabase" style="display: none;">
+			  <div class="manual-form-group">
+				<label>SQLite Database Storage</label>
+				<p style="color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem;">Active database: <code>storage/app.db</code></p>
+				<div class="manual-form-row">
+				  <div class="manual-form-group">
+					<label>Clip Record ID</label>
+					<input type="text" id="dbClipId" class="studio-input" readonly="readonly" />
+				  </div>
+				  <div class="manual-form-group">
+					<label>Parent Job ID</label>
+					<input type="text" id="dbJobId" class="studio-input" readonly="readonly" />
+				  </div>
+				</div>
+				<div class="manual-form-group" style="margin-top: 1rem;">
+				  <label>Virality Score &amp; Status</label>
+				  <input type="text" id="dbStateInfo" class="studio-input" readonly="readonly" />
+				</div>
+				<div class="manual-actions-row" style="margin-top: 16px;">
+				  <button class="ghost-btn" id="studioUploadBtn">Upload to YouTube</button>
+				  <a id="studioOpenRawBtn" class="ghost-btn link-btn" target="_blank" rel="noreferrer">Open Raw MP4</a>
+				  <button class="ghost-btn" id="studioOpenFolderBtn">📁 Open Folder</button>
+				</div>
 			  </div>
 			</div>
+
 		  </div>
+		</div>
+	  </div>
+	</div>
+
+	<!-- YouTube Channel Auth & Setup Modal -->
+	<div class="studio-modal-backdrop" id="ytAuthModal" style="display: none;">
+	  <div class="studio-modal-card" style="max-width: 480px;">
+		<div class="studio-modal-header">
+		  <div>
+			<span class="kicker">YouTube Integration</span>
+			<h2>Connect YouTube Account</h2>
+		  </div>
+		  <button class="ghost-btn close-studio-btn" id="closeYtAuthModalBtn">✕</button>
+		</div>
+		<div class="studio-modal-body" style="display: flex; flex-direction: column; gap: 16px; padding: 24px;">
+		  <div id="modalYtStatusCard" style="padding: 14px; border-radius: 12px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); text-align: center;">
+			<div style="font-weight: 600; font-size: 1rem; margin-bottom: 4px;" id="modalYtStatusHeading">YouTube Account</div>
+			<div style="color: var(--muted); font-size: 0.85rem;" id="modalYtStatusSub">Connect your Google account to enable 1-click Shorts uploads.</div>
+		  </div>
+
+		  <!-- 1-Click Google Sign-In Button -->
+		  <div style="margin-top: 4px;">
+			<button type="button" id="ytModalGetAuthUrlBtn" style="display: flex; align-items: center; justify-content: center; gap: 12px; background: #ffffff; color: #1f2937; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 20px; font-size: 1rem; font-weight: 600; width: 100%; cursor: pointer; transition: all 0.2s; box-shadow: 0 2px 6px rgba(0,0,0,0.15);">
+			  <svg width="20" height="20" viewBox="0 0 24 24">
+				<path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+				<path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+				<path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+				<path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+			  </svg>
+			  <span>Sign in with Google</span>
+			</button>
+			<div id="ytModalAuthProgress" style="font-size: 0.85rem; margin-top: 10px; text-align: center;"></div>
+		  </div>
+
+		  <!-- Advanced Credentials & Manual Fallback -->
+		  <details style="font-size: 0.8rem; color: var(--muted); margin-top: 10px;">
+			<summary style="cursor: pointer; opacity: 0.7;">⚙️ Advanced Credentials / OAuth Config</summary>
+			<div style="display: flex; flex-direction: column; gap: 12px; margin-top: 12px; padding: 12px; border-radius: 8px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06);">
+			  <div class="manual-form-group">
+				<label>Upload Custom client_secrets.json</label>
+				<div style="display: flex; gap: 8px; margin-top: 4px;">
+				  <input type="file" id="ytModalSecretsFileInput" accept=".json" style="display:none;" />
+				  <button type="button" class="ghost-btn" id="ytModalUploadSecretsBtn" style="flex: 1;">📁 Select JSON File</button>
+				</div>
+				<div id="ytModalUploadStatus" style="font-size: 0.8rem; color: #38bdf8; margin-top: 4px;"></div>
+			  </div>
+			  <div class="manual-form-group" id="ytModalCodeGroup">
+				<label>Manual Authorization Code</label>
+				<div style="display: flex; gap: 8px; margin-top: 4px;">
+				  <input type="text" id="ytModalAuthCodeInput" class="studio-input" placeholder="Paste Google code if prompted" style="flex: 1;" />
+				  <button type="button" class="primary-btn" id="ytModalSubmitCodeBtn">Verify</button>
+				</div>
+				<div id="ytModalAuthResult" style="font-size: 0.85rem; margin-top: 4px;"></div>
+			  </div>
+			</div>
+		  </details>
+		</div>
+	  </div>
+	</div>
+
+	<!-- TikTok Authentication Modal -->
+	<div class="studio-modal-backdrop" id="tiktokAuthModal" style="display: none;">
+	  <div class="studio-modal-card" style="max-width: 520px;">
+		<div class="studio-modal-header">
+		  <div>
+			<span class="kicker">TikTok Direct Publishing</span>
+			<h2 id="tiktokModalHeading">🎵 Connect TikTok Account</h2>
+		  </div>
+		  <button class="ghost-btn close-studio-btn" id="closeTikTokModalBtn">✕</button>
+		</div>
+		<div class="studio-modal-body" style="display: flex; flex-direction: column; gap: 16px; padding: 22px;">
+		  <div id="tiktokStatusBanner" style="padding: 12px 16px; border-radius: 10px; background: rgba(0, 242, 254, 0.08); border: 1px solid rgba(0, 242, 254, 0.25); font-size: 0.88rem;">
+			⚪ <strong>No TikTok account connected.</strong> Link your TikTok handle to enable 1-click publishing.
+		  </div>
+
+		  <div style="display: flex; flex-direction: column; gap: 10px;">
+			<div>
+			  <label class="field-label" for="tiktokUsernameInput">TikTok Username / Handle</label>
+			  <input id="tiktokUsernameInput" class="studio-input" type="text" placeholder="@ClippinEvrything" value="@ClippinEvrything" style="width: 100%; box-sizing: border-box;" />
+			</div>
+
+			<div>
+			  <label class="field-label" for="tiktokSessionInput">TikTok Session ID or Access Token</label>
+			  <input id="tiktokSessionInput" class="studio-input" type="password" placeholder="Paste sessionid cookie or access token" style="width: 100%; box-sizing: border-box;" />
+			  <div style="font-size: 0.74rem; color: var(--muted); margin-top: 4px; line-height: 1.4;">
+				💡 <em>How to get sessionid:</em> On tiktok.com, press <strong>F12</strong> → <strong>Application</strong> → <strong>Cookies</strong> → <code>https://www.tiktok.com</code> → copy the value of <strong>sessionid</strong>.
+			  </div>
+			</div>
+
+			<div style="display: flex; gap: 10px; margin-top: 6px;">
+			  <button type="button" class="primary-btn" id="saveTikTokAuthBtn" style="flex: 1; background: linear-gradient(135deg, #00f2fe, #4facfe); color: #000; font-weight: 700; padding: 10px; border: none; border-radius: 8px; cursor: pointer;">
+				✅ Connect TikTok Account
+			  </button>
+			  <button type="button" class="ghost-btn" id="disconnectTikTokBtn" style="color: #ef4444; border-color: rgba(239, 68, 68, 0.3); padding: 10px; border-radius: 8px; cursor: pointer; display: none;">
+				Disconnect
+			  </button>
+			</div>
+			<div id="tiktokAuthResultMsg" style="font-size: 0.84rem; text-align: center; margin-top: 4px;"></div>
+		  </div>
+		</div>
+	  </div>
+	</div>
+
+	<!-- Batch Upload Progress Modal -->
+	<div class="studio-modal-backdrop" id="batchUploadModal" style="display: none;">
+	  <div class="studio-modal-card" style="max-width: 520px;">
+		<div class="studio-modal-header">
+		  <div>
+			<span class="kicker" id="batchModalKicker">Automation</span>
+			<h2 id="batchModalTitle">Batch Uploading Clips</h2>
+		  </div>
+		  <button class="ghost-btn close-studio-btn" id="closeBatchUploadModalBtn">✕</button>
+		</div>
+		<div class="studio-modal-body" style="display: flex; flex-direction: column; gap: 16px; padding: 22px;">
+		  <div id="batchUploadProgressCard" style="padding: 16px; border-radius: 12px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);">
+			<div style="display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 0.95rem; margin-bottom: 8px;">
+			  <span id="batchUploadStatusText">Starting YouTube upload...</span>
+			  <span id="batchUploadCountText" style="color: #38bdf8;">0 / 0</span>
+			</div>
+			<div style="height: 8px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden;">
+			  <div id="batchUploadProgressBar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #FF0000, #22c55e); transition: width 0.3s;"></div>
+			</div>
+		  </div>
+		  <div id="batchUploadResultsList" style="display: flex; flex-direction: column; gap: 10px; max-height: 260px; overflow-y: auto;"></div>
 		</div>
 	  </div>
 	</div>

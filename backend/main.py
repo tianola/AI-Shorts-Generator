@@ -1,21 +1,46 @@
 """
 Main FastAPI application for AI Shorts Generator.
 """
+import sys
 import os
+
+# Safe stream redirection for windowless / background daemon execution
+if sys.stdout is None:
+    try:
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "storage", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        sys.stdout = open(os.path.join(log_dir, "api.log"), "a", encoding="utf-8")
+    except Exception:
+        sys.stdout = open(os.devnull, "w")
+
+if sys.stderr is None:
+    try:
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "storage", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        sys.stderr = open(os.path.join(log_dir, "api_error.log"), "a", encoding="utf-8")
+    except Exception:
+        sys.stderr = open(os.devnull, "w")
+
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from database.session import init_database
 from api.routes import router as api_router
+from api.features import router as features_router
 from config import settings
 import uvicorn
 
 BACKEND_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BACKEND_DIR / "static"
 TEMPLATES_DIR = BACKEND_DIR / "templates"
+
+ALLOWED_MEDIA_EXTENSIONS = {
+    ".mp4", ".webm", ".mov", ".m4v", ".mkv",
+    ".jpg", ".jpeg", ".png", ".webp", ".gif"
+}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -42,6 +67,7 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(api_router, prefix="/api")
+app.include_router(features_router, prefix="/api")
 
 # Serve UI assets
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -53,15 +79,24 @@ async def root():
 
 @app.get("/media/{file_path:path}")
 async def media_proxy(file_path: str):
-    """Serve generated media files and thumbnails for the UI."""
+    """Serve generated media files and thumbnails for the UI securely."""
     safe_root = Path(settings.STORAGE_ROOT).resolve()
     safe_path = (safe_root / file_path).resolve()
 
     if safe_root not in safe_path.parents and safe_path != safe_root:
-        raise FileNotFoundError("Invalid media path")
+        raise HTTPException(status_code=403, detail="Access denied")
 
-    if not safe_path.exists():
-        raise FileNotFoundError(f"Media not found: {file_path}")
+    # Disallow access to secrets, database files, and sensitive extensions
+    normalized_path = str(safe_path).replace("\\", "/").lower()
+    if "/secrets/" in normalized_path or any(part.startswith(".") for part in safe_path.parts):
+        raise HTTPException(status_code=403, detail="Access to sensitive resources is forbidden")
+
+    ext = safe_path.suffix.lower()
+    if ext not in ALLOWED_MEDIA_EXTENSIONS:
+        raise HTTPException(status_code=403, detail="File type not allowed")
+
+    if not safe_path.exists() or not safe_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Media not found: {file_path}")
 
     return FileResponse(safe_path)
 

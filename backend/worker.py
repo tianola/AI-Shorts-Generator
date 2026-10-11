@@ -3,7 +3,26 @@ Worker process for AI Shorts Generator.
 Polling-based job processor with comprehensive error handling and logging.
 Uses async/await for Cloud API calls.
 """
+import sys
 import os
+
+# Safe stream redirection for windowless / background daemon execution
+if sys.stdout is None:
+    try:
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "storage", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        sys.stdout = open(os.path.join(log_dir, "worker.log"), "a", encoding="utf-8")
+    except Exception:
+        sys.stdout = open(os.devnull, "w")
+
+if sys.stderr is None:
+    try:
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "storage", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        sys.stderr = open(os.path.join(log_dir, "worker_error.log"), "a", encoding="utf-8")
+    except Exception:
+        sys.stderr = open(os.devnull, "w")
+
 import time
 import json
 import asyncio
@@ -15,20 +34,43 @@ from typing import List, Dict, Optional
 from database.session import SessionLocal
 from database.models import Job, Clip, JobProgress
 from config import settings
+from loguru import logger
 from utils.logger import job_info, job_error, job_warning, job_debug
 from services.youtube import download_youtube
 from services.audio import extract_audio
 from services.whisper import transcribe_audio_file
-from services.clip_selector import select_best_clips
+from services.clip_selector import select_clips
+from services.audio_energy_scorer import score_segments as score_audio_energy
 from services.smart_crop import smart_crop_video
 from services.word_cropper import crop_words
 from services.captions import create_captions
+from services.dimension_checker import check_dimensions, log_dimension_warning
 from services.render import burn_captions, mux_tts
 from services.metadata import generate_metadata
 from services.thumbnail import generate_thumbnail
-from services.audio_polish import polish_audio
-from services.broll import add_broll_overlay
 from services.sfx import add_automatic_sfx
+
+_REDIS_CLIENT = None
+_REDIS_CHECKED = False
+
+def _get_redis_client():
+    global _REDIS_CLIENT, _REDIS_CHECKED
+    if _REDIS_CHECKED:
+        return _REDIS_CLIENT
+    _REDIS_CHECKED = True
+    try:
+        import redis
+        client = redis.Redis(
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", 6379)),
+            socket_connect_timeout=0.08,
+            socket_timeout=0.08,
+        )
+        client.ping()
+        _REDIS_CLIENT = client
+    except Exception:
+        _REDIS_CLIENT = None
+    return _REDIS_CLIENT
 
 def _url_fingerprint(url: str) -> str:
     """Return a short stable hash of a source URL for resume verification."""
@@ -42,7 +84,8 @@ def _clear_derived_artifacts(job_dir, job_id):
     import shutil
     stale_files = [
         "audio.wav", "words.json", "segments.json", "transcript.txt",
-        "short.mp4", "vertical.mp4", "final_short.mp4", "captions.ass",
+        "short.mp4", "vertical.mp4", "final_short.mp4", "final_with_title.mp4",
+        "final_with_sfx.mp4", "popup_card.png", "captions.ass",
     ]
     for name in stale_files:
         p = os.path.join(str(job_dir), name)
@@ -181,22 +224,35 @@ async def process_job_async(job_id: int):
     job_dir = Path(settings.JOBS_DIR) / str(job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
 
+    _last_prog_time = [0.0]
+    _last_prog_pct = [-1]
+    _last_prog_stage = [""]
+
     def update_progress(stage: str, percent: int):
-        progress = db.query(JobProgress).filter(JobProgress.job_id == job_id).first()
-        if not progress:
-            progress = JobProgress(job_id=job_id, current_stage=stage, progress_percent=percent)
-            db.add(progress)
-        else:
-            progress.current_stage = stage
-            progress.progress_percent = percent
-        db.commit()
-        # Publish to Redis (graceful if Redis is offline)
-        try:
-            import redis
-            r = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=int(os.getenv("REDIS_PORT", 6379)))
-            r.publish(f"job_progress_{job_id}", json.dumps({"stage": stage, "percent": percent}))
-        except Exception:
-            pass
+        now = time.time()
+        # Only write to DB if stage changed, percent changed, or at least 0.5s passed (or at 0/100)
+        if percent != _last_prog_pct[0] or stage != _last_prog_stage[0] or (now - _last_prog_time[0]) >= 0.5:
+            _last_prog_time[0] = now
+            _last_prog_pct[0] = percent
+            _last_prog_stage[0] = stage
+            try:
+                progress = db.query(JobProgress).filter(JobProgress.job_id == job_id).first()
+                if not progress:
+                    progress = JobProgress(job_id=job_id, current_stage=stage, progress_percent=percent)
+                    db.add(progress)
+                else:
+                    progress.current_stage = stage
+                    progress.progress_percent = percent
+                db.commit()
+            except Exception:
+                db.rollback()
+
+            r = _get_redis_client()
+            if r:
+                try:
+                    r.publish(f"job_progress_{job_id}", json.dumps({"stage": stage, "percent": percent}))
+                except Exception:
+                    pass
 
     job_info(job_id, f"Starting processing for job {job_id}")
     job_info(job_id, f"YouTube URL: {job.youtube_url}")
@@ -226,16 +282,22 @@ async def process_job_async(job_id: int):
             except Exception:
                 cached_hash = ""
 
-        if os.path.exists(video_path) and cached_hash == _url_fingerprint(job.youtube_url):
+        is_upload = bool(job.youtube_url and job.youtube_url.startswith("upload://"))
+        if is_upload and os.path.exists(video_path):
+            job_info(job_id, f"Preserving uploaded source video: {video_path}")
+        elif os.path.exists(video_path) and cached_hash == _url_fingerprint(job.youtube_url):
             job_info(job_id, f"Reusing cached source for same URL: {video_path}")
         else:
             if os.path.exists(video_path):
                 job_info(job_id, "URL changed or unknown — re-downloading source")
-                os.remove(video_path)
+                try:
+                    os.remove(video_path)
+                except Exception as e:
+                    job_warning(job_id, f"Could not remove old source video ({e}); will overwrite")
             # Derived artifacts (audio/transcript/timing + old clip cuts) were made
             # from a previous source — drop them so the re-run renders fully fresh.
             _clear_derived_artifacts(job_dir, job_id)
-            video_path = download_youtube(job.youtube_url, job_id)
+            video_path = download_youtube(job.youtube_url, job_id, progress_callback=update_progress)
             job_info(job_id, f"Downloaded: {video_path}")
 
         with open(fp_path, "w", encoding="utf-8") as f:
@@ -244,57 +306,171 @@ async def process_job_async(job_id: int):
         # 2. EXTRACT AUDIO
         # =====================
         job_info(job_id, "Step 2/8: Extracting audio...")
-        update_progress("Extracting audio", 20)
+        update_progress("Extracting audio...", 21)
         audio_path = os.path.join(str(job_dir), "audio.wav")
-
 
         if not os.path.exists(audio_path):
             audio_path = extract_audio(video_path)
             job_info(job_id, f"Audio extracted: {audio_path}")
         else:
             job_info(job_id, f"Audio already exists: {audio_path}")
+        update_progress("Audio ready", 24)
 
         # =====================
-        # 3. TRANSCRIBE
+        # 3. TRANSCRIBE (multilingual / translate support)
         # =====================
         job_info(job_id, "Step 3/8: Transcribing audio...")
-        update_progress("Transcribing audio", 30)
+        update_progress("Transcribing audio (0%)...", 25)
         segments_file = os.path.join(str(job_dir), "segments.json")
-
         words_file = os.path.join(str(job_dir), "words.json")
 
         if not os.path.exists(segments_file) or not os.path.exists(words_file):
-            # transcribe_audio_file is synchronous — call directly
-            transcribe_audio_file(audio_path, str(job_dir), job.whisper_model)
+            # Multilingual: task=translate produces English transcripts;
+            # keep_native_transcript preserves the original language files.
+            transcribe_task = getattr(job, "transcription_task", None) or "transcribe"
+            source_language = getattr(job, "source_language", None) or None
+            keep_native = bool(getattr(job, "keep_native_transcript", False))
+            transcribe_audio_file(
+                audio_path,
+                str(job_dir),
+                job.whisper_model,
+                task=transcribe_task,
+                language=source_language,
+                keep_native=keep_native,
+                progress_callback=update_progress,
+            )
             job_info(job_id, f"Transcript created: {segments_file}, {words_file}")
         else:
             job_info(job_id, f"Transcript already exists")
+            update_progress("Transcript loaded", 50)
 
         # Load segments for duration
         with open(segments_file, "r", encoding="utf-8") as f:
             segments = json.load(f)
 
+        if getattr(job, "llm_translate", False):
+            # Check detected language from whisper metadata
+            is_english = False
+            meta_path = os.path.join(str(job_dir), "transcript_metadata.json")
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                        if meta.get("language_code", "").lower() == "en":
+                            is_english = True
+                except:
+                    pass
+
+            if is_english:
+                job_info(job_id, "Video is already in English. Skipping LLM translation.")
+            else:
+                job_info(job_id, "⚙️ Auto-Translate enabled: Running LLM Translation to English...")
+                update_progress("Translating to English (LLM)...", 51)
+                try:
+                    from services.whisper import _llm_translate_segments, _translate_linear_words, _write_transcript_files
+                    native_words = []
+                    if os.path.exists(words_file):
+                        with open(words_file, "r", encoding="utf-8") as f:
+                            native_words = json.load(f)
+                    
+                    translated_segments = await _llm_translate_segments(
+                        segments,
+                        target_language="English",
+                        source_language=source_language,
+                    )
+                    translated_words = _translate_linear_words(
+                        native_words,
+                        segments,
+                        translated_segments,
+                    )
+                    _write_transcript_files(
+                        str(job_dir),
+                        translated_segments,
+                        translated_words,
+                        task="translate",
+                        language="en",
+                        native_segments_list=segments,
+                        native_words_list=native_words,
+                    )
+                    # Swap loaded files for downstream clipping
+                    segments = translated_segments
+                    job_info(job_id, "LLM Translation successful")
+                except Exception as e:
+                    job_warning(job_id, f"LLM Translation failed ({e}), falling back to native transcript")
+
         video_duration = segments[-1]["end"] if segments else 0
 
-        # =====================
-        # 4. SELECT CLIPS
-        # =====================
-        job_info(job_id, "Step 4/8: Selecting best clips...")
-        update_progress("Selecting clips", 40)
-        clips = await select_best_clips(segments_file, settings.NUM_CLIPS)
+        # Check if source video metadata exists
+        source_title = None
+        source_channel = None
+        meta_file = job_dir / "meta.json"
+        if meta_file.exists():
+            try:
+                with open(meta_file, "r", encoding="utf-8") as mf:
+                    meta_data = json.load(mf)
+                    source_title = meta_data.get("title")
+                    source_channel = meta_data.get("channel") or meta_data.get("uploader")
+            except Exception:
+                pass
 
+        # =====================
+        # 4. AUDIO ENERGY PRE-PASS (before clip selection)
+        # =====================
+        job_info(job_id, "Step 4a/8: Audio energy pre-pass (FFmpeg RMS analysis)...")
+        update_progress("Analyzing audio energy...", 51)
+        try:
+            segments = score_audio_energy(str(video_path), segments)
+            job_info(job_id, f"Audio energy scored for {len(segments)} segments")
+            # Persist enriched segments so select_clips can read audio_energy_score
+            with open(segments_file, "w", encoding="utf-8") as f:
+                json.dump(segments, f, ensure_ascii=False, indent=2)
+        except Exception as _ae:
+            job_warning(job_id, f"Audio energy pre-pass failed ({_ae}), continuing with neutral 0.5")
+
+        # =====================
+        # 4b. SELECT CLIPS
+        # =====================
+        job_info(job_id, f"Step 4b/8: Selecting best clips (source title: {source_title or 'N/A'})...")
+        update_progress("Analyzing virality & selecting top clips...", 52)
+        
+        num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else settings.NUM_CLIPS
+        clips = await select_clips(segments_file, num_target_clips, video_title=source_title)
         job_info(job_id, f"Selected {len(clips)} clips")
+        update_progress(f"Selected {len(clips)} clips", 56)
+        
+        # Zero-view diagnostic: assign varied hook styles to each clip
+        is_diagnostic = getattr(job, "is_zero_view_diagnostic", False)
+        hook_style_list = getattr(job, "hook_style_list", None)
+        if is_diagnostic and hook_style_list and isinstance(hook_style_list, list):
+            job_info(job_id, f"Applying zero-view diagnostic hook styles: {hook_style_list}")
+            for i, clip in enumerate(clips):
+                if i < len(hook_style_list):
+                    style = hook_style_list[i]
+                    # Customize hook title to highlight the style for testing
+                    if style == "aggressive":
+                        clip["title"] = f"[AGGRESSIVE] {clip.get('title', 'Viral Moment')}"
+                        clip["hook"] = f"YOU WON'T BELIEVE WHAT HAPPENED NEXT — {clip.get('hook', 'SHOCKING')}"
+                    elif style == "curiosity":
+                        clip["title"] = f"[CURIOUS] The Secret No One Talks About"
+                        clip["hook"] = f"Wait until you hear what they hid — {clip.get('hook', 'SECRET')}"
+                    elif style == "story-driven":
+                        clip["title"] = f"[STORY] The Full Story Behind This Moment"
+                        clip["hook"] = f"This is why that happened — {clip.get('hook', 'STORY')}"
+                    job_info(job_id, f"Clip {i + 1}: Hook style '{style}' applied")
 
         # =====================
         # 5. PROCESS EACH CLIP
         # =====================
         clip_errors = []
+        total_clips = len(clips)
         for index, clip in enumerate(clips):
             clip_start = clip["start"]
             clip_end = clip["end"]
             clip_id = None  # Will be set after DB insert
 
-            job_info(job_id, f"Processing clip {index + 1}/{len(clips)} [{clip_start:.1f}s - {clip_end:.1f}s]")
+            current_clip_pct = 56 + int((index / max(total_clips, 1)) * 40)
+            update_progress(f"Rendering Clip {index + 1}/{total_clips}: Reframing & Subtitles...", current_clip_pct)
+            job_info(job_id, f"Processing clip {index + 1}/{total_clips} [{clip_start:.1f}s - {clip_end:.1f}s]")
 
             try:
                 # Create clip directory
@@ -312,23 +488,24 @@ async def process_job_async(job_id: int):
                     job_info(job_id, f"Clip already exists: {short_path}")
 
                 # =====================
-                # 5b. VERTICAL CONVERSION
+                # 5b-5e. RENDER: SINGLE-PASS UNIFIED (Task D) OR SEQUENTIAL FALLBACK
                 # =====================
-                vertical_path = os.path.join(str(clip_dir), "vertical.mp4")
-                if not os.path.exists(vertical_path):
+                # User's chosen preset on the job ALWAYS takes precedence to keep all clips consistent
+                layout_choice = getattr(job, "default_layout_mode", None) or clip.get("layout") or "auto"
+                if layout_choice in ("auto", "adaptive", None, ""):
                     try:
-                        smart_crop_video(short_path, vertical_path)
-                        job_info(job_id, f"Vertical conversion: {vertical_path}")
+                        from services.smart_crop import detect_adaptive_layout
+                        resolved_layout = detect_adaptive_layout(short_path)
+                        job_info(job_id, f"Auto-detected adaptive layout for clip {clip_idx}: '{resolved_layout}'")
                     except Exception as e:
-                        job_warning(job_id, f"Vertical conversion failed, using original short: {str(e)}")
-                        vertical_path = short_path
-                        job_info(job_id, f"Vertical conversion fallback: {vertical_path}")
+                        job_info(job_id, f"Adaptive layout detection fallback: {e}")
+                        resolved_layout = "single_speaker"
                 else:
-                    job_info(job_id, f"Vertical already exists: {vertical_path}")
+                    resolved_layout = layout_choice
 
-                # =====================
-                # 5c. CROP WORDS
-                # =====================
+                caption_style = getattr(job, "default_caption_style", None) or clip.get("caption_style") or "mrbeast"
+
+                # 5c. Crop Words
                 clip_words_file = os.path.join(str(clip_dir), "words.json")
                 if not os.path.exists(clip_words_file):
                     crop_words(words_file, clip_start, clip_end, clip_words_file)
@@ -336,51 +513,129 @@ async def process_job_async(job_id: int):
                 else:
                     job_info(job_id, f"Words already cropped")
 
-                # =====================
-                # 5d. GENERATE CAPTIONS
-                # =====================
+                # 5d. Generate ASS Captions with Selected Preset & Emojis
                 captions_path = os.path.join(str(clip_dir), "captions.ass")
                 if not os.path.exists(captions_path):
-                    create_captions(clip_words_file, captions_path)
-                    job_info(job_id, f"Captions created: {captions_path}")
+                    create_captions(clip_words_file, captions_path, style_name=caption_style)
+                    job_info(job_id, f"Captions created with '{caption_style}' style: {captions_path}")
                 else:
                     job_info(job_id, f"Captions already exist")
 
-                # =====================
-                # 5e. BURN CAPTIONS
-                # =====================
                 final_path = os.path.join(str(clip_dir), "final_short.mp4")
-                if not os.path.exists(final_path):
-                    burn_captions(vertical_path, captions_path, final_path)
-                    job_info(job_id, f"Final video: {final_path}")
-                else:
-                    job_info(job_id, f"Final video already exists")
 
-                broll_path = os.path.join(str(clip_dir), "broll_overlay.mp4")
-                if not os.path.exists(broll_path):
-                    try:
-                        title_text = clip.get("title") or "Viral Moment"
-                        if job.style_prompt:
-                            title_text = f"{title_text} ({job.style_prompt})"
-                        add_broll_overlay(final_path, broll_path, title=title_text)
-                        final_path = broll_path
-                        job_info(job_id, f"B-roll overlay added: {broll_path}")
-                    except Exception as e:
-                        job_warning(job_id, f"B-roll overlay failed: {str(e)}")
+                # ---- transcript (used for SFX selection + virality) ----
+                clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
 
-                broll_query = clip.get("broll_query")
-                if broll_query:
+                # ---- Content safety: smart blur (optional) ----
+                smart_blur_frag = None
+                if getattr(job, "smart_blur_enabled", False):
                     try:
-                        from services.broll_pexels import fetch_and_overlay_broll
-                        broll_out = os.path.join(str(clip_dir), "with_broll.mp4")
-                        b_start = float(clip.get("broll_start", 2.0))
-                        b_dur = float(clip.get("broll_duration", 3.5))
-                        res_broll = fetch_and_overlay_broll(final_path, broll_out, broll_query, start_time=b_start, duration=b_dur)
-                        if res_broll:
-                            final_path = res_broll
-                            job_info(job_id, f"Stock B-roll overlay applied for '{broll_query}'")
+                        from services.focus_tracking import get_smart_blur_filter_for_video
+                        smart_blur_frag = get_smart_blur_filter_for_video(short_path)
+                        if smart_blur_frag:
+                            job_info(job_id, "Smart blur: unsafe objects detected, blurring tracked regions")
+                        else:
+                            job_info(job_id, "Smart blur: no unsafe objects detected")
                     except Exception as e:
-                        job_warning(job_id, f"Stock B-roll injection failed: {str(e)}")
+                        job_warning(job_id, f"Smart blur detection failed ({e}); continuing without blur")
+
+                # ---- Contextual Visual Popups Preparation (Tone-gated Intelligent Injection) ----
+                popup_png = None
+                popup_start = None
+                popup_duration = 2.0
+                popup_position = "upper_third"
+
+                popup_cues = clip.get("popup_cues", [])
+                if not popup_cues and clip.get("broll_query"):
+                    popup_cues = [{
+                        "query": clip.get("broll_query"),
+                        "start_offset": float(clip.get("broll_start", 2.5)),
+                        "duration": float(clip.get("broll_duration", 2.0)),
+                        "position": "upper_third",
+                    }]
+
+                if clip.get("popup_eligible", True) and popup_cues:
+                    try:
+                        from services.smart_visuals import prepare_clip_popup
+                        clip_dur = max(0.1, clip_end - clip_start)
+                        popup_data = await prepare_clip_popup(
+                            clip_transcript,
+                            popup_cues,
+                            str(clip_dir),
+                            clip_duration=clip_dur,
+                        )
+                        if popup_data:
+                            popup_png = popup_data["card_path"]
+                            popup_start = popup_data["start"]
+                            popup_duration = popup_data["duration"]
+                            popup_position = popup_data.get("position", "upper_third")
+                            job_info(job_id, f"Contextual visual popup prepared for '{popup_data['query']}' (tone: {popup_data.get('tone')})")
+                    except Exception as e:
+                        job_warning(job_id, f"Visual popup preparation failed ({e}); continuing without popup")
+
+                # ---- Render: single-pass unified OR sequential fallback ----
+                _used_single_pass = False
+                if getattr(settings, "SINGLE_PASS_RENDER", False):
+                    try:
+                        from services.vertical import build_vertical_filter
+                        from services.sfx import pick_sfx_for_clip, _find_sfx_file
+                        from services.render import render_single_pass as _rsp
+
+                        vertical_frag = build_vertical_filter(short_path, mode=resolved_layout)
+                        sfx_list = pick_sfx_for_clip(clip.get("title", "") or "", clip_transcript, job.style_prompt or "")
+                        sfx_files = []
+                        sfx_ts = []
+                        for name in sfx_list:
+                            p = _find_sfx_file(name)
+                            if p:
+                                sfx_files.append(p)
+                                sfx_ts.append(0.3 if len(sfx_files) == 1 else max(1.5, (clip_end - clip_start) / 2.0))
+                        _title = clip.get("title") or "Viral Moment"
+                        # short_path is already cut from clip_start to clip_end, so relative duration is 0..duration
+                        clip_dur = max(0.1, clip_end - clip_start)
+                        _rsp(
+                            short_path, 0.0, clip_dur, final_path,
+                            vertical_frag=vertical_frag,
+                            captions_path=captions_path,
+                            title_text=_title,
+                            sfx_files=sfx_files or None,
+                            sfx_timestamps=sfx_ts or None,
+                            mode=resolved_layout,
+                            smart_blur_frag=smart_blur_frag,
+                            popup_png=popup_png,
+                            popup_start=popup_start,
+                            popup_duration=popup_duration,
+                            popup_position=popup_position,
+                            source_channel=source_channel,
+                        )
+                        _used_single_pass = True
+                        job_info(job_id, f"Single-pass render complete: {final_path}")
+                    except Exception as e:
+                        job_warning(job_id, f"Single-pass render failed ({e}); falling back to sequential")
+
+                # ---- Sequential fallback ----
+                if not _used_single_pass:
+                    vertical_path = os.path.join(str(clip_dir), "vertical.mp4")
+                    if not os.path.exists(vertical_path):
+                        try:
+                            smart_crop_video(short_path, vertical_path, mode=resolved_layout)
+                            job_info(job_id, f"Vertical conversion ({resolved_layout}): {vertical_path}")
+                        except Exception as e:
+                            job_warning(job_id, f"Vertical conversion failed, using original short: {str(e)}")
+                            vertical_path = short_path
+                            job_info(job_id, f"Vertical conversion fallback: {vertical_path}")
+                    else:
+                        job_info(job_id, f"Vertical already exists: {vertical_path}")
+
+                    if not os.path.exists(final_path):
+                        burn_captions(vertical_path, captions_path, final_path)
+                        job_info(job_id, f"Final video (sequential): {final_path}")
+                    else:
+                        job_info(job_id, f"Final video already exists")
+
+                # single-pass path: set vertical_path to final for virality call
+                if _used_single_pass:
+                    vertical_path = final_path
 
                 # =====================
                 # 5f. GENERATE METADATA
@@ -420,35 +675,45 @@ async def process_job_async(job_id: int):
                 # Add top TikTok title overlay ONCE at the end of clip processing
                 final_title = metadata.get("title") or clip.get("title") or "Viral Moment"
                 title_overlay_path = os.path.join(str(clip_dir), "final_with_title.mp4")
-                try:
-                    # New: professional motion-graphic title (renders a clean PNG,
-                    # no grey box). Falls back to the old drawtext title on failure.
-                    from services.motion_title import add_motion_title
+                # In single-pass mode, the title PNG was already composited in the
+                # single ffmpeg pass — skip the separate motion-title re-encode.
+                _skip_title_sfx = getattr(settings, "SINGLE_PASS_RENDER", False) and _used_single_pass
+                if not _skip_title_sfx:
                     try:
-                        add_motion_title(final_path, final_title, title_overlay_path)
-                    except Exception:
-                        from services.render import add_title_overlay
-                        add_title_overlay(final_path, final_title, title_overlay_path)
-                    final_path = title_overlay_path
-                    job_info(job_id, f"Title overlay added: {title_overlay_path}")
-                except Exception as e:
-                    job_warning(job_id, f"Title overlay failed: {str(e)}")
-                # 5g. ADD AUTOMATIC SFX
+                        # Professional motion-graphic title (renders a clean PNG,
+                        # no grey box). Falls back to the old drawtext title on failure.
+                        from services.motion_title import add_motion_title
+                        try:
+                            add_motion_title(final_path, final_title, title_overlay_path)
+                        except Exception:
+                            from services.render import add_title_overlay
+                            add_title_overlay(final_path, final_title, title_overlay_path)
+                        final_path = title_overlay_path
+                        job_info(job_id, f"Title overlay added: {title_overlay_path}")
+                    except Exception as e:
+                        job_warning(job_id, f"Title overlay failed: {str(e)}")
+                else:
+                    job_info(job_id, "Skipping separate motion-title (already composited in single-pass render)")
+                # 5g. ADD AUTOMATIC SFX (skip in single-pass mode; already mixed)
                 # =====================
                 sfx_path = os.path.join(str(clip_dir), "final_with_sfx.mp4")
-                try:
-                    clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
-                    add_automatic_sfx(
-                        final_path,
-                        sfx_path,
-                        title=final_title,
-                        transcript=clip_transcript,
-                        style_prompt=job.style_prompt or ""
-                    )
-                    final_path = sfx_path
-                    job_info(job_id, f"Automatic SFX added: {sfx_path}")
-                except Exception as e:
-                    job_warning(job_id, f"Automatic SFX failed: {str(e)}")
+                if not _skip_title_sfx:
+                    try:
+                        clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
+                        add_automatic_sfx(
+                            final_path,
+                            sfx_path,
+                            title=final_title,
+                            transcript=clip_transcript,
+                            style_prompt=job.style_prompt or ""
+                        )
+                        final_path = sfx_path
+                        job_info(job_id, f"Automatic SFX added: {sfx_path}")
+                    except Exception as e:
+                        job_warning(job_id, f"Automatic SFX failed: {str(e)}")
+                else:
+                    job_info(job_id, "Skipping separate SFX pass (already mixed in single-pass render)")
+
 
                 # =====================
                 # 5h. GENERATE THUMBNAIL & STORYBOARD
@@ -458,7 +723,9 @@ async def process_job_async(job_id: int):
                 thumbnail_result = generate_thumbnail(
                     final_path,
                     thumbnail_path,
-                    final_title
+                    final_title,
+                    clip_index=index,
+                    job_id=job_id,
                 )
 
                 try:
@@ -468,20 +735,51 @@ async def process_job_async(job_id: int):
                     job_warning(job_id, f"Storyboard generation failed: {str(e)}")
 
 
-                                # CLEANUP intermediary files
+                # CLEANUP intermediary files — keep ONLY 1 final deliverable (final_video.mp4)
                 final_video_path = os.path.join(str(clip_dir), "final_video.mp4")
-                if os.path.exists(final_path):
+                if os.path.exists(final_path) and os.path.abspath(final_path) != os.path.abspath(final_video_path):
                     import shutil
-                    shutil.move(final_path, final_video_path)
-                    final_path = final_video_path
-                
-                for f in ["short.mp4", "vertical.mp4", "captions.ass", "final_short.mp4", "final_with_title.mp4", "final_with_sfx.mp4", "final_with_tts.mp4"]:
-                    fp = os.path.join(str(clip_dir), f)
-                    if os.path.exists(fp):
+                    try:
+                        shutil.move(final_path, final_video_path)
+                    except Exception:
+                        pass
+                final_path = final_video_path
+
+                # Remove all intermediate video/audio/ass files, keeping only final_video.mp4
+                keep_files = {"final_video.mp4", "thumbnail.jpg", "metadata.json", "storyboard.jpg", "words.json"}
+                for entry in os.listdir(str(clip_dir)):
+                    if entry not in keep_files and (entry.endswith(".mp4") or entry.endswith(".ass") or entry.endswith(".wav")):
+                        fp = os.path.join(str(clip_dir), entry)
                         try:
                             os.remove(fp)
-                        except:
+                        except Exception:
                             pass
+
+                # =====================
+                # 5g-extra. DIMENSION CHECK (pre-upload 9:16 validation)
+                # Detect clips with non-9:16 dimensions before they reach YouTube.
+                # =====================
+                try:
+                    _dims = check_dimensions(final_path)
+                    if not _dims.get("is_valid_916"):
+                        log_dimension_warning(final_path, _dims)
+                    else:
+                        job_info(job_id, f"Dimension check OK for Clip #{index + 1}: {_dims['width']}x{_dims['height']} ({_dims['aspect_ratio']:.3f})")
+                except Exception as _dim_err:
+                    job_warning(job_id, f"Dimension check failed for Clip #{index + 1}: {_dim_err}")
+
+                # =====================
+                # 5g'. ANTI-COPYRIGHT TRANSFORM
+                # Speed +2%, pitch +1.5 semitones, hue+EQ tweak
+                # Defeats Content ID frame/waveform fingerprinting
+                # =====================
+                try:
+                    from services.anti_copyright import apply_anti_fingerprint
+                    job_info(job_id, f"Applying anti-copyright fingerprint transform to Clip #{index + 1}...")
+                    apply_anti_fingerprint(final_path)  # in-place overwrite
+                    job_info(job_id, f"Anti-copyright transform done for Clip #{index + 1}")
+                except Exception as _ac_err:
+                    job_warning(job_id, f"Anti-copyright transform failed (using original): {_ac_err}")
 
                 # =====================
                 # 5h. SAVE CLIP TO DB
@@ -506,6 +804,8 @@ async def process_job_async(job_id: int):
                     description=metadata.get("description", ""),
                     hashtags=metadata.get("hashtags", ["#Shorts"]),
                     platform_metadata=metadata.get("platform_copy", {}),
+                    caption_style=caption_style,
+                    layout_mode=resolved_layout,
                     uploaded=False,
                     upload_retry_count=0
                 )
@@ -515,7 +815,57 @@ async def process_job_async(job_id: int):
                 db.refresh(clip_db)
                 clip_id = clip_db.id
 
-                job_info(job_id, f"Clip {index} saved to DB with ID {clip_id}")
+                job_info(job_id, f"Clip {index + 1}/{total_clips} saved to DB with ID {clip_id}")
+
+                # =========================================================
+                # 5i. IMMEDIATE PER-CLIP AUTO-UPLOAD (YouTube & TikTok)
+                # Uploads progressively as each clip renders (prevents batch bursts)
+                # =========================================================
+                if getattr(job, "auto_upload", True):
+                    # YouTube Immediate Upload
+                    try:
+                        from services.youtube_upload import get_youtube_auth_status, upload_clip_to_youtube
+                        yt_status = get_youtube_auth_status()
+                        if yt_status.get("authenticated"):
+                            job_info(job_id, f"⚡ [Auto-Upload] Uploading Clip {index + 1}/{total_clips} directly to YouTube Shorts...")
+                            yt_res = upload_clip_to_youtube(
+                                video_path=final_path,
+                                title=final_title,
+                                description=metadata.get("description", ""),
+                                hashtags=metadata.get("hashtags", ["#Shorts"]),
+                                source_title=source_title,
+                                privacy_status="public",
+                                job_id=job_id
+                            )
+                            clip_db.uploaded = True
+                            clip_db.youtube_video_id = yt_res.get("video_id")
+                            clip_db.published_at = datetime.utcnow()
+                            clip_db.upload_error = None
+                            db.commit()
+                            db.refresh(clip_db)
+                            job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} Live on YouTube: {yt_res.get('shorts_url')}")
+                    except Exception as yt_err:
+                        job_warning(job_id, f"Per-clip YouTube auto-upload skipped/failed for Clip #{index + 1}: {yt_err}")
+                        clip_db.upload_error = str(yt_err)
+                        db.commit()
+
+                    # TikTok Immediate Upload
+                    try:
+                        from services.tiktok_upload import get_tiktok_auth_status, upload_clip_to_tiktok
+                        tt_status = get_tiktok_auth_status()
+                        if tt_status.get("authenticated"):
+                            job_info(job_id, f"⚡ [Auto-Upload] Publishing Clip {index + 1}/{total_clips} directly to TikTok...")
+                            tt_res = upload_clip_to_tiktok(
+                                video_path=final_path,
+                                title=final_title,
+                                description=metadata.get("description", ""),
+                                hashtags=metadata.get("hashtags", ["#Shorts"]),
+                                source_title=source_title,
+                                privacy_level="PUBLIC_TO_EVERYONE"
+                            )
+                            job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} Published to TikTok: {tt_res.get('tiktok_url')}")
+                    except Exception as tt_err:
+                        job_warning(job_id, f"Per-clip TikTok auto-upload skipped/failed for Clip #{index + 1}: {tt_err}")
 
             except Exception as e:
                 err_msg = str(e)
@@ -545,6 +895,37 @@ async def process_job_async(job_id: int):
             job.updated_at = datetime.utcnow()
             db.commit()
             job_info(job_id, f"Job {job_id} completed successfully")
+
+            # =========================================================
+            # 7. AUTO-UPLOAD ON COMPLETION (YouTube & TikTok)
+            # =========================================================
+            if getattr(job, "auto_upload", False):
+                try:
+                    job_info(job_id, f"Auto-upload triggered for Job #{job_id}...")
+                    update_progress("⚡ Auto-uploading clips to YouTube & TikTok...", 100)
+
+                    # Auto upload to YouTube if authenticated
+                    try:
+                        from services.youtube_upload import upload_all_clips_to_youtube_for_job, get_auth_status
+                        yt_status = get_auth_status()
+                        if yt_status.get("authenticated"):
+                            job_info(job_id, f"Auto-uploading to YouTube Shorts...")
+                            upload_all_clips_to_youtube_for_job(job_id, db, privacy_status="public")
+                            job_info(job_id, f"YouTube Shorts auto-upload complete for Job #{job_id}")
+                    except Exception as yt_err:
+                        job_warning(job_id, f"YouTube auto-upload failed: {yt_err}")
+
+                    # Auto upload to TikTok
+                    try:
+                        from services.tiktok_upload import upload_all_clips_to_tiktok_for_job
+                        job_info(job_id, f"Auto-uploading to TikTok...")
+                        upload_all_clips_to_tiktok_for_job(job_id, db, privacy_level="PUBLIC_TO_EVERYONE")
+                        job_info(job_id, f"TikTok auto-upload complete for Job #{job_id}")
+                    except Exception as tt_err:
+                        job_warning(job_id, f"TikTok auto-upload failed: {tt_err}")
+
+                except Exception as auto_err:
+                    job_warning(job_id, f"Auto-upload execution encountered an error: {auto_err}")
 
     except Exception as e:
         # Mark job as failed
@@ -584,7 +965,7 @@ def process_jobs():
     """
     Main worker loop (polling fallback or arq dispatcher).
     """
-    job_info(0, "Worker started. Polling for jobs every 5 seconds...")
+    logger.info("Worker started. Polling for jobs...")
 
     while True:
         db = SessionLocal()
@@ -599,14 +980,13 @@ def process_jobs():
             )
 
             if not job:
-                job_info(0, "No jobs waiting...")
-                time.sleep(5)
+                time.sleep(3)
                 continue
 
             job_id = job.id
             db.close()  # Close DB before processing
 
-            job_info(0, f"Found job {job_id}, starting processing...")
+            job_info(job_id, f"Found job {job_id}, starting processing...")
 
             # Process the job with error handling
             try:
@@ -617,7 +997,7 @@ def process_jobs():
                 # Continue to next job
 
         except Exception as e:
-            job_error(0, f"Worker error: {str(e)}")
+            logger.error(f"Worker polling error: {str(e)}")
             # Don't crash the worker, just log and continue
 
         finally:

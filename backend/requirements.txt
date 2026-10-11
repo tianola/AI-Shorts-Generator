@@ -1,6 +1,8 @@
 # Core dependencies
 fastapi>=0.104.0
-uvicorn>=0.24.0
+python-multipart>=0.0.6
+uvicorn[standard]>=0.24.0
+websockets>=12.0.0
 python-dotenv>=1.0.0
 pydantic>=2.5.0
 pydantic-settings>=2.0.0
@@ -34,4 +36,5 @@ torchaudio>=2.0.0
 aiosqlite>=0.19.0
 
 # Type hints
-typing-extensions>=4.8.0ultralytics>=8.3.0
+typing-extensions>=4.8.0
+ultralytics>=8.3.0

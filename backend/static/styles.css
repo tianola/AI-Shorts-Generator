@@ -639,7 +639,6 @@ input:focus, select:focus {
   color: #dffaff;
 }
 
-/* Iterative refinement buttons */
 .reclip-btn {
   background: rgba(255, 184, 77, 0.12);
   color: #ffb84d;
@@ -762,6 +761,7 @@ input:focus, select:focus {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  overflow-y: auto;
 }
 
 .studio-tabs-nav {
@@ -795,6 +795,7 @@ input:focus, select:focus {
   padding: 20px;
   overflow-y: auto;
   border: 1px solid #222;
+  min-height: 200px;
 }
 
 .ai-chat-msg {
@@ -876,3 +877,54 @@ input:focus, select:focus {
   opacity: 1;
 }
 
+/* Preset & Layout Card Selector Styles */
+.preset-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.preset-card, .layout-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 10px 14px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  text-align: left;
+}
+
+.preset-card:hover, .layout-card:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.25);
+  transform: translateY(-2px);
+}
+
+.preset-card.active, .layout-card.active {
+  background: rgba(255, 77, 141, 0.12);
+  border-color: var(--pink);
+  box-shadow: 0 0 16px rgba(255, 77, 141, 0.25);
+}
+
+.preset-badge {
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  padding: 3px 6px;
+  border-radius: 6px;
+  text-transform: uppercase;
+}
+
+.preset-title {
+  flex: 1;
+}
+
+.virality-card {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}

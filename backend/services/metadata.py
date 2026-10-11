@@ -76,7 +76,15 @@ async def generate_metadata(
         tags = [tag if tag.startswith('#') else f"#{tag}" for tag in data.hashtags if tag]
         if "#Shorts" not in tags:
             tags.insert(0, "#Shorts")
-        tags = tags[:5]
+
+        # Prepend mandatory hashtags from config (always present, deduped, config wins order)
+        mandatory = [
+            t.strip() if t.strip().startswith("#") else f"#{t.strip()}"
+            for t in settings.MANDATORY_HASHTAGS.split(",")
+            if t.strip()
+        ]
+        combined = mandatory + [t for t in tags if t not in mandatory]
+        tags = combined[:7]
 
         return {
             "title": final_title,

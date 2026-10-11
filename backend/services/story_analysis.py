@@ -1,6 +1,6 @@
 """Story analysis and hook extraction for AI Shorts generation."""
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from loguru import logger
 
@@ -8,7 +8,7 @@ from config import settings
 from services.llm_router import call_llm_json
 
 
-async def analyze_story_segments(segments: List[Dict[str, Any]]) -> Dict[str, Any]:
+async def analyze_story_segments(segments: List[Dict[str, Any]], video_title: Optional[str] = None) -> Dict[str, Any]:
 	"""Detect the strongest story arc and hook in a transcript.
 
 	Returns a structured dict with a short hook, a summary of the story, and
@@ -30,16 +30,19 @@ async def analyze_story_segments(segments: List[Dict[str, Any]]) -> Dict[str, An
 		if str(seg.get('text', '')).strip()
 	)
 
+	title_context = f"\nSource Video Title / Context: {video_title}\n" if video_title else ""
+
 	prompt = f"""
-	You are a YouTube Shorts strategy analyst.
-	Read the transcript and identify the most compelling narrative arc for a short-form video.
+	You are a master YouTube Shorts & TikTok viral producer.
+	Read the transcript{title_context}and identify the highest-stakes, most gripping narrative arc for short-form viral videos.
 
 	Focus on:
-	- the strongest hook / opening line
-	- whether this is a question-answer, reveal, challenge, emotion, or lesson format
-	- the key high-energy moments worth clipping
-	- the best framing for a vertical short (centered face, split-screen, or screen-share face)
-	- a short CTA for the end of the video
+	- The HIGHEST STAKES Hook: Identify what creates the most tension, suspense, curiosity gap, or emotional shock.
+	- Core Conflict: What is the most shocking revelation, confrontation, danger, or twist?
+	- High-Energy Moments: Exactly where the climax, confrontation, or critical insight happens.
+	- Story Type: question_answer, reveal, challenge, emotion, lesson, or reaction.
+	- Recommended Layout: centered_face, split_screen, or screen_share_face.
+	- A snappy CTA for the end.
 
 	Transcript:
 	{transcript_text}

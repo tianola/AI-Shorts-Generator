@@ -4,8 +4,6 @@ All configuration is driven by environment variables.
 """
 import os
 from pathlib import Path
-import os
-from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
@@ -68,7 +66,7 @@ class Settings(BaseSettings):
     # CLIP SELECTION
     # ====================
     NUM_CLIPS: int = Field(
-        default=10,
+        default=4,
         ge=1,
         le=20,
         description="Number of clips to generate per video (short-form viral moments)"
@@ -90,10 +88,10 @@ class Settings(BaseSettings):
     # CAPTIONS
     # ====================
     CAPTION_GROUP_SIZE: int = Field(
-        default=3,
+        default=5,
         ge=1,
-        le=6,
-        description="Number of words per caption burst (short, easy-to-read TikTok-style chunks)"
+        le=8,
+        description="Number of words per caption burst (4-5 words easy-to-read TikTok-style chunks)"
     )
 
     # ====================
@@ -129,10 +127,36 @@ class Settings(BaseSettings):
         description="FFmpeg encoding preset"
     )
     FFMPEG_CRF: int = Field(
-        default=20,
+        default=18,
         ge=0,
         le=51,
-        description="FFmpeg CRF value (quality)"
+        description="FFmpeg CRF value (visually lossless quality)"
+    )
+    FFMPEG_THREADS: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description="Number of threads ffmpeg may use per encode (-threads N) to limit memory usage."
+    )
+    FFMPEG_SCALE_FILTER: str = Field(
+        default="scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        description="FFmpeg vf scale filter applied before encoding to lower resolution."
+    )
+    SINGLE_PASS_RENDER: bool = Field(
+        default=True,
+        description="Render each clip in one unified ffmpeg pass (vertical + captions + title + SFX) instead of 5-6 sequential re-encodes"
+    )
+
+    # ====================
+    # BRANDING
+    # ====================
+    WATERMARK_HANDLE: str = Field(
+        default="@thomastheo",
+        description="Watermark handle shown on every clip (e.g. @thomastheo)"
+    )
+    MANDATORY_HASHTAGS: str = Field(
+        default="#thomastheo,#mrclip",
+        description="Comma-separated hashtags always appended to every clip's metadata"
     )
 
     # ====================
@@ -143,6 +167,14 @@ class Settings(BaseSettings):
         ge=0,
         le=10,
         description="Maximum number of upload retries"
+    )
+
+    # ====================
+    # STOCK FOOTAGE (Pexels)
+    # ====================
+    PEXELS_API_KEY: Optional[str] = Field(
+        default=None,
+        description="Pexels API key for stock B-Roll video downloads"
     )
 
     # ====================
@@ -169,7 +201,7 @@ class Settings(BaseSettings):
         description="Host interface for the FastAPI server"
     )
     API_PORT: int = Field(
-        default=5000,
+        default=5001,
         ge=1,
         le=65535,
         description="Port for the FastAPI server"
@@ -203,6 +235,22 @@ class Settings(BaseSettings):
     @property
     def JOBS_DIR(self) -> str:
         return os.path.join(self.STORAGE_ROOT, "jobs")
+
+    # ====================
+    # YOUTUBE DOWNLOAD (cookies + JS challenge)
+    # ====================
+    # Path to a Netscape-format cookies.txt for YouTube (exported from the
+    # browser). Stored OUTSIDE the repo so credentials never hit git.
+    YT_COOKIES_FILE: Optional[str] = Field(
+        default=None,
+        description="Absolute path to yt-dlp cookies.txt (Netscape format) for YouTube downloads"
+    )
+    # Newer YouTube builds require solving a JS "n" challenge via deno/node.
+    # yt-dlp downloads the solver script from GitHub (EJS project) on demand.
+    YT_REMOTE_COMPONENTS: str = Field(
+        default="ejs:github",
+        description="yt-dlp remote components for JS challenge solving (ejs:github or ejs:npm)"
+    )
 
     @property
     def FONTS_DIR(self) -> str:

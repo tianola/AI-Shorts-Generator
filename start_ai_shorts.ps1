@@ -7,6 +7,8 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backendDir = Join-Path $repoRoot 'backend'
 $venvPython = Join-Path $backendDir '.venv\Scripts\python.exe'
+$apiExe = Join-Path $backendDir '.venv\Scripts\AiShortsAPI.exe'
+$workerExe = Join-Path $backendDir '.venv\Scripts\AiShortsWorker.exe'
 $storageLogs = Join-Path $repoRoot 'storage\logs'
 
 if (-not (Test-Path $storageLogs)) {
@@ -29,7 +31,7 @@ if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
 }
 
 $env:PYTHONPATH = $backendDir
-$env:API_PORT = '5000'
+$env:API_PORT = '5001'
 $env:API_HOST = '0.0.0.0'
 
 $apiLog = Join-Path $storageLogs 'api.log'
@@ -37,12 +39,12 @@ $workerLog = Join-Path $storageLogs 'worker.log'
 $apiErr = Join-Path $storageLogs 'api.err.log'
 $workerErr = Join-Path $storageLogs 'worker.err.log'
 
-$apiProcess = Start-Process -FilePath $venvPython -ArgumentList 'main.py' -WorkingDirectory $backendDir -RedirectStandardOutput $apiLog -RedirectStandardError $apiErr -PassThru
-$workerProcess = Start-Process -FilePath $venvPython -ArgumentList 'worker.py' -WorkingDirectory $backendDir -RedirectStandardOutput $workerLog -RedirectStandardError $workerErr -PassThru
+$apiProcess = Start-Process -FilePath $apiExe -ArgumentList 'main.py' -WorkingDirectory $backendDir -RedirectStandardOutput $apiLog -RedirectStandardError $apiErr -PassThru
+$workerProcess = Start-Process -FilePath $workerExe -ArgumentList 'worker.py' -WorkingDirectory $backendDir -RedirectStandardOutput $workerLog -RedirectStandardError $workerErr -PassThru
 
 Write-Host ''
 Write-Host 'AI Shorts Generator started.' -ForegroundColor Green
-Write-Host 'API: http://localhost:5000/docs' -ForegroundColor Yellow
+Write-Host 'API: http://localhost:5001' -ForegroundColor Yellow
 Write-Host 'Worker PID: ' $workerProcess.Id -ForegroundColor Yellow
 Write-Host 'API PID: ' $apiProcess.Id -ForegroundColor Yellow
 Write-Host 'Logs:' -ForegroundColor Yellow

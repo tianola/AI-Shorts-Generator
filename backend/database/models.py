@@ -18,6 +18,21 @@ class Job(Base):
     error_message = Column(Text, nullable=True)
     channel_id = Column(String, nullable=True)  # Future: multi-channel support
     whisper_model = Column(String, nullable=True, default="tiny")
+    default_caption_style = Column(String, nullable=True, default="mrbeast")
+    default_layout_mode = Column(String, nullable=True, default="auto")
+    default_karaoke = Column(Boolean, nullable=True, default=True)
+    default_motion_title = Column(Boolean, nullable=True, default=True)
+    # Multilingual / translation options (v1: worker + API surface)
+    transcription_task = Column(String, nullable=True, default="transcribe")
+    source_language = Column(String, nullable=True, default=None)
+    keep_native_transcript = Column(Boolean, nullable=True, default=False)
+    # Content safety: smart blur of unsafe objects
+    smart_blur_enabled = Column(Boolean, nullable=True, default=False)
+    target_clips = Column(Integer, nullable=True, default=10)
+    auto_upload = Column(Boolean, nullable=True, default=True)
+    llm_translate = Column(Boolean, nullable=True, default=False)
+    hook_style_list = Column(JSON, nullable=True)
+    is_zero_view_diagnostic = Column(Boolean, nullable=True, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -52,15 +67,25 @@ class Clip(Base):
     end = Column(Float, nullable=False)  # End time in seconds
     title = Column(String, nullable=True)
     hook = Column(String, nullable=True)
-    score = Column(Float, nullable=True)  # Virality score from AI selection
+    score = Column(Float, nullable=True)  # Virality score from AI selection (0-100)
     hook_score = Column(Float, nullable=True)
     coherence_score = Column(Float, nullable=True)
     connection_score = Column(Float, nullable=True)
     trend_score = Column(Float, nullable=True)
 
+    # Style and layout configurations
+    caption_style = Column(String, nullable=True, default="mrbeast")
+    layout_mode = Column(String, nullable=True, default="single_speaker")
+    virality_explanation = Column(Text, nullable=True)
+    # Precision trim of rendered clip
+    trim_start = Column(Float, nullable=True)
+    trim_end = Column(Float, nullable=True)
+    # Translated transcript for this clip (English)
+    translated_transcript = Column(Text, nullable=True)
+
     # File paths (relative to STORAGE_ROOT)
-    file_path = Column(String, nullable=True)  # Path to final_short_{n}.mp4
-    thumbnail_path = Column(String, nullable=True)  # Path to thumbnail_{n}.jpg
+    file_path = Column(String, nullable=True)  # Path to final_video.mp4
+    thumbnail_path = Column(String, nullable=True)  # Path to thumbnail.jpg
 
     # Metadata
     description = Column(Text, nullable=True)  # AI-generated description

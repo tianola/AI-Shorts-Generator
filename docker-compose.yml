@@ -11,7 +11,7 @@ services:
     container_name: ai-shorts-api
     restart: unless-stopped
     ports:
-      - "5000:8000"
+      - "5002:5001"
     volumes:
       - ./storage:/app/storage
       - ./backend/fonts:/usr/share/fonts/truetype/montserrat:ro
@@ -36,6 +36,7 @@ services:
       # FFmpeg
       - FFMPEG_PRESET=veryfast
       - FFMPEG_CRF=20
+      - SINGLE_PASS_RENDER=true
 
       # Upload
       - MAX_UPLOAD_RETRIES=3
@@ -85,6 +86,7 @@ services:
       # FFmpeg
       - FFMPEG_PRESET=veryfast
       - FFMPEG_CRF=20
+      - SINGLE_PASS_RENDER=true
 
       # Upload
       - MAX_UPLOAD_RETRIES=3

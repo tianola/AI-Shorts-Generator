@@ -1,0 +1,26 @@
+# Docker ignore file to exclude irrelevant files from build context
+# Version control artifacts
+.git
+.gitignore
+# Python caches
+__pycache__/
+*.pyc
+# Virtual environments
+backend/.venv/
+# Environment files
+.env
+*.env
+*.env.backup
+# Logs and temporary files
+*.log
+*.swp
+# Storage and data outputs
+storage/
+backend/storage/
+# Hermes internal files
+.hermes/
+# Model files
+*.pt
+# YouTube cookies (never copy)
+*.cookies.txt
+cookies.txt

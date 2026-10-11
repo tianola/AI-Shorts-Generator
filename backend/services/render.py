@@ -6,7 +6,7 @@ import subprocess
 import json
 import os
 from config import settings
-from utils.logger import job_info, job_error
+from utils.logger import job_info, job_error, job_warning
 
 def get_video_size(video_path: str) -> tuple:
     """
@@ -168,7 +168,9 @@ def add_title_overlay(
     output_path: str,
     font_size: int = 52
 ) -> str:
-    """Add a TikTok-style top title overlay with dark band, 3D yellow text, and energy strip."""
+    """Add a professional motion-style top title overlay (neutral gradient band,
+    clean white uppercase text — no yellow lines). Used only as a fallback when
+    the motion_title PNG path is unavailable."""
     from services.font_resolve import find_font, ffmpeg_font_path
 
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
@@ -192,11 +194,11 @@ def add_title_overlay(
     # Adaptive font size — safe and perfectly scaled for 1080x1920
     length = len(display_title)
     if length < 20:
-        fs = 58
+        fs = 64
     elif length < 35:
-        fs = 48
+        fs = 56
     else:
-        fs = 40
+        fs = 48
 
     # Write title to temp file — avoids ALL drawtext inline escaping issues
     title_file = output_path + ".title.txt"
@@ -208,20 +210,14 @@ def add_title_overlay(
     font_ff = ffmpeg_font_path(font) if font else ""
     font_opt = f"fontfile='{font_ff}':" if font_ff else ""
 
-    # TikTok-style filter chain:
-    # 1) Dark translucent band at top
-    # 2) Yellow accent strip at bottom of band
-    # 3) Single clean text layer: yellow fill + black border + subtle shadow
-    #    (rendered ONCE — no stacked layers, so the title never looks doubled)
+    # Professional clean fallback title overlay (no dark band across video):
     subtitle_filter = (
-        f"drawbox=x=0:y=80:w=iw:h=210:color=black@0.80:t=fill,"
-        f"drawbox=x=0:y=285:w=iw:h=6:color=0xFFE500:t=fill,"
         f"drawtext=textfile='{title_file_ff}':"
         f"{font_opt}"
-        f"fontcolor=0xFFE500:fontsize={fs}:"
-        f"x=(w-text_w)/2:y=110:"
-        f"borderw=5:bordercolor=0x000000:"
-        f"shadowx=3:shadowy=3:shadowcolor=0x000000@0.6"
+        f"fontcolor=white:fontsize={fs}:"
+        f"x=(w-text_w)/2:y=210:"
+        f"borderw=4:bordercolor=0x000000:"
+        f"shadowx=3:shadowy=3:shadowcolor=0x000000@0.5"
     )
 
     cmd = [
@@ -298,12 +294,17 @@ def burn_captions(
         output_path
     ]
 
+    creationflags = 0
+    if os.name == 'nt':
+        creationflags = 0x08000000 # subprocess.CREATE_NO_WINDOW
+
     try:
         result = subprocess.run(
             cmd,
             check=True,
             capture_output=True,
-            text=True
+            text=True,
+            creationflags=creationflags
         )
         job_info(0, f"Captions burned in: {output_path}")
         return output_path
@@ -315,3 +316,326 @@ def burn_captions(
             error_msg = str(err) if err else str(e)
         job_error(0, f"Caption burn-in failed: {error_msg}")
         raise Exception(f"Caption burn-in failed: {error_msg}")
+
+# ---------------------------------------------------------------------------
+# Single-pass unified render pipeline (Task D)
+# ---------------------------------------------------------------------------
+def _esc_filter_path(path: str) -> str:
+    """Escape a filesystem path for use inside an ffmpeg filter argument."""
+    return path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+
+
+def build_single_pass_filter(
+    vertical_frag: str,
+    captions_path: str = None,
+    title_png: str = None,
+    sfx_files: list = None,
+    sfx_timestamps: list = None,
+    has_audio: bool = True,
+    smart_blur_frag: str = None,
+    popup_png: str = None,
+    popup_start: float = None,
+    popup_duration: float = 2.0,
+    popup_position: str = "upper_third",
+    popups: list = None,
+) -> tuple:
+    """
+    Construct an all-in-one FFmpeg filter_complex that combines all visual
+    and audio transformations into a SINGLE pass.
+
+    Args:
+        vertical_frag: The `[0:v] ... [vsingle]` vertical-crop fragment.
+        captions_path: Optional .ass subtitle file to burn.
+        title_png: Optional motion-title PNG path (already-styled overlay).
+        sfx_files / sfx_timestamps: Optional SFX audio list + start offsets.
+        has_audio: Whether the source video has an audio stream.
+        smart_blur_frag: Optional `[0:v] ... [outv]` fragment that blurs a
+            tracked unsafe region. When provided it is applied BEFORE the
+            vertical crop (it consumes [0:v] and re-emits [outv]).
+        popup_png: Optional path to prepared popup card PNG.
+        popup_start: Timestamp (in seconds) when the visual popup appears.
+        popup_duration: Duration (in seconds) the popup stays visible (default 2.0).
+        popup_position: Popup placement ('upper_third' or 'upper_right').
+        popups: Optional list of popup dicts (each with png, start, duration, position).
+
+    Returns:
+        (extra_inputs, filter_complex, vmap, amap)
+          - extra_inputs: list of dicts for extra -i inputs (PNG, SFX files)
+          - filter_complex: full filtergraph string ending in [vout]/[aout]
+          - vmap: "-map" argument for video stream ('[vout]')
+          - amap: "-map" argument for audio stream ('[aout]') or "0:a?" or None
+    """
+    extra_inputs = []
+    fc_parts = []
+    next_idx = 1  # input 0 = main video
+
+    # ---- Stage 0: optional smart blur (consumes [0:v], re-emits [outv]) ----
+    cur_v = "[vsingle]"
+    if smart_blur_frag:
+        sb = smart_blur_frag.strip()
+        # Normalize the fragment so it ends in [vsingle] (the blur builder
+        # emits [outv]; compose directly when it already uses [vsingle]).
+        if sb.endswith("[outv]"):
+            sb = sb[:-len("[outv]")] + "[vsingle]"
+        elif "[vsingle]" not in sb:
+            sb = sb.rstrip(",") + "[vsingle]"
+        fc_parts.append(sb)
+
+    # ---- Stage 1: vertical crop (always required) ----
+    vf = vertical_frag.strip()
+    if not vf.endswith("[vsingle]"):
+        if vf.endswith("[outv]"):
+            vf = vf[:-len("[outv]")] + "[vsingle]"
+        elif "[vsingle]" not in vf:
+            vf = vf.rstrip(",") + "[vsingle]"
+    fc_parts.append(vf)
+
+    # ---- Stage 2: captions (optional) ----
+    if captions_path:
+        cap_esc = _esc_filter_path(captions_path)
+        fc_parts.append("[vsingle]subtitles='" + cap_esc + "'[vsub]")
+        cur_v = "[vsub]"
+    else:
+        cur_v = "[vsingle]"
+
+    # ---- Stage 3: Contextual visual popup card overlay (optional) ----
+    popup_list = []
+    if popups:
+        popup_list.extend(popups)
+    elif popup_png:
+        popup_list.append({
+            "png": popup_png,
+            "start": popup_start if popup_start is not None else 2.5,
+            "duration": popup_duration if popup_duration is not None else 2.0,
+            "position": popup_position or "upper_third",
+        })
+
+    if popup_list:
+        from services.visual_popup import build_popup_filtergraph_fragment
+        for i, pop in enumerate(popup_list):
+            p_png = pop.get("png") or pop.get("path")
+            if not p_png:
+                continue
+            p_start = float(pop.get("start", 2.5))
+            p_dur = float(pop.get("duration", 2.0))
+            p_pos = pop.get("position", "upper_third")
+
+            extra_inputs.append({"path": p_png, "kind": "popup"})
+            p_idx = next_idx
+            next_idx += 1
+
+            prep, anim_label, overlay_str = build_popup_filtergraph_fragment(
+                input_idx=p_idx,
+                start_time=p_start,
+                duration=p_dur,
+                position=p_pos,
+            )
+            fc_parts.append(prep)
+            out_label = f"[vpop{i}]" if i < len(popup_list) - 1 else "[vpop]"
+            fc_parts.append(f"{cur_v}[{anim_label}]{overlay_str}{out_label}")
+            cur_v = out_label
+
+    # ---- Stage 4: motion title PNG overlay (optional, stays for full clip) ----
+    if title_png:
+        extra_inputs.append({"path": title_png, "kind": "png"})
+        title_idx = next_idx
+        next_idx += 1
+        fade_expr = "clip(t/0.45,0,1)"
+        scale_expr = (
+            "0.9+0.10*clip(t/0.45,0,1)"
+            "+0.12*sin(clip(t/0.6,0,1)*PI/1.5)"
+            "+0.015*sin(2*PI*t/2.4)"
+        )
+        y_expr = "36*(1-clip(t/0.45,0,1))"
+        escy = y_expr.replace(",", "\\,")
+        esc_scale = scale_expr.replace(",", "\\,")
+        fc_parts.append("[" + str(title_idx) + ":v]format=rgba[title]")
+        fc_parts.append(
+            "[title]scale=w='iw*(" + esc_scale
+            + ")':h='ih*(" + esc_scale + ")':eval=frame,"
+            + "fade=t=in:st=0:d=0.45:alpha=1[title_anim]"
+        )
+        fc_parts.append(
+            cur_v + "[title_anim]overlay=x=(W-w)/2:y=" + escy
+            + ":shortest=1:format=auto[vt]"
+        )
+        cur_v = "[vt]"
+
+    # ---- Stage 4: SFX audio mixing (100% voice preserved) ----
+    aout = None
+    if sfx_files and has_audio:
+        sfx_files = list(sfx_files)
+        sfx_timestamps = list(sfx_timestamps or [])
+        fc_parts.append("[0:a]volume=1.0[orig]")
+        labels = []
+        for i, sfx_path in enumerate(sfx_files):
+            sfx_idx = next_idx
+            next_idx += 1
+            extra_inputs.append({"path": sfx_path, "kind": "sfx"})
+            delay_ms = int(float(sfx_timestamps[i]) * 1000) if i < len(sfx_timestamps) else 300
+            label = "sfx" + str(i)
+            fc_parts.append(
+                "[" + str(sfx_idx) + ":a]adelay=" + str(delay_ms) + "|" + str(delay_ms)
+                + ",volume=0.25[" + label + "]"
+            )
+            labels.append("[" + label + "]")
+        mix_in = "[orig]" + "".join(labels)
+        fc_parts.append(
+            mix_in + "amix=inputs=" + str(1 + len(labels))
+            + ":duration=first:dropout_transition=0[aout]"
+        )
+        aout = "[aout]"
+    elif has_audio:
+        aout = "0:a?"
+
+    # ---- Finalize video output ----
+    fc_parts.append(cur_v + "format=yuv420p[vout]")
+    vmap = "[vout]"
+
+    return extra_inputs, ";".join(fc_parts), vmap, aout
+
+
+def _run_ffmpeg_and_verify(
+    cmd: list,
+    output_path: str,
+    label: str,
+    min_duration: float = 0.0,
+) -> str:
+    """Run an ffmpeg command and verify the output exists and has positive size."""
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    creationflags = 0
+    if os.name == 'nt':
+        creationflags = 0x08000000 # subprocess.CREATE_NO_WINDOW
+        
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, check=True, creationflags=creationflags)
+    except subprocess.CalledProcessError as e:
+        err = e.stderr
+        if isinstance(err, (bytes, bytearray)):
+            err = err.decode(errors="ignore")
+        job_error(0, label + " failed: " + str(err))
+        raise Exception(label + " failed: " + str(err))
+    if not os.path.exists(output_path) or os.path.getsize(output_path) <= 0:
+        raise Exception(label + " produced no output file: " + output_path)
+    if min_duration > 0:
+        d = _probe_duration(output_path)
+        if d < min_duration:
+            raise Exception(
+                label + " produced too-short duration %.2fs (need >= %.2fs)" % (d, min_duration)
+            )
+    return output_path
+
+
+def render_single_pass(
+    input_video: str,
+    start: float,
+    end: float,
+    output_path: str,
+    vertical_frag: str = None,
+    captions_path: str = None,
+    title_text: str = None,
+    title_png: str = None,
+    sfx_files: list = None,
+    sfx_timestamps: list = None,
+    mode: str = "static",
+    smart_blur_frag: str = None,
+    popup_png: str = None,
+    popup_start: float = None,
+    popup_duration: float = 2.0,
+    popup_position: str = "upper_third",
+    popups: list = None,
+    source_channel: str = None,
+) -> str:
+    """
+    Render a clip in a SINGLE ffmpeg pass (Task D).
+    Combines: vertical crop + captions + visual popup card + title overlay + SFX mix.
+    Voice is preserved at 100% (no ducking).
+    """
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+
+    if vertical_frag is None:
+        from services.vertical import build_vertical_filter
+        vertical_frag = build_vertical_filter(input_video, mode=mode)
+
+    # Build title PNG via PIL when requested and not provided
+    if title_text and not title_png:
+        try:
+            from services.motion_title import render_title_frame
+            from PIL import Image
+            frame = render_title_frame(title_text, source_channel=source_channel)
+            title_png = output_path + ".title.png"
+            Image.fromarray(frame, "RGBA").save(title_png)
+            job_info(0, "Rendered title PNG: " + title_png)
+        except Exception as e:
+            job_warning(0, "Title PNG render failed, skipping: " + str(e))
+            title_png = None
+
+    has_audio = _has_audio_stream(input_video)
+
+    # Filter out SFX files that don't exist on disk
+    if sfx_files:
+        kept_sfx = []
+        kept_ts = []
+        for i, sfx_path in enumerate(sfx_files):
+            if os.path.exists(sfx_path):
+                kept_sfx.append(sfx_path)
+                kept_ts.append(
+                    sfx_timestamps[i] if sfx_timestamps and i < len(sfx_timestamps) else 0.3
+                )
+        sfx_files = kept_sfx
+        sfx_timestamps = kept_ts
+
+    extra, fc, vmap, amap = build_single_pass_filter(
+            vertical_frag,
+            captions_path=captions_path,
+            title_png=title_png,
+            sfx_files=sfx_files,
+            sfx_timestamps=sfx_timestamps,
+            has_audio=has_audio,
+            smart_blur_frag=smart_blur_frag,
+            popup_png=popup_png,
+            popup_start=popup_start,
+            popup_duration=popup_duration,
+            popup_position=popup_position,
+            popups=popups,
+        )
+
+    # Build ffmpeg command: 0 = main video, then extra inputs
+    cmd = ["ffmpeg", "-y", "-ss", str(start), "-t", str(end - start), "-i", input_video]
+    for ei in extra:
+        # Loop PNG / popup image inputs
+        if ei.get("kind") in ("png", "popup"):
+            cmd += ["-loop", "1"]
+        cmd += ["-i", ei["path"]]
+
+    cmd += ["-map", vmap]
+    if amap:
+        cmd += ["-map", amap]
+
+    cmd += [
+        "-filter_complex", fc,
+        "-c:v", "libx264",
+        "-fps_mode", "cfr",
+        "-preset", settings.FFMPEG_PRESET,
+        "-crf", str(settings.FFMPEG_CRF),
+        "-threads", str(settings.FFMPEG_THREADS),
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        "-pix_fmt", "yuv420p",
+        output_path,
+    ]
+
+    result = _run_ffmpeg_and_verify(
+        cmd, output_path, "single-pass render",
+        min_duration=max(end - start - 0.3, 0.0),
+    )
+
+    # Clean up temp title PNG
+    if title_png and title_png.endswith(".title.png") and os.path.exists(title_png):
+        try:
+            os.remove(title_png)
+        except OSError:
+            pass
+
+    return result
