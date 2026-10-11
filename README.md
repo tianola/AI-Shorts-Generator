@@ -105,13 +105,39 @@ Generated assets land directly inside: `storage/jobs/<job_id>/`
 A successfully processed job keeps the directory clean. You will typically find:
 
 - `source.mp4` (The raw video)
-- `audio.wav` & `words.json` (Extraction data)
+- `words.json` & `segments.json` (Word-level timings; `audio.wav` is deleted once
+  the transcript is written - it is only ever an input to the transcriber)
 - **`clip_X/`**
   - `metadata.json` (Social-ready descriptions)
   - `thumbnail.jpg` (Custom title thumbnail)
   - `storyboard.jpg`
   - **`final_video.mp4` (The processed, ready-to-upload Short)**
 - `pipeline.log` (Internal event logs)
+
+---
+
+## 🧹 Storage maintenance
+
+A finished job keeps the whole source video, so a single multi-hour upload can
+sit on the disk at 15-20 GB. `prune_storage.py` reclaims that, and reports
+before it deletes anything:
+
+```bash
+cd backend
+python -m scripts.prune_storage                 # what would go, and why
+python -m scripts.prune_storage --apply         # delete that report
+python -m scripts.prune_storage --older-than-days 3 --keep-last 2
+```
+
+It only ever considers: interrupted-download fragments, `audio.wav` whose
+transcript already exists, job directories with no database row, and the
+`source.mp4` of jobs that finished more than `--older-than-days` ago (keeping
+the newest `--keep-last`). Clips that were never uploaded are never touched;
+uploaded ones only with `--include-uploaded-clips`.
+
+The worker itself refuses to start a job while the volume has less than
+`MIN_FREE_DISK_GB` free (default 10), and aborts a download that runs out of
+room mid-flight, so a full disk queues work instead of corrupting the database.
 
 ---
 
