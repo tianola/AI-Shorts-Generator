@@ -935,67 +935,43 @@ async def stage_publish_all_clips(job_id: int, db: Session, job: Job, upload_pri
             job_warning(job_id, f"Auto-upload execution encountered an error: {auto_err}")
 
 
-async def process_job_async(job_id: int):
+def _lease_heartbeat(lease_stop: threading.Event, job_id: int) -> None:
+    """Refresh the lease while work is running.
+
+    update_progress only fires at stage boundaries, and a single stage
+    (transcribing a long source) can sit silent for longer than
+    JOB_LEASE_MINUTES - without this the reclaim would requeue a live job.
     """
-    Process a single job through the entire pipeline (async version).
+    while not lease_stop.wait(60):
+        hb = None
+        try:
+            hb = SessionLocal()
+            refreshed = touch_lease(hb, job_id)
+            # Zero rows means the lease no longer names us: reclaim expired it
+            # and another worker can now claim the same job while this one is
+            # still rendering it. That has to be visible in the log.
+            if refreshed == 0:
+                # Not an error: this worker may have finished and marked the job
+                # completed/failed itself. Log once, then get out of the way.
+                if not lease_stop.is_set():
+                    lease_stop.set()
+                    job_warning(job_id, f"Lease no longer names {WORKER_ID}; a reclaim may "
+                                        "have requeued this job while it was still running")
+        except Exception as e:
+            # A failed heartbeat is not an anomaly worth a stack trace, but a
+            # run of them ends the lease, so say so instead of passing.
+            job_debug(job_id, f"Heartbeat write failed: {e}")
+        finally:
+            if hb is not None:
+                hb.close()
 
-    Args:
-        job_id: The job ID to process
 
-    Raises:
-        Exception: If any step fails (caught by caller)
+def make_progress_writer(db: Session, job: Job, job_id: int) -> Callable[[str, int], None]:
+    """Return the progress writer this job reports through.
+    Writes are throttled - only on a real change, or at most every 0.5s - and
+    mirrored to Redis so the websocket does not have to poll the database.
+    Bumping job.claimed_at on every write is what keeps the lease alive.
     """
-    db = SessionLocal()
-    job = db.query(Job).filter(Job.id == job_id).first()
-
-    if not job:
-        db.close()
-        raise Exception(f"Job {job_id} not found")
-
-    if not claim_job(db, job_id):
-        db.close()
-        job_info(job_id, f"Job {job_id} was not claimable (another worker owns it or it is not queued); skipping")
-        return
-    db.refresh(job)
-
-    # Create job directory
-    job_dir = Path(settings.JOBS_DIR) / str(job_id)
-    job_dir.mkdir(parents=True, exist_ok=True)
-
-    lease_stop = threading.Event()
-
-    def _lease_heartbeat():
-        """Refresh the lease while work is running.
-
-        update_progress only fires at stage boundaries, and a single stage
-        (transcribing a long source) can sit silent for longer than
-        JOB_LEASE_MINUTES - without this the reclaim would requeue a live job.
-        """
-        while not lease_stop.wait(60):
-            hb = None
-            try:
-                hb = SessionLocal()
-                refreshed = touch_lease(hb, job_id)
-                # Zero rows means the lease no longer names us: reclaim expired it
-                # and another worker can now claim the same job while this one is
-                # still rendering it. That has to be visible in the log.
-                if refreshed == 0:
-                    # Not an error: this worker may have finished and marked the job
-                    # completed/failed itself. Log once, then get out of the way.
-                    if not lease_stop.is_set():
-                        lease_stop.set()
-                        job_warning(job_id, f"Lease no longer names {WORKER_ID}; a reclaim may "
-                                            "have requeued this job while it was still running")
-            except Exception as e:
-                # A failed heartbeat is not an anomaly worth a stack trace, but a
-                # run of them ends the lease, so say so instead of passing.
-                job_debug(job_id, f"Heartbeat write failed: {e}")
-            finally:
-                if hb is not None:
-                    hb.close()
-
-    threading.Thread(target=_lease_heartbeat, daemon=True).start()
-
     _last_prog_time = [0.0]
     _last_prog_pct = [-1]
     _last_prog_stage = [""]
@@ -1026,6 +1002,42 @@ async def process_job_async(job_id: int):
                     r.publish(f"job_progress_{job_id}", json.dumps({"stage": stage, "percent": percent}))
                 except Exception:
                     pass
+
+    return update_progress
+
+
+async def process_job_async(job_id: int):
+    """
+    Process a single job through the entire pipeline (async version).
+
+    Args:
+        job_id: The job ID to process
+
+    Raises:
+        Exception: If any step fails (caught by caller)
+    """
+    db = SessionLocal()
+    job = db.query(Job).filter(Job.id == job_id).first()
+
+    if not job:
+        db.close()
+        raise Exception(f"Job {job_id} not found")
+
+    if not claim_job(db, job_id):
+        db.close()
+        job_info(job_id, f"Job {job_id} was not claimable (another worker owns it or it is not queued); skipping")
+        return
+    db.refresh(job)
+
+    # Create job directory
+    job_dir = Path(settings.JOBS_DIR) / str(job_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    lease_stop = threading.Event()
+
+    threading.Thread(target=_lease_heartbeat, args=(lease_stop, job_id), daemon=True).start()
+
+    update_progress = make_progress_writer(db, job, job_id)
 
     job_info(job_id, f"Starting processing for job {job_id}")
     job_info(job_id, f"YouTube URL: {job.youtube_url}")
