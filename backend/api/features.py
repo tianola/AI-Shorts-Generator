@@ -1,10 +1,9 @@
 """
 Feature router: Multilingual translation, Precision Trim, and Smart Blur.
 
-Deliberately placed in its own router module (instead of api/routes.py) so
-this workstream's endpoints do not collide with the frontend workstream's
-in-progress rewrite of api/routes.py. Registered in main.py with the same
-/api prefix as the main router.
+This workstream's endpoints were kept in their own module rather than folded into
+the main job/clip routes, and they are registered in main.py with the same /api
+prefix as the rest.
 """
 import os
 import json

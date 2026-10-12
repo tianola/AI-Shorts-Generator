@@ -61,7 +61,7 @@ def test_audio_energy_prepass_enrichment_in_composite_score():
 
 def test_rerender_clip_request_schema_supports_thumbnail_template():
     """Test that RerenderClipRequest accepts thumbnail_template integer."""
-    from api.routes import RerenderClipRequest
+    from api.clips import RerenderClipRequest
     req = RerenderClipRequest(caption_style="cyber_neon", layout_mode="split_screen", thumbnail_template=2)
     assert req.thumbnail_template == 2
     assert req.caption_style == "cyber_neon"

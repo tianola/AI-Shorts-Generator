@@ -103,7 +103,7 @@ def test_metadata_fallback():
 def test_pending_upload_param():
     # Just verify the signature is query-based
     import inspect
-    from api.routes import get_pending_uploads
+    from api.clips import get_pending_uploads
     sig = inspect.signature(get_pending_uploads)
     for name, param in sig.parameters.items():
         if name == "max_retries":
@@ -197,8 +197,8 @@ def test_thumbnail_short_clip():
 # Test 9: suggest-clips is registered
 # ---------------------------------------------------------------------------
 def test_suggest_clips_registered():
-    from api.routes import router
-    paths = [r.path for r in router.routes]
+    from api.jobs import router as jobs_router
+    paths = [r.path for r in jobs_router.routes]
     assert "/jobs/{job_id}/suggest-clips" in paths, f"missing, got {paths}"
 
 

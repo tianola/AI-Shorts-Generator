@@ -15,8 +15,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from database.session import init_database
 from utils.env_check import log_media_tools
-from api.routes import router as api_router
+from api.clips import router as clips_router
 from api.features import router as features_router
+from api.jobs import router as jobs_router
+from api.realtime import router as realtime_router
+from api.system import router as system_router
 from api.tiktok import router as tiktok_router
 from api.youtube import router as youtube_router
 from config import settings
@@ -60,8 +63,12 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Include API routes
-app.include_router(api_router, prefix="/api")
+# Include API routes. Every router declares its paths without the /api prefix,
+# so the URLs the UI and the n8n workflows call did not change.
+app.include_router(jobs_router, prefix="/api")
+app.include_router(clips_router, prefix="/api")
+app.include_router(system_router, prefix="/api")
+app.include_router(realtime_router, prefix="/api")
 app.include_router(features_router, prefix="/api")
 app.include_router(youtube_router, prefix="/api")
 app.include_router(tiktok_router, prefix="/api")

@@ -12,8 +12,8 @@ import asyncio
 from types import SimpleNamespace
 
 
-from api import routes
-from api.routes import open_job_folder
+from api import jobs
+from api.jobs import open_job_folder
 
 
 class FakeResult:
@@ -35,12 +35,12 @@ def _run(job_id: int):
 
 
 def _prepare(tmp_path, monkeypatch, job_id=42):
-    """Point routes.settings.JOBS_DIR at tmp_path and create the job dir."""
+    """Point jobs.settings.JOBS_DIR at tmp_path and create the job dir."""
     jobs_dir = tmp_path / "jobs"
     jobs_dir.mkdir(exist_ok=True)
     job_dir = jobs_dir / str(job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(routes, "settings", SimpleNamespace(JOBS_DIR=str(jobs_dir)))
+    monkeypatch.setattr(jobs, "settings", SimpleNamespace(JOBS_DIR=str(jobs_dir)))
     return job_dir
 
 
@@ -48,14 +48,14 @@ def test_open_folder_windows_uses_explorer(tmp_path, monkeypatch):
     job_dir = _prepare(tmp_path, monkeypatch)
     calls = {}
 
-    monkeypatch.setattr(routes, "IS_WINDOWS", True)
+    monkeypatch.setattr(jobs, "IS_WINDOWS", True)
 
     def fake_run(args, **kwargs):
         calls["args"] = args
         calls["kwargs"] = kwargs
         return FakeResult()
 
-    monkeypatch.setattr(routes.subprocess, "run", fake_run)
+    monkeypatch.setattr(jobs.subprocess, "run", fake_run)
 
     result, exc = _run(42)
     assert exc is None
@@ -78,14 +78,14 @@ def test_open_folder_missing_dir_returns_404(tmp_path, monkeypatch):
 def test_open_folder_docker_container_returns_503(tmp_path, monkeypatch):
     _prepare(tmp_path, monkeypatch)
 
-    real_exists = routes.os.path.exists
+    real_exists = jobs.os.path.exists
 
     def fake_exists(p):
         if p == "/.dockerenv":
             return True
         return real_exists(p)
 
-    monkeypatch.setattr(routes.os.path, "exists", fake_exists)
+    monkeypatch.setattr(jobs.os.path, "exists", fake_exists)
 
     result, exc = _run(42)
     assert result is None and exc is not None
@@ -105,10 +105,10 @@ def test_open_folder_linux_xdg_open(tmp_path, monkeypatch):
         # `which xdg-open` succeeds -> xdg-open available
         return FakeResult(returncode=0)
 
-    monkeypatch.setattr(routes, "IS_WINDOWS", False)
-    monkeypatch.setattr(routes, "IS_MACOS", False)
-    monkeypatch.setattr(routes.subprocess, "run", fake_run)
-    monkeypatch.setattr(routes.subprocess, "Popen", lambda args: popen_calls.append(args) or FakeResult())
+    monkeypatch.setattr(jobs, "IS_WINDOWS", False)
+    monkeypatch.setattr(jobs, "IS_MACOS", False)
+    monkeypatch.setattr(jobs.subprocess, "run", fake_run)
+    monkeypatch.setattr(jobs.subprocess, "Popen", lambda args: popen_calls.append(args) or FakeResult())
 
     result, exc = _run(42)
     assert exc is None
@@ -120,20 +120,20 @@ def test_open_folder_linux_xdg_open(tmp_path, monkeypatch):
 def test_open_folder_linux_no_xdg_open_returns_path(tmp_path, monkeypatch):
     _prepare(tmp_path, monkeypatch)
 
-    monkeypatch.setattr(routes, "IS_WINDOWS", False)
-    monkeypatch.setattr(routes, "IS_MACOS", False)
-    real_exists = routes.os.path.exists
+    monkeypatch.setattr(jobs, "IS_WINDOWS", False)
+    monkeypatch.setattr(jobs, "IS_MACOS", False)
+    real_exists = jobs.os.path.exists
 
     def fake_exists(p):
-        # routes.os.path IS the global os.path module, so the replacement must
+        # jobs.os.path IS the global os.path module, so the replacement must
         # delegate to the captured real function; calling Path.exists() here
         # re-entered this lambda and blew the stack.
         if p == "/.dockerenv":
             return False
         return real_exists(p)
 
-    monkeypatch.setattr(routes.os.path, "exists", fake_exists)
-    monkeypatch.setattr(routes.subprocess, "run", lambda args, **k: FakeResult(returncode=1))
+    monkeypatch.setattr(jobs.os.path, "exists", fake_exists)
+    monkeypatch.setattr(jobs.subprocess, "run", lambda args, **k: FakeResult(returncode=1))
 
     result, exc = _run(42)
     assert exc is None
@@ -146,9 +146,9 @@ def test_open_folder_macos_uses_open(tmp_path, monkeypatch):
     _prepare(tmp_path, monkeypatch)
 
     popen_calls = []
-    monkeypatch.setattr(routes, "IS_WINDOWS", False)
-    monkeypatch.setattr(routes, "IS_MACOS", True)
-    monkeypatch.setattr(routes.subprocess, "Popen", lambda args: popen_calls.append(args))
+    monkeypatch.setattr(jobs, "IS_WINDOWS", False)
+    monkeypatch.setattr(jobs, "IS_MACOS", True)
+    monkeypatch.setattr(jobs.subprocess, "Popen", lambda args: popen_calls.append(args))
 
     result, exc = _run(42)
     assert exc is None
