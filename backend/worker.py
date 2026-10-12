@@ -901,6 +901,40 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         return
 
 
+async def stage_publish_all_clips(job_id: int, db: Session, job: Job, upload_privacy: str, tiktok_privacy: str, update_progress: Callable[[str, int], None]) -> None:
+    """Publish every rendered clip when the job asked for it on completion.
+    Runs only for a job where every clip rendered: a partially failed job is
+    left for a human to review, never swept into a channel automatically.
+    """
+    if getattr(job, "auto_upload", False):
+        try:
+            job_info(job_id, f"Auto-upload triggered for Job #{job_id}...")
+            update_progress("⚡ Auto-uploading clips to YouTube & TikTok...", 100)
+
+            # Auto upload to YouTube if authenticated
+            try:
+                from services.youtube_upload import upload_all_clips_for_job, get_youtube_auth_status
+                yt_status = get_youtube_auth_status()
+                if yt_status.get("authenticated"):
+                    job_info(job_id, f"Auto-uploading to YouTube Shorts...")
+                    upload_all_clips_for_job(job_id, db, privacy_status=upload_privacy)
+                    job_info(job_id, f"YouTube Shorts auto-upload complete for Job #{job_id}")
+            except Exception as yt_err:
+                job_warning(job_id, f"YouTube auto-upload failed: {yt_err}")
+
+            # Auto upload to TikTok
+            try:
+                from services.tiktok_upload import upload_all_clips_to_tiktok_for_job
+                job_info(job_id, f"Auto-uploading to TikTok as '{tiktok_privacy}'...")
+                upload_all_clips_to_tiktok_for_job(job_id, db, privacy_level=tiktok_privacy)
+                job_info(job_id, f"TikTok auto-upload complete for Job #{job_id}")
+            except Exception as tt_err:
+                job_warning(job_id, f"TikTok auto-upload failed: {tt_err}")
+
+        except Exception as auto_err:
+            job_warning(job_id, f"Auto-upload execution encountered an error: {auto_err}")
+
+
 async def process_job_async(job_id: int):
     """
     Process a single job through the entire pipeline (async version).
@@ -1065,33 +1099,8 @@ async def process_job_async(job_id: int):
             # =========================================================
             # 7. AUTO-UPLOAD ON COMPLETION (YouTube & TikTok)
             # =========================================================
-            if getattr(job, "auto_upload", False):
-                try:
-                    job_info(job_id, f"Auto-upload triggered for Job #{job_id}...")
-                    update_progress("⚡ Auto-uploading clips to YouTube & TikTok...", 100)
-
-                    # Auto upload to YouTube if authenticated
-                    try:
-                        from services.youtube_upload import upload_all_clips_for_job, get_youtube_auth_status
-                        yt_status = get_youtube_auth_status()
-                        if yt_status.get("authenticated"):
-                            job_info(job_id, f"Auto-uploading to YouTube Shorts...")
-                            upload_all_clips_for_job(job_id, db, privacy_status=upload_privacy)
-                            job_info(job_id, f"YouTube Shorts auto-upload complete for Job #{job_id}")
-                    except Exception as yt_err:
-                        job_warning(job_id, f"YouTube auto-upload failed: {yt_err}")
-
-                    # Auto upload to TikTok
-                    try:
-                        from services.tiktok_upload import upload_all_clips_to_tiktok_for_job
-                        job_info(job_id, f"Auto-uploading to TikTok as '{tiktok_privacy}'...")
-                        upload_all_clips_to_tiktok_for_job(job_id, db, privacy_level=tiktok_privacy)
-                        job_info(job_id, f"TikTok auto-upload complete for Job #{job_id}")
-                    except Exception as tt_err:
-                        job_warning(job_id, f"TikTok auto-upload failed: {tt_err}")
-
-                except Exception as auto_err:
-                    job_warning(job_id, f"Auto-upload execution encountered an error: {auto_err}")
+            await stage_publish_all_clips(job_id, db, job, upload_privacy,
+                                          tiktok_privacy, update_progress)
 
     except Exception as e:
         # Mark job as failed
