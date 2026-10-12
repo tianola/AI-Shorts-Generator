@@ -476,11 +476,16 @@ async def process_job_async(job_id: int):
         segments_file = os.path.join(str(job_dir), "segments.json")
         words_file = os.path.join(str(job_dir), "words.json")
 
+        # Read off the job whether or not we are about to run Whisper: the LLM
+        # translate branch below needs it too, and on a resume (transcript files
+        # already present) it used to be unbound, so translation silently never
+        # ran and the log only showed "LLM Translation failed".
+        source_language = getattr(job, "source_language", None) or None
+
         if not os.path.exists(segments_file) or not os.path.exists(words_file):
             # Multilingual: task=translate produces English transcripts;
             # keep_native_transcript preserves the original language files.
             transcribe_task = getattr(job, "transcription_task", None) or "transcribe"
-            source_language = getattr(job, "source_language", None) or None
             keep_native = bool(getattr(job, "keep_native_transcript", False))
             transcribe_audio_file(
                 audio_path,
