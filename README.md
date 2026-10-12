@@ -141,6 +141,37 @@ room mid-flight, so a full disk queues work instead of corrupting the database.
 
 ---
 
+## ⚙️ Running more than one worker
+
+Jobs are handed out with a compare-and-swap (`UPDATE ... WHERE status IN
+('created','queued')`), so any number of worker processes can poll the same
+database and exactly one of them wins each job. A worker that dies mid-job left
+the row stuck at `processing` forever; a 60-second heartbeat refreshes its lease,
+and `JOB_LEASE_MINUTES` (default 90) after the last heartbeat another worker
+reclaims it. This is all tested in `backend/tests/test_worker_concurrency.py`.
+
+```bash
+# Local: every worker is just another poller over the same database
+cd backend && python worker.py
+
+# Docker: the worker service has no fixed container_name, so it scales
+docker compose up -d --scale shorts-worker=2
+```
+
+Rendering is ffmpeg-bound and a single encode already uses every core, so N
+concurrent jobs on one machine do not finish N times faster - they mostly wait
+on each other. Cap the encoder when you scale: with 8 cores and 2 workers at 2
+jobs each, set `WORKER_FFMPEG_THREADS=2` (in the shell or a `.env` next to
+`docker-compose.yml`) so the renders split the machine instead of fighting over
+it. `WORKER_MAX_JOBS` controls jobs-per-worker (arq concurrency) and defaults to
+`2`.
+
+Each worker process also loads its own Whisper and YOLO models - around 1 GB
+resident just to transcribe with the `tiny` model, more with a larger one - so
+the second worker costs memory as well as cores.
+
+---
+
 ## 🩺 Troubleshooting / FAQ
 
 - **Wrong/Stale Subtitles on re-run?:** Fixed in v1.1. Changing the source repository URL natively purges old cached artifacts automatically.

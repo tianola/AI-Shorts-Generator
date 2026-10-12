@@ -56,11 +56,12 @@ services:
   # ====================
   # Worker
   # ====================
+  # No container_name: a fixed name makes `--scale shorts-worker=N` impossible, and
+  # each replica's hostname is what makes its jobs.claimed_by unique.
   shorts-worker:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    container_name: ai-shorts-worker
     restart: unless-stopped
     command: ["python", "worker.py"]
     volumes:
@@ -87,6 +88,13 @@ services:
       - FFMPEG_PRESET=veryfast
       - FFMPEG_CRF=20
       - SINGLE_PASS_RENDER=true
+      # With more than one worker/replica on the same host, an uncapped encode
+      # (threads=0) makes each of them grab every core. Divide the cores between
+      # the concurrent renders: 8 cores, 2 replicas x 2 jobs -> WORKER_FFMPEG_THREADS=2.
+      - FFMPEG_THREADS=${WORKER_FFMPEG_THREADS:-0}
+
+      # Concurrency
+      - WORKER_MAX_JOBS=${WORKER_MAX_JOBS:-2}
 
       # Upload
       - MAX_UPLOAD_RETRIES=3
@@ -104,6 +112,7 @@ services:
       - ai-shorts-network
     depends_on:
       - shorts-api
+    # Scale with: docker compose up -d --scale shorts-worker=2
 
   # ====================
   # n8n Workflow Automation

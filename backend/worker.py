@@ -52,7 +52,7 @@ WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 def claim_job(db, job_id: int) -> bool:
     """Compare-and-swap a queued job onto this worker.
 
-    The polling loop and the arq worker (max_jobs=2) can both look at the same
+    The polling loop and the arq worker (WORKER_MAX_JOBS) can both look at the same
     row, and the old code set status='processing' unconditionally, so a job could
     be rendered and published twice. The WHERE guard makes exactly one caller win.
     """
@@ -73,8 +73,9 @@ def reclaim_expired_leases(db) -> int:
     """Return abandoned jobs to the queue.
 
     A job that was 'processing' when the worker was killed stayed invisible
-    forever: the poller only selects status='created'. The lease is refreshed by
-    update_progress while work is actually happening, so an expired one is dead.
+    forever: the poller only selects status='created'. A live job refreshes
+    claimed_at (touch_lease, plus update_progress at stage boundaries), so an
+    expired lease means nobody is working on it any more.
     """
     cutoff = datetime.utcnow() - timedelta(minutes=settings.JOB_LEASE_MINUTES)
     result = db.execute(
@@ -88,6 +89,19 @@ def reclaim_expired_leases(db) -> int:
     )
     db.commit()
     return result.rowcount
+
+def touch_lease(db, job_id: int) -> int:
+    """Refresh this worker's lease on a running job.
+
+    Returns the rows touched: 0 means the lease no longer names this worker, so
+    the job was requeued (or finished) and the heartbeat has nothing left to do.
+    """
+    touched = db.execute(
+        text("UPDATE jobs SET claimed_at=:now WHERE id=:jid AND claimed_by=:wid"),
+        {"now": datetime.utcnow(), "jid": job_id, "wid": WORKER_ID},
+    ).rowcount
+    db.commit()
+    return touched
 
 def _get_redis_client():
     global _REDIS_CLIENT, _REDIS_CHECKED
@@ -312,13 +326,21 @@ async def process_job_async(job_id: int):
             hb = None
             try:
                 hb = SessionLocal()
-                hb.execute(
-                    text("UPDATE jobs SET claimed_at=:now WHERE id=:jid AND claimed_by=:wid"),
-                    {"now": datetime.utcnow(), "jid": job_id, "wid": WORKER_ID},
-                )
-                hb.commit()
-            except Exception:
-                pass
+                refreshed = touch_lease(hb, job_id)
+                # Zero rows means the lease no longer names us: reclaim expired it
+                # and another worker can now claim the same job while this one is
+                # still rendering it. That has to be visible in the log.
+                if refreshed == 0:
+                    # Not an error: this worker may have finished and marked the job
+                    # completed/failed itself. Log once, then get out of the way.
+                    if not lease_stop.is_set():
+                        lease_stop.set()
+                        job_warning(job_id, f"Lease no longer names {WORKER_ID}; a reclaim may "
+                                            "have requeued this job while it was still running")
+            except Exception as e:
+                # A failed heartbeat is not an anomaly worth a stack trace, but a
+                # run of them ends the lease, so say so instead of passing.
+                job_debug(job_id, f"Heartbeat write failed: {e}")
             finally:
                 if hb is not None:
                     hb.close()
@@ -1091,7 +1113,7 @@ class WorkerSettings:
         host=os.getenv("REDIS_HOST", "localhost"),
         port=int(os.getenv("REDIS_PORT", 6379))
     )
-    max_jobs = 2
+    max_jobs = settings.WORKER_MAX_JOBS
     poll_delay = 0.5
 
 def process_jobs():

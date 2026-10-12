@@ -195,6 +195,14 @@ class Settings(BaseSettings):
         description="Minutes after which a job still marked 'processing' with no "
                     "heartbeat is assumed abandoned and returned to the queue."
     )
+    WORKER_MAX_JOBS: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description="Jobs one worker runs at a time (arq concurrency). Rendering is "
+                    "ffmpeg-bound and an uncapped encode already uses every core, so "
+                    "raise this only together with a FFMPEG_THREADS cap."
+    )
 
     # ====================
     # STOCK FOOTAGE (Pexels)
