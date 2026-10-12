@@ -18,6 +18,7 @@ import subprocess
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 from sqlalchemy import text
 from database.session import SessionLocal
@@ -284,6 +285,78 @@ def get_clip_transcript(
 
     return " ".join(clip_words)
 
+async def stage_download_source(job_id: int, job: Job, job_dir: Path, update_progress: Callable[[str, int], None]) -> str:
+    """Resolve the source video for this job, downloading it if needed.
+    A cached source.mp4 is reused only when the stored URL fingerprint
+    matches, so a restart with a new URL cannot silently re-render the
+    previous job's footage.
+    Returns the path to the source video.
+    """
+    job_info(job_id, "Step 1/8: Downloading video...")
+    update_progress("Downloading video", 10)
+    video_path = os.path.join(str(job_dir), "source.mp4")
+    fp_path = os.path.join(str(job_dir), "source.urlhash")
+
+    # Resume a cached source ONLY when the URL fingerprint matches.
+    # Otherwise the worker would keep re-rendering the previous job's
+    # video (e.g. the "cat" source) no matter what URL the user entered.
+    cached_hash = ""
+    if os.path.exists(fp_path):
+        try:
+            with open(fp_path, "r", encoding="utf-8") as f:
+                cached_hash = f.read().strip()
+        except Exception:
+            cached_hash = ""
+
+    is_upload = bool(job.youtube_url and job.youtube_url.startswith("upload://"))
+    if is_upload and os.path.exists(video_path):
+        job_info(job_id, f"Preserving uploaded source video: {video_path}")
+    elif is_upload:
+        # The source came from a browser upload, so there is no URL to
+        # re-fetch. Falling through to download_youtube() here produced
+        # 'Unsupported url scheme: "upload"' on every restart/rerun.
+        raise Exception(
+            f"Uploaded source file is missing ({video_path}). "
+            "Restart/re-render is not available for uploaded videos — "
+            "create a new job and upload the file again."
+        )
+    elif os.path.exists(video_path) and cached_hash == _url_fingerprint(job.youtube_url):
+        job_info(job_id, f"Reusing cached source for same URL: {video_path}")
+    else:
+        if os.path.exists(video_path):
+            job_info(job_id, "URL changed or unknown — re-downloading source")
+            try:
+                os.remove(video_path)
+            except Exception as e:
+                job_warning(job_id, f"Could not remove old source video ({e}); will overwrite")
+        # Derived artifacts (audio/transcript/timing + old clip cuts) were made
+        # from a previous source — drop them so the re-run renders fully fresh.
+        _clear_derived_artifacts(job_dir, job_id)
+        video_path = download_youtube(job.youtube_url, job_id, progress_callback=update_progress)
+        job_info(job_id, f"Downloaded: {video_path}")
+
+    with open(fp_path, "w", encoding="utf-8") as f:
+        f.write(_url_fingerprint(job.youtube_url))
+    return video_path
+
+
+async def stage_extract_audio(job_id: int, job_dir: Path, video_path: str, update_progress: Callable[[str, int], None]) -> str:
+    """Split the audio track the transcript is built from.
+    Returns the path to the extracted audio.
+    """
+    job_info(job_id, "Step 2/8: Extracting audio...")
+    update_progress("Extracting audio...", 21)
+    audio_path = os.path.join(str(job_dir), "audio.wav")
+
+    if not os.path.exists(audio_path):
+        audio_path = extract_audio(video_path)
+        job_info(job_id, f"Audio extracted: {audio_path}")
+    else:
+        job_info(job_id, f"Audio already exists: {audio_path}")
+    update_progress("Audio ready", 24)
+    return audio_path
+
+
 async def process_job_async(job_id: int):
     """
     Process a single job through the entire pipeline (async version).
@@ -389,64 +462,11 @@ async def process_job_async(job_id: int):
         # =====================
         # 1. DOWNLOAD VIDEO
         # =====================
-        job_info(job_id, "Step 1/8: Downloading video...")
-        update_progress("Downloading video", 10)
-        video_path = os.path.join(str(job_dir), "source.mp4")
-        fp_path = os.path.join(str(job_dir), "source.urlhash")
-
-        # Resume a cached source ONLY when the URL fingerprint matches.
-        # Otherwise the worker would keep re-rendering the previous job's
-        # video (e.g. the "cat" source) no matter what URL the user entered.
-        cached_hash = ""
-        if os.path.exists(fp_path):
-            try:
-                with open(fp_path, "r", encoding="utf-8") as f:
-                    cached_hash = f.read().strip()
-            except Exception:
-                cached_hash = ""
-
-        is_upload = bool(job.youtube_url and job.youtube_url.startswith("upload://"))
-        if is_upload and os.path.exists(video_path):
-            job_info(job_id, f"Preserving uploaded source video: {video_path}")
-        elif is_upload:
-            # The source came from a browser upload, so there is no URL to
-            # re-fetch. Falling through to download_youtube() here produced
-            # 'Unsupported url scheme: "upload"' on every restart/rerun.
-            raise Exception(
-                f"Uploaded source file is missing ({video_path}). "
-                "Restart/re-render is not available for uploaded videos — "
-                "create a new job and upload the file again."
-            )
-        elif os.path.exists(video_path) and cached_hash == _url_fingerprint(job.youtube_url):
-            job_info(job_id, f"Reusing cached source for same URL: {video_path}")
-        else:
-            if os.path.exists(video_path):
-                job_info(job_id, "URL changed or unknown — re-downloading source")
-                try:
-                    os.remove(video_path)
-                except Exception as e:
-                    job_warning(job_id, f"Could not remove old source video ({e}); will overwrite")
-            # Derived artifacts (audio/transcript/timing + old clip cuts) were made
-            # from a previous source — drop them so the re-run renders fully fresh.
-            _clear_derived_artifacts(job_dir, job_id)
-            video_path = download_youtube(job.youtube_url, job_id, progress_callback=update_progress)
-            job_info(job_id, f"Downloaded: {video_path}")
-
-        with open(fp_path, "w", encoding="utf-8") as f:
-            f.write(_url_fingerprint(job.youtube_url))
+        video_path = await stage_download_source(job_id, job, job_dir, update_progress)
         # =====================
         # 2. EXTRACT AUDIO
         # =====================
-        job_info(job_id, "Step 2/8: Extracting audio...")
-        update_progress("Extracting audio...", 21)
-        audio_path = os.path.join(str(job_dir), "audio.wav")
-
-        if not os.path.exists(audio_path):
-            audio_path = extract_audio(video_path)
-            job_info(job_id, f"Audio extracted: {audio_path}")
-        else:
-            job_info(job_id, f"Audio already exists: {audio_path}")
-        update_progress("Audio ready", 24)
+        audio_path = await stage_extract_audio(job_id, job_dir, video_path, update_progress)
 
         # =====================
         # 3. TRANSCRIBE (multilingual / translate support)
