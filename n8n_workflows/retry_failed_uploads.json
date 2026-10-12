@@ -20,7 +20,7 @@
     },
     {
       "parameters": {
-        "url": "http://backend:8000/api/clips/pending-upload",
+        "url": "http://shorts-api:5001/api/clips/pending-upload",
         "authentication": "none",
         "method": "GET",
         "options": {
@@ -66,7 +66,7 @@
     },
     {
       "parameters": {
-        "url": "={{ $json.clip.file_path }}",
+        "url": "http://shorts-api:5001/media/{{ $json.clip.file_path }}",
         "authentication": "none",
         "method": "GET",
         "options": {
@@ -106,7 +106,7 @@
     },
     {
       "parameters": {
-        "url": "={{ $json.clip.thumbnail_path }}",
+        "url": "http://shorts-api:5001/media/{{ $json.clip.thumbnail_path }}",
         "authentication": "none",
         "method": "GET",
         "options": {
@@ -186,10 +186,12 @@
     },
     {
       "parameters": {
-        "url": "http://backend:8000/api/clips/{{ $json.clip_id }}/upload-status",
+        "url": "http://shorts-api:5001/api/clips/{{ $json.clip_id }}/upload-status",
         "authentication": "none",
         "method": "PATCH",
-        "body": "={{ $json.status_data }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.status_data) }}",
         "options": {
           "batching": {
             "batch": {}

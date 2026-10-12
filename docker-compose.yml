@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ====================
   # Backend API
@@ -11,7 +9,9 @@ services:
     container_name: ai-shorts-api
     restart: unless-stopped
     ports:
-      - "5002:5001"
+      # The app listens on API_PORT (5001) inside the container; only the host
+      # side is configurable, so two stacks can coexist on one machine.
+      - "${SHORTS_API_HOST_PORT:-5002}:5001"
     volumes:
       - ./storage:/app/storage
       - ./backend/fonts:/usr/share/fonts/truetype/montserrat:ro
@@ -127,9 +127,13 @@ services:
       - n8n_data:/home/node/.n8n
       - ./storage:/data/storage:ro
     environment:
-      - N8N_BASIC_AUTH_ACTIVE=true
-      - N8N_BASIC_AUTH_USER=admin
-      - N8N_BASIC_AUTH_PASSWORD=admin123
+      # HTTP basic auth in front of n8n's webhook endpoints. It is off unless
+      # both a user and a password are supplied in .env - the alternative was a
+      # committed admin/admin123 that anyone reading this file can use. The
+      # editor itself is a separate account, created in the UI on first run.
+      - N8N_BASIC_AUTH_ACTIVE=${N8N_BASIC_AUTH_ACTIVE:-false}
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD:-}
       - N8N_HOST=0.0.0.0
       - N8N_PORT=5678
       - NODE_ENV=production

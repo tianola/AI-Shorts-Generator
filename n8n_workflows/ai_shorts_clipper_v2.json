@@ -23,7 +23,7 @@
             {
               "id": "api-base",
               "name": "apiBaseUrl",
-              "value": "http://shorts-api:8000/api",
+              "value": "http://shorts-api:5001/api",
               "type": "string"
             },
             {

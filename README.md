@@ -200,6 +200,36 @@ the second worker costs memory as well as cores.
 
 ---
 
+## 🐳 The Docker stack
+
+`docker-compose.yml` starts four services on one bridge network: `shorts-api`
+(the FastAPI app and the web UI), `shorts-worker` (the render pipeline), `n8n`
+(optional automations) and `omniroute` (LLM gateway). Copy `.env.example` to
+`.env` first - compose substitutes those variables when it builds the file, so
+this is where Docker knobs live, as opposed to `backend/.env`, which configures
+the app itself.
+
+| Service | Inside the network | On your machine |
+| --- | --- | --- |
+| shorts-api | `http://shorts-api:5001` | `http://localhost:5002` (set `SHORTS_API_HOST_PORT` to move it) |
+| n8n | `http://n8n:5678` | `http://localhost:5678` |
+| omniroute | `http://omniroute:20128` | `http://localhost:3001` |
+
+Container-to-container calls use the left column; the two files in
+`n8n_workflows/` already do, so import them as they are rather than editing the
+URLs. `health_check.py` talks to the published port, so point it wherever the
+stack actually answers: `SHORTS_API_BASE_URL=http://localhost:5002 python
+health_check.py`.
+
+n8n webhook basic auth is off by default. Turn it on by setting
+`N8N_BASIC_AUTH_USER` and `N8N_BASIC_AUTH_PASSWORD` in `.env` (and
+`N8N_BASIC_AUTH_ACTIVE=true`) - the compose file deliberately has no fallback
+password, because a committed `admin`/`admin123` is readable by everyone who can
+read the repository. It guards the `/webhook` endpoints only; the n8n editor has
+its own owner account, created in the browser the first time you open it.
+
+---
+
 ## 🩺 Troubleshooting / FAQ
 
 - **Wrong/Stale Subtitles on re-run?:** Fixed in v1.1. Changing the source repository URL natively purges old cached artifacts automatically.

@@ -5,6 +5,11 @@ import requests
 import time
 import os
 
+# The API listens on settings.API_PORT (5001); a Docker stack publishes it on
+# SHORTS_API_HOST_PORT (5002 by default), so let the caller point this script
+# at whichever one is live.
+API_BASE = os.environ.get("SHORTS_API_BASE_URL", "http://localhost:5001").rstrip("/")
+
 def run_cmd(cmd):
     try:
         return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
@@ -15,7 +20,7 @@ def run_cmd(cmd):
 
 def check_backend():
     try:
-        resp = requests.get('http://localhost:8000/api/system/presets', timeout=5)
+        resp = requests.get(f'{API_BASE}/api/system/presets', timeout=5)
         return resp.status_code == 200, resp.text if resp.status_code == 200 else f"Status {resp.status_code}"
     except Exception as e:
         return False, str(e)
@@ -36,7 +41,7 @@ def check_worker():
 
 def submit_test_job():
     try:
-        presets = requests.get('http://localhost:8000/api/system/presets', timeout=5).json()
+        presets = requests.get(f'{API_BASE}/api/system/presets', timeout=5).json()
         preset_id = None
         if isinstance(presets, list) and len(presets) > 0:
             preset_id = presets[0].get('id') or presets[0].get('name') or str(presets[0])
@@ -45,7 +50,7 @@ def submit_test_job():
         if not preset_id:
             return False, "Could not determine preset ID"
         job_data = {"preset_id": preset_id, "metadata": {"test": True}}
-        job_resp = requests.post('http://localhost:8000/api/jobs', json=job_data, timeout=10)
+        job_resp = requests.post(f'{API_BASE}/api/jobs', json=job_data, timeout=10)
         if job_resp.status_code not in (200, 201):
             return False, f"Job submission failed: {job_resp.status_code} {job_resp.text}"
         job = job_resp.json()
@@ -55,7 +60,7 @@ def submit_test_job():
         # Poll for completion (max 10 seconds)
         for _ in range(10):
             time.sleep(1)
-            status_resp = requests.get(f'http://localhost:8000/api/jobs/{job_id}', timeout=5)
+            status_resp = requests.get(f'{API_BASE}/api/jobs/{job_id}', timeout=5)
             if status_resp.status_code != 200:
                 return False, f"Failed to fetch job status: {status_resp.status_code}"
             job_status = status_resp.json()
