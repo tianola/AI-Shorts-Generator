@@ -368,17 +368,18 @@ async def stage_transcribe(job_id: int, job: Job, job_dir: Path, audio_path: str
     segments_file = os.path.join(str(job_dir), "segments.json")
     words_file = os.path.join(str(job_dir), "words.json")
 
-    # Read off the job whether or not we are about to run Whisper: the LLM
-    # translate branch below needs it too, and on a resume (transcript files
-    # already present) it used to be unbound, so translation silently never
-    # ran and the log only showed "LLM Translation failed".
+    # Auto-Translate is the only multilingual knob the UI sends, and Whisper's own
+    # translate task is what actually produces English captions, so map the flag onto
+    # it. The post-transcript LLM pass that used to sit here could never run - its
+    # helpers do not exist in services.whisper and its "already English?" check read
+    # transcript_metadata.json while whisper writes transcript_info.json - but the
+    # ImportError it raised was swallowed as "LLM Translation failed".
+    transcribe_task = getattr(job, "transcription_task", None) or (
+        "translate" if getattr(job, "llm_translate", False) else "transcribe")
     source_language = getattr(job, "source_language", None) or None
+    keep_native = bool(getattr(job, "keep_native_transcript", False))
 
     if not os.path.exists(segments_file) or not os.path.exists(words_file):
-        # Multilingual: task=translate produces English transcripts;
-        # keep_native_transcript preserves the original language files.
-        transcribe_task = getattr(job, "transcription_task", None) or "transcribe"
-        keep_native = bool(getattr(job, "keep_native_transcript", False))
         transcribe_audio_file(
             audio_path,
             str(job_dir),
@@ -388,9 +389,9 @@ async def stage_transcribe(job_id: int, job: Job, job_dir: Path, audio_path: str
             keep_native=keep_native,
             progress_callback=update_progress,
         )
-        job_info(job_id, f"Transcript created: {segments_file}, {words_file}")
+        job_info(job_id, f"Transcript created (task={transcribe_task}): {segments_file}, {words_file}")
     else:
-        job_info(job_id, f"Transcript already exists")
+        job_info(job_id, "Transcript already exists")
         update_progress("Transcript loaded", 50)
 
     # Load segments for duration
@@ -399,57 +400,6 @@ async def stage_transcribe(job_id: int, job: Job, job_dir: Path, audio_path: str
 
     _drop_transcription_input(job_dir, job_id)
 
-    if getattr(job, "llm_translate", False):
-        # Check detected language from whisper metadata
-        is_english = False
-        meta_path = os.path.join(str(job_dir), "transcript_metadata.json")
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                    if meta.get("language_code", "").lower() == "en":
-                        is_english = True
-            except:
-                pass
-
-        if is_english:
-            job_info(job_id, "Video is already in English. Skipping LLM translation.")
-        else:
-            job_info(job_id, "⚙️ Auto-Translate enabled: Running LLM Translation to English...")
-            update_progress("Translating to English (LLM)...", 51)
-            try:
-                from services.whisper import _llm_translate_segments, _translate_linear_words, _write_transcript_files
-                native_words = []
-                if os.path.exists(words_file):
-                    with open(words_file, "r", encoding="utf-8") as f:
-                        native_words = json.load(f)
-                
-                translated_segments = await _llm_translate_segments(
-                    segments,
-                    target_language="English",
-                    source_language=source_language,
-                )
-                translated_words = _translate_linear_words(
-                    native_words,
-                    segments,
-                    translated_segments,
-                )
-                _write_transcript_files(
-                    str(job_dir),
-                    translated_segments,
-                    translated_words,
-                    task="translate",
-                    language="en",
-                    native_segments_list=segments,
-                    native_words_list=native_words,
-                )
-                # Swap loaded files for downstream clipping
-                segments = translated_segments
-                job_info(job_id, "LLM Translation successful")
-            except Exception as e:
-                job_warning(job_id, f"LLM Translation failed ({e}), falling back to native transcript")
-
-    # Check if source video metadata exists
     source_title = None
     source_channel = None
     meta_file = job_dir / "meta.json"

@@ -173,19 +173,15 @@ async def translate_job_transcript(
     job_id: int,
     db: Session = Depends(get_database),
 ):
-    """Translate a job's transcript to English.
+    """Translate a job's already-written transcript to English.
 
-    Reads the already-transcribed segments, runs LLM translation with
-    terminology preservation, and writes translated_segments.json +
-    translated_words.json into the job directory. Returns the translated
-    segments for immediate UI consumption.
+    Currently reports 501: the LLM translation helpers this calls
+    (_llm_translate_segments and friends) were never implemented in
+    services.whisper, so the endpoint has answered with an unhandled ImportError -
+    a bare 500 - for its whole life. English captions come from the transcriber:
+    create the job with llm_translate=true and the worker runs Whisper with
+    task=translate.
     """
-    from services.whisper import (
-        _llm_translate_segments,
-        _translate_linear_words,
-        _write_transcript_files,
-    )
-
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
@@ -197,6 +193,19 @@ async def translate_job_transcript(
         raise HTTPException(
             status_code=400,
             detail=f"segments.json for job {job_id} not found; transcribe first",
+        )
+
+    try:
+        from services.whisper import (
+            _llm_translate_segments,
+            _translate_linear_words,
+            _write_transcript_files,
+        )
+    except ImportError as e:
+        raise HTTPException(
+            status_code=501,
+            detail=f"Translating an existing transcript is not implemented ({e}). "
+                   "Create the job with llm_translate=true to get English captions.",
         )
 
     try:
