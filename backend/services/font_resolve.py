@@ -5,7 +5,6 @@ Provides a single source of truth for font paths so every service
 the current OS (Windows host or Docker/Linux container).
 """
 import os
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Font candidates — order matters: first hit wins.

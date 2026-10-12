@@ -3,14 +3,12 @@ Vertical video conversion service.
 Converts horizontal (16:9) video to vertical (9:16) with smart face tracking.
 Includes dynamic multi-layout rendering: Solo speaker follow, Podcast split-screen, and Blurred fit.
 """
-import os
 import cv2
 import numpy as np
 import subprocess
-from typing import List, Tuple, Dict, Any, Optional
-from pathlib import Path
+from typing import List, Tuple, Optional
 from config import settings
-from utils.logger import job_info, job_error, job_warning, logger
+from utils.logger import job_warning, logger
 
 def _probe_size(video_path: str) -> Tuple[int, int]:
     """Return (width, height) of a video, releasing the capture on every path."""
@@ -205,7 +203,7 @@ def _build_timed_crop(trajectory: list) -> str:
     points.sort(key=lambda p: p[0])
 
     # Use the first keyframe's crop size across the whole clip
-    _, x0, y0, cw, ch = points[0]
+    *_, cw, ch = points[0]
     cw = int(cw)
     ch = int(ch)
     if cw < 2 or ch < 2:

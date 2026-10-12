@@ -2,11 +2,10 @@
 Platform-Specific Copy Generator.
 Generates tailored titles, descriptions, and hashtags for TikTok, Instagram Reels, and YouTube Shorts.
 """
-import json
 from typing import Dict, Any
+from loguru import logger
 from pydantic import BaseModel, Field
 from services.llm_router import call_llm_structured
-from config import settings
 
 class PlatformCopy(BaseModel):
     title: str = Field(..., description="Optimized title for the platform")
@@ -44,6 +43,7 @@ async def generate_platform_copies(transcript: str, base_title: str) -> Dict[str
         )
         return result.model_dump()
     except Exception as e:
+        logger.warning(f"Platform copy generation failed ({e}), using generic fallback copy")
         # Fallback copy
         fallback = {
             "title": base_title,

@@ -191,7 +191,7 @@ def test_single_pass_filter_with_popup():
     try:
         Image.new("RGBA", (560, 440), (0, 0, 0, 0)).save(dummy_popup, "PNG")
 
-        extra, fc, vmap, amap = build_single_pass_filter(
+        extra, fc, _, _ = build_single_pass_filter(
             vertical_frag="[0:v]crop=607:1080:656:0,scale=1080:1920[vsingle]",
             popup_png=dummy_popup,
             popup_start=2.5,
@@ -212,7 +212,7 @@ def test_single_pass_filter_with_popup():
 
 def test_single_pass_filter_without_popup():
     """build_single_pass_filter works normally without popup."""
-    extra, fc, vmap, amap = build_single_pass_filter(
+    extra, fc, _, _ = build_single_pass_filter(
         vertical_frag="[0:v]crop=607:1080:656:0,scale=1080:1920[vsingle]",
     )
     # No popup entries

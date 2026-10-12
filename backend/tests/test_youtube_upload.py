@@ -1,12 +1,8 @@
-import pytest
-import os
-import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from main import app
 from services.youtube_upload import (
     format_shorts_metadata,
-    get_youtube_auth_status,
 )
 
 client = TestClient(app)

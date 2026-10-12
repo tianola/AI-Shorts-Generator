@@ -1,12 +1,10 @@
 import json
 import os
-import pytest
 from services.captions import (
     create_captions,
     create_caption_block,
     _group_words_by_natural_phrasing,
     PRESETS,
-    DEFAULT_STYLE,
     inject_emojis,
     CaptionPreset,
 )
@@ -127,7 +125,7 @@ def test_create_captions_generates_valid_ass(tmp_path):
     out_ass = str(tmp_path / "test.ass")
     res = create_captions(words_file, out_ass, style_name="capcut_aqua")
     
-    assert os.path.exists(out_ass)
+    assert res == out_ass and os.path.exists(out_ass)
     with open(out_ass, "r", encoding="utf-8") as f:
         content = f.read()
     assert "[Script Info]" in content

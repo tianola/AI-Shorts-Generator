@@ -3,7 +3,6 @@
 The bug this guards: the old code appended to storage/logs/worker_error.log
 forever, and it reached 1.2 GB.
 """
-import os
 import sys
 
 import pytest

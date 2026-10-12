@@ -400,7 +400,7 @@ def trim_clip(
     if output_abs == source_abs:
         raise TrimValidationError("output_path must differ from source_video")
 
-    start, end, media = validate_trim_range(source_video, start_time, end_time)
+    start, end, _ = validate_trim_range(source_video, start_time, end_time)
     expected_duration = end - start
 
     os.makedirs(os.path.dirname(output_abs) or ".", exist_ok=True)

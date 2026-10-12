@@ -303,7 +303,7 @@ def burn_captions(
         creationflags = 0x08000000 # subprocess.CREATE_NO_WINDOW
 
     try:
-        result = subprocess.run(
+        subprocess.run(
             cmd,
             check=True,
             capture_output=True,

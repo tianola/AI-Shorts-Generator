@@ -1,6 +1,5 @@
 import subprocess
 import os
-from pathlib import Path
 from utils.logger import job_info, job_error
 
 def generate_storyboard(video_path: str, output_dir: str) -> str:

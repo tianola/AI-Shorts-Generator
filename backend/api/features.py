@@ -298,7 +298,7 @@ async def apply_smart_blur(
     final_path = os.path.join(str(clip_dir), "final_video.mp4")
     tmp_path = os.path.join(str(clip_dir), "final_video.blur.mp4")
     try:
-        result = render_single_pass(
+        render_single_pass(
             media,
             0.0,
             _probe_duration(media),

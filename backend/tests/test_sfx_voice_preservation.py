@@ -1,4 +1,3 @@
-import pytest
 import inspect
 import os
 from config import settings

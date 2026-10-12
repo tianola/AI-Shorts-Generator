@@ -9,9 +9,8 @@ Supports 3 visual templates that rotate per clip_index % 3:
 """
 import os
 import subprocess
-from pathlib import Path
 from typing import Optional, Tuple
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from config import settings
 from utils.logger import job_info, job_error, job_warning
 
@@ -113,7 +112,7 @@ def _apply_neon_glow(img: Image.Image, display_text: str, font_path: str,
 
     margin = 60
     max_width = img.width - margin * 2
-    font, text_width, text_height = _fit_font(draw, font_path, display_text, font_size, max_width)
+    font, text_width, _ = _fit_font(draw, font_path, display_text, font_size, max_width)
 
     x = (img.width - text_width) // 2
     y = margin

@@ -8,15 +8,11 @@ import pytest
 import os
 import json
 import tempfile
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from services.clip_selector import (
-    _keyword_score,
-    _structural_completeness,
-    _semantic_density_score,
     _composite_score,
     select_clips,
 )
-from services.audio_energy_scorer import score_segments
 
 
 def test_audio_energy_prepass_enrichment_in_composite_score():

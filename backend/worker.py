@@ -3,7 +3,6 @@ Worker process for AI Shorts Generator.
 Polling-based job processor with comprehensive error handling and logging.
 Uses async/await for Cloud API calls.
 """
-import sys
 import os
 
 # Must run before any import that pulls in loguru: see utils/daemon_streams.py
@@ -19,7 +18,6 @@ import subprocess
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict, Optional
 
 from sqlalchemy import text
 from database.session import SessionLocal
@@ -38,7 +36,7 @@ from services.smart_crop import smart_crop_video
 from services.word_cropper import crop_words
 from services.captions import create_captions
 from services.dimension_checker import check_dimensions, log_dimension_warning
-from services.render import burn_captions, mux_tts
+from services.render import burn_captions
 from services.metadata import generate_metadata
 from services.thumbnail import generate_thumbnail
 from services.sfx import add_automatic_sfx
@@ -533,8 +531,6 @@ async def process_job_async(job_id: int):
                     job_info(job_id, "LLM Translation successful")
                 except Exception as e:
                     job_warning(job_id, f"LLM Translation failed ({e}), falling back to native transcript")
-
-        video_duration = segments[-1]["end"] if segments else 0
 
         # Check if source video metadata exists
         source_title = None

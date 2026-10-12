@@ -8,8 +8,7 @@ Tier 3: Unsplash / Local Fallback
 import os
 import hashlib
 import asyncio
-from typing import Optional, Dict, Any
-from pathlib import Path
+from typing import Optional
 from PIL import Image
 import httpx
 from loguru import logger

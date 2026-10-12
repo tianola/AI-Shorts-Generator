@@ -1,10 +1,8 @@
-import os
 from pydantic import BaseModel, Field
 from typing import Optional
 from database.models import Clip
 from sqlalchemy.orm import Session
 from services.llm_router import call_llm_structured
-from config import settings
 
 class ClipEditAction(BaseModel):
 	new_start: Optional[float] = Field(None, description="New start time in seconds if user wants to trim/cut start")

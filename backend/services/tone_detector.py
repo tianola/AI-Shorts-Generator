@@ -4,7 +4,7 @@ Detects narrative tone, prevents tonal dissonance on serious/tragic content,
 and determines eligibility and visual style profile for image pop-ups.
 """
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from loguru import logger
 
 # High-severity negative / somber keyword regex patterns

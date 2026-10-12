@@ -5,10 +5,8 @@ Uses ffmpeg to analyze audio RMS loudness and energy peaks.
 
 import json
 import subprocess
-import os
 from typing import List, Dict, Any
 from loguru import logger
-from config import settings
 
 
 def _video_has_audio(video_path: str) -> bool:

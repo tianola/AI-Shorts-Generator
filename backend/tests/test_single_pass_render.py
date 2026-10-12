@@ -1,6 +1,3 @@
-import os
-import subprocess
-import pytest
 from services.render import burn_captions
 
 def test_burn_captions_signature():

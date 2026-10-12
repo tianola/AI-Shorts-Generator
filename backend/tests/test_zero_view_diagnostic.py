@@ -5,7 +5,6 @@ Tests the /api/test/zero-view-diagnostic endpoint creation and hook style setup.
 import os
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
 
 # Add backend to path
 import sys

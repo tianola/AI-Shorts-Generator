@@ -1,6 +1,3 @@
-import os
-import pytest
-from pathlib import Path
 from worker import _url_fingerprint
 
 def test_uploaded_job_preserves_source(tmp_path):

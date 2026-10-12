@@ -260,7 +260,7 @@ def test_resetting_a_placeholder_returns_the_clip_to_the_pending_list(db, tmp_pa
     rec.classify(clips, root, max_retries=3)
     paths, flags, errors = rec.apply_repairs(db, clips, root, reset_placeholders=True)
 
-    assert (flags, errors) == (1, [])
+    assert (paths, flags, errors) == (0, 1, [])
     row = _reload(db, clip.id)
     assert row.uploaded == 0
     assert row.youtube_video_id is None
@@ -275,7 +275,7 @@ def test_reset_never_touches_a_clip_with_a_real_id(db, tmp_path):
     rec.classify(clips, root, max_retries=3)
     paths, flags, errors = rec.apply_repairs(db, clips, root, reset_placeholders=True)
 
-    assert paths == 0 and flags == 0
+    assert (paths, flags, errors) == (0, 0, [])
     assert _reload(db, clip.id).uploaded == 1
 
 

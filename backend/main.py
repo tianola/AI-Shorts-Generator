@@ -1,8 +1,6 @@
 """
 Main FastAPI application for AI Shorts Generator.
 """
-import sys
-import os
 
 # Must run before any import that pulls in loguru: see utils/daemon_streams.py
 from utils.daemon_streams import redirect_daemon_streams

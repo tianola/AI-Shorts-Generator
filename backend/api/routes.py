@@ -12,7 +12,6 @@ import logging
 import shutil
 import subprocess
 import sys
-import time
 from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Query
 from fastapi.responses import HTMLResponse
 from typing import List, Optional
@@ -217,33 +216,6 @@ class ClipUploadStatus(BaseModel):
         if self.uploaded and not self.youtube_video_id:
             raise ValueError("uploaded=true requires the real youtube_video_id")
         return self
-
-class ClipResponse(BaseModel):
-    id: int
-    job_id: int
-    index: int
-    start: float
-    end: float
-    title: Optional[str]
-    hook: Optional[str]
-    score: Optional[float]
-    hook_score: Optional[float] = None
-    coherence_score: Optional[float] = None
-    connection_score: Optional[float] = None
-    trend_score: Optional[float] = None
-    caption_style: Optional[str] = "mrbeast"
-    layout_mode: Optional[str] = "single_speaker"
-    virality_explanation: Optional[str] = None
-    file_path: Optional[str]
-    thumbnail_path: Optional[str]
-    description: Optional[str]
-    hashtags: Optional[List[str]]
-    uploaded: bool
-    youtube_video_id: Optional[str]
-    upload_error: Optional[str]
-    upload_retry_count: int
-    published_at: Optional[datetime]
-    created_at: datetime
 
 class AIEditRequest(BaseModel):
     prompt: str

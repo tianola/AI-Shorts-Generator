@@ -5,9 +5,9 @@ and Animated Pop-up Card Generation for Short-form Videos.
 import os
 from typing import Optional, Dict, Any, List
 from loguru import logger
-from services.tone_detector import is_transcript_somber, classify_content_tone, TONE_TAXONOMY
-from services.image_fetcher import get_contextual_image, get_contextual_image_sync
-from services.visual_popup import create_styled_popup_card, build_popup_filtergraph_fragment
+from services.tone_detector import is_transcript_somber, classify_content_tone
+from services.image_fetcher import get_contextual_image
+from services.visual_popup import create_styled_popup_card
 
 
 async def prepare_clip_popup(

@@ -1,4 +1,3 @@
-import pytest
 from services.virality_detector import compute_composite_virality
 
 def test_virality_composite_scoring():

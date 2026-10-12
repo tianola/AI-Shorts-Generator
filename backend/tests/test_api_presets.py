@@ -1,6 +1,5 @@
-import pytest
 from database.session import SessionLocal, init_database
-from database.models import Clip, Job
+from database.models import Clip
 from services.captions import PRESETS
 
 def test_models_have_style_and_layout_fields():

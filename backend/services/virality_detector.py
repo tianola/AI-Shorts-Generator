@@ -6,7 +6,6 @@ and audio/transcript curiosity cues to rank clips scientifically with OpusClip-g
 import os
 import cv2
 import numpy as np
-from loguru import logger
 
 
 def detect_visual_activity(video_path: str, sample_rate: int = 15) -> dict:

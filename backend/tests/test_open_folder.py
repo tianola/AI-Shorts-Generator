@@ -11,7 +11,6 @@ The endpoint must:
 import asyncio
 from types import SimpleNamespace
 
-import pytest
 
 from api import routes
 from api.routes import open_job_folder

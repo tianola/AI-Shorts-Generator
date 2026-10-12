@@ -8,8 +8,7 @@ Supports:
 import os
 import numpy as np
 import cv2
-from typing import List, Tuple, Dict, Optional
-from utils.logger import job_info, job_error
+from typing import Tuple, Optional
 
 # YOLO COCO classes we treat as "focus-worthy objects"
 FOCUS_CLASSES = {
@@ -221,7 +220,7 @@ def build_split_screen_filter(
     half_h = target_h // 2  # 960
 
     # Calculate crop around speaker 1 (top)
-    x1, y1, w1, h1 = box_top
+    x1, w1 = box_top[0], box_top[2]  # the crop spans the full source height
     cx1 = x1 + w1 // 2
     # 9:8 aspect ratio crop for half frame (1080x960 = 9:8)
     crop1_w = int(src_h * 9 / 8)
@@ -229,7 +228,7 @@ def build_split_screen_filter(
     crop1_x = max(0, min(int(cx1 - crop1_w // 2), src_w - crop1_w))
 
     # Calculate crop around speaker 2 (bottom)
-    x2, y2, w2, h2 = box_bottom
+    x2, w2 = box_bottom[0], box_bottom[2]
     cx2 = x2 + w2 // 2
     crop2_w = int(src_h * 9 / 8)
     crop2_w = min(crop2_w, src_w)

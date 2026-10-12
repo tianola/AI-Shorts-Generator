@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from config import settings
-from utils.logger import job_info, job_error, job_warning
+from utils.logger import job_info, job_warning
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",

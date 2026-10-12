@@ -5,7 +5,6 @@ Run from backend/:  PYTHONPATH=. python -m pytest tests/ -x -q
 import os
 import shutil
 import sys
-import json
 import tempfile
 from pathlib import Path
 
@@ -72,7 +71,7 @@ def test_resume_same_url_reuses():
 
 
 def test_resume_url_changed_redownloads():
-    d, source = _make_job_dir()
+    d, _ = _make_job_dir()
     try:
         from worker import _url_fingerprint
         with open(os.path.join(d, "source.urlhash"), "w") as f:

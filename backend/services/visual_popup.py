@@ -4,7 +4,7 @@ Generates polished Pillow visual cards with rounded corners, drop shadows,
 and builds FFmpeg spring-animated scale-pop filtergraphs positioned safely in the upper quadrant.
 """
 import os
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from loguru import logger
 

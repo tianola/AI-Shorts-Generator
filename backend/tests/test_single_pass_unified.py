@@ -94,7 +94,7 @@ def test_single_pass_filter_baseline_vertical_only():
 def test_single_pass_filter_with_subtitles_and_title():
     from services.render import build_single_pass_filter
 
-    extra, fc, vmap, amap = build_single_pass_filter(
+    extra, fc, _, _ = build_single_pass_filter(
         STATIC_FRAG,
         captions_path=r"C:\work\subs.ass",
         title_png=r"C:\work\title.png",
@@ -110,7 +110,7 @@ def test_single_pass_filter_with_subtitles_and_title():
 def test_single_pass_filter_with_sfx_mixes_audio_without_ducking():
     from services.render import build_single_pass_filter
 
-    extra, fc, vmap, amap = build_single_pass_filter(
+    extra, fc, _, amap = build_single_pass_filter(
         STATIC_FRAG,
         sfx_files=["whoosh_1.wav", "pop_1.wav"],
         sfx_timestamps=[0.3, 2.5],
@@ -127,7 +127,7 @@ def test_single_pass_filter_with_sfx_mixes_audio_without_ducking():
 def test_single_pass_filter_no_audio_stream_skips_audio():
     from services.render import build_single_pass_filter
 
-    extra, fc, vmap, amap = build_single_pass_filter(
+    _, fc, _, amap = build_single_pass_filter(
         STATIC_FRAG,
         sfx_files=["whoosh_1.wav"],
         sfx_timestamps=[0.3],

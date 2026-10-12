@@ -195,7 +195,7 @@ def test_local_translate_true_passes_task_translate(fake_model, sample_dir, mock
     segs, words = whisper._transcribe_with_local_whisper(mock_audio, sample_dir, "tiny", translate=True)
 
     assert fake_model.calls["transcribe"], "model.transcribe not called"
-    args, kwargs = fake_model.calls["transcribe"][0]
+    _, kwargs = fake_model.calls["transcribe"][0]
     assert kwargs["task"] == "translate"
 
     assert os.path.exists(segs)
@@ -212,7 +212,7 @@ def test_local_translate_false_keeps_transcribe_task(fake_model, sample_dir, moc
 
     whisper._transcribe_with_local_whisper(mock_audio, sample_dir, "tiny", translate=False)
 
-    args, kwargs = fake_model.calls["transcribe"][0]
+    _, kwargs = fake_model.calls["transcribe"][0]
     assert kwargs["task"] == "transcribe"
 
 
@@ -223,7 +223,7 @@ def test_local_language_override_pins_language(fake_model, sample_dir, mock_audi
 
     whisper._transcribe_with_local_whisper(mock_audio, sample_dir, "tiny", language="el", translate=False)
 
-    args, kwargs = fake_model.calls["transcribe"][0]
+    _, kwargs = fake_model.calls["transcribe"][0]
     assert kwargs["language"] == "el"
     meta = json.load(open(os.path.join(sample_dir, "transcript_info.json"), encoding="utf-8"))
     assert meta["language_code"] == "el"
@@ -236,7 +236,7 @@ def test_local_auto_detects_when_no_override(fake_model, sample_dir, mock_audio,
 
     whisper._transcribe_with_local_whisper(mock_audio, sample_dir, "tiny", language=None, translate=False)
 
-    args, kwargs = fake_model.calls["transcribe"][0]
+    _, kwargs = fake_model.calls["transcribe"][0]
     assert kwargs["language"] == "el"
     meta = json.load(open(os.path.join(sample_dir, "transcript_info.json"), encoding="utf-8"))
     assert meta["language_code"] == "el"
@@ -304,7 +304,7 @@ def test_transcribe_audio_file_falls_back_on_backend_error(fake_model, sample_di
     segs, words = whisper.transcribe_audio_file(mock_audio, sample_dir, "tiny", translate=True)
     assert os.path.exists(segs)
     assert os.path.exists(words)
-    args, kwargs = fake_model.calls["transcribe"][0]
+    _, kwargs = fake_model.calls["transcribe"][0]
     assert kwargs["task"] == "translate"
 
 
@@ -365,7 +365,7 @@ def test_groq_translate_uses_translations_endpoint(sample_dir, mock_audio, monke
     monkeypatch.setattr(whisper, "_compress_audio_for_groq", lambda p: fake_compressed)
 
     with mock.patch("httpx.Client", return_value=fake_client):
-        segs, words = whisper._transcribe_with_groq(mock_audio, sample_dir, translate=True)
+        segs, _ = whisper._transcribe_with_groq(mock_audio, sample_dir, translate=True)
 
     # Endpoint must be translations, not transcriptions
     call_args, call_kwargs = fake_client.post.call_args
@@ -387,7 +387,7 @@ def test_groq_transcribe_passes_language_override(sample_dir, mock_audio, monkey
     fake_client.__exit__ = mock.Mock(return_value=False)
     fake_client.post.return_value = FakeResponse(_make_groq_transcription_payload())
     with mock.patch("httpx.Client", return_value=fake_client):
-        segs, _ = whisper._transcribe_with_groq(mock_audio, sample_dir, language="el", translate=False)
+        whisper._transcribe_with_groq(mock_audio, sample_dir, language="el", translate=False)
 
     url = fake_client.post.call_args[0][0]
     assert url.endswith("/audio/transcriptions")
@@ -408,7 +408,7 @@ def test_groq_translate_no_segments_falls_back_to_plain_text(sample_dir, mock_au
     fake_client.__exit__ = mock.Mock(return_value=False)
     fake_client.post.return_value = FakeResponse({"text": "Translated text without segments."})
     with mock.patch("httpx.Client", return_value=fake_client):
-        segs, words = whisper._transcribe_with_groq(mock_audio, sample_dir, translate=True)
+        segs, _ = whisper._transcribe_with_groq(mock_audio, sample_dir, translate=True)
     segments = json.load(open(segs, encoding="utf-8"))
     assert len(segments) == 1
     assert segments[0]["text"] == "Translated text without segments."
@@ -424,7 +424,7 @@ def test_groq_empty_audio_graceful(sample_dir, mock_audio, monkeypatch, _patch_s
     fake_client.__exit__ = mock.Mock(return_value=False)
     fake_client.post.return_value = FakeResponse({"text": ""})
     with mock.patch("httpx.Client", return_value=fake_client):
-        segs, words = whisper._transcribe_with_groq(mock_audio, sample_dir)
+        segs, _ = whisper._transcribe_with_groq(mock_audio, sample_dir)
     assert json.load(open(segs, encoding="utf-8")) == []
 
 

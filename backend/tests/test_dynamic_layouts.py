@@ -1,5 +1,3 @@
-import pytest
-import numpy as np
 from services.focus_tracking import compute_smooth_yolo_trajectory, build_split_screen_filter
 
 def test_ema_trajectory_smoothing():

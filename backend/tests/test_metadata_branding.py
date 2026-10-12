@@ -7,7 +7,6 @@ Acceptance criteria:
   - Tag limit raised from 5 -> 7
 """
 import asyncio
-import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
 

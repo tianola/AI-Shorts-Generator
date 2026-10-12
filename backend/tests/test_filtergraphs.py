@@ -134,7 +134,7 @@ def test_single_pass_graph_with_all_stages():
     from services.render import build_single_pass_filter
     from services.focus_tracking import build_blurred_fit_filter, _build_blur_box_overlay
     blur = _build_blur_box_overlay([(0.0, 500, 300, 200, 100), (1.0, 520, 310, 200, 100)], 1920, 1080)
-    _, fc, vmap, amap = build_single_pass_filter(
+    _, fc, vmap, _ = build_single_pass_filter(
         build_blurred_fit_filter(1920, 1080).replace("[outv]", "[vsingle]"),
         captions_path="C:/jobs/1/captions.ass",
         title_png="C:/jobs/1/title.png",

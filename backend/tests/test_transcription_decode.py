@@ -6,7 +6,6 @@ sample. The pipeline decodes with ffmpeg instead and hands the model an array.
 These tests pin that, because a refactor back to a path argument would silently
 re-break the worker.
 """
-import os
 import subprocess
 from types import SimpleNamespace
 

@@ -6,7 +6,6 @@ Test suite for all upgraded services:
 - Speaker Diarization Service
 - AI B-Roll Service
 """
-import pytest
 import numpy as np
 from services.vertical import detect_faces_in_frame
 from services.diarization import diarize_audio
