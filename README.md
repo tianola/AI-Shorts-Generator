@@ -141,6 +141,34 @@ room mid-flight, so a full disk queues work instead of corrupting the database.
 
 ---
 
+## 📤 Auditing what was actually published
+
+The `uploaded` flag and what YouTube has can drift apart. An old caller posted
+the placeholder id `queued` to the status endpoint, which marked a clip published,
+recorded no video, and took it off every pending list without anything reaching
+YouTube; the endpoint now rejects that, but the rows survive. `reconcile_uploads.py`
+reads the clip table and the files on disk and reports the mismatch, changing
+nothing unless told to:
+
+```bash
+cd backend
+python -m scripts.reconcile_uploads                      # audit every clip
+python -m scripts.reconcile_uploads --verify             # also ask YouTube about each id
+python -m scripts.reconcile_uploads --status placeholder_id
+python -m scripts.reconcile_uploads --apply              # rewrite stale file paths
+python -m scripts.reconcile_uploads --apply --reset-placeholders
+```
+
+Every clip lands in one bucket: `published`, `placeholder_id` / `no_video_recorded`
+(flagged uploaded with no real id), `duplicate_id`, `id_without_flag`,
+`id_not_on_youtube` (only with `--verify`), `uploadable`, `blocked_by_retries`,
+or `nothing_to_upload`. `--apply` only repairs file pointers and, with
+`--reset-placeholders`, clears the bogus uploaded flag so the clip returns to the
+pending list. It never marks anything uploaded and never uploads anything -
+publishing stays a human decision.
+
+---
+
 ## ⚙️ Running more than one worker
 
 Jobs are handed out with a compare-and-swap (`UPDATE ... WHERE status IN
