@@ -18,7 +18,7 @@ import subprocess
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 from sqlalchemy import text
 from database.session import SessionLocal
@@ -414,6 +414,58 @@ async def stage_transcribe(job_id: int, job: Job, job_dir: Path, audio_path: str
     return segments, segments_file, words_file, source_title, source_channel
 
 
+async def stage_score_audio_energy(job_id: int, video_path: str, segments: list, segments_file: str, update_progress: Callable[[str, int], None]) -> list:
+    """Rank each segment by loudness so clip selection has a signal beyond text.
+    Fails soft: a broken RMS pass leaves the neutral 0.5 score rather than
+    stopping the job.  Returns the segments, enriched when the pass worked.
+    """
+    job_info(job_id, "Step 4a/8: Audio energy pre-pass (FFmpeg RMS analysis)...")
+    update_progress("Analyzing audio energy...", 51)
+    try:
+        segments = score_audio_energy(str(video_path), segments)
+        job_info(job_id, f"Audio energy scored for {len(segments)} segments")
+        # Persist enriched segments so select_clips can read audio_energy_score
+        with open(segments_file, "w", encoding="utf-8") as f:
+            json.dump(segments, f, ensure_ascii=False, indent=2)
+    except Exception as _ae:
+        job_warning(job_id, f"Audio energy pre-pass failed ({_ae}), continuing with neutral 0.5")
+    return segments
+
+
+async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_title: Optional[str], update_progress: Callable[[str, int], None]) -> list:
+    """Pick the clips to render and, for a diagnostic job, vary their hooks.
+    Returns the clip dicts the render loop consumes.
+    """
+    job_info(job_id, f"Step 4b/8: Selecting best clips (source title: {source_title or 'N/A'})...")
+    update_progress("Analyzing virality & selecting top clips...", 52)
+    
+    num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else settings.NUM_CLIPS
+    clips = await select_clips(segments_file, num_target_clips, video_title=source_title)
+    job_info(job_id, f"Selected {len(clips)} clips")
+    update_progress(f"Selected {len(clips)} clips", 56)
+    
+    # Zero-view diagnostic: assign varied hook styles to each clip
+    is_diagnostic = getattr(job, "is_zero_view_diagnostic", False)
+    hook_style_list = getattr(job, "hook_style_list", None)
+    if is_diagnostic and hook_style_list and isinstance(hook_style_list, list):
+        job_info(job_id, f"Applying zero-view diagnostic hook styles: {hook_style_list}")
+        for i, clip in enumerate(clips):
+            if i < len(hook_style_list):
+                style = hook_style_list[i]
+                # Customize hook title to highlight the style for testing
+                if style == "aggressive":
+                    clip["title"] = f"[AGGRESSIVE] {clip.get('title', 'Viral Moment')}"
+                    clip["hook"] = f"YOU WON'T BELIEVE WHAT HAPPENED NEXT — {clip.get('hook', 'SHOCKING')}"
+                elif style == "curiosity":
+                    clip["title"] = f"[CURIOUS] The Secret No One Talks About"
+                    clip["hook"] = f"Wait until you hear what they hid — {clip.get('hook', 'SECRET')}"
+                elif style == "story-driven":
+                    clip["title"] = f"[STORY] The Full Story Behind This Moment"
+                    clip["hook"] = f"This is why that happened — {clip.get('hook', 'STORY')}"
+                job_info(job_id, f"Clip {i + 1}: Hook style '{style}' applied")
+    return clips
+
+
 async def process_job_async(job_id: int):
     """
     Process a single job through the entire pipeline (async version).
@@ -533,47 +585,13 @@ async def process_job_async(job_id: int):
         # =====================
         # 4. AUDIO ENERGY PRE-PASS (before clip selection)
         # =====================
-        job_info(job_id, "Step 4a/8: Audio energy pre-pass (FFmpeg RMS analysis)...")
-        update_progress("Analyzing audio energy...", 51)
-        try:
-            segments = score_audio_energy(str(video_path), segments)
-            job_info(job_id, f"Audio energy scored for {len(segments)} segments")
-            # Persist enriched segments so select_clips can read audio_energy_score
-            with open(segments_file, "w", encoding="utf-8") as f:
-                json.dump(segments, f, ensure_ascii=False, indent=2)
-        except Exception as _ae:
-            job_warning(job_id, f"Audio energy pre-pass failed ({_ae}), continuing with neutral 0.5")
-
+        segments = await stage_score_audio_energy(job_id, video_path, segments,
+                                                  segments_file, update_progress)
         # =====================
         # 4b. SELECT CLIPS
         # =====================
-        job_info(job_id, f"Step 4b/8: Selecting best clips (source title: {source_title or 'N/A'})...")
-        update_progress("Analyzing virality & selecting top clips...", 52)
-        
-        num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else settings.NUM_CLIPS
-        clips = await select_clips(segments_file, num_target_clips, video_title=source_title)
-        job_info(job_id, f"Selected {len(clips)} clips")
-        update_progress(f"Selected {len(clips)} clips", 56)
-        
-        # Zero-view diagnostic: assign varied hook styles to each clip
-        is_diagnostic = getattr(job, "is_zero_view_diagnostic", False)
-        hook_style_list = getattr(job, "hook_style_list", None)
-        if is_diagnostic and hook_style_list and isinstance(hook_style_list, list):
-            job_info(job_id, f"Applying zero-view diagnostic hook styles: {hook_style_list}")
-            for i, clip in enumerate(clips):
-                if i < len(hook_style_list):
-                    style = hook_style_list[i]
-                    # Customize hook title to highlight the style for testing
-                    if style == "aggressive":
-                        clip["title"] = f"[AGGRESSIVE] {clip.get('title', 'Viral Moment')}"
-                        clip["hook"] = f"YOU WON'T BELIEVE WHAT HAPPENED NEXT — {clip.get('hook', 'SHOCKING')}"
-                    elif style == "curiosity":
-                        clip["title"] = f"[CURIOUS] The Secret No One Talks About"
-                        clip["hook"] = f"Wait until you hear what they hid — {clip.get('hook', 'SECRET')}"
-                    elif style == "story-driven":
-                        clip["title"] = f"[STORY] The Full Story Behind This Moment"
-                        clip["hook"] = f"This is why that happened — {clip.get('hook', 'STORY')}"
-                    job_info(job_id, f"Clip {i + 1}: Hook style '{style}' applied")
+        clips = await stage_select_clips(job_id, job, segments_file, source_title,
+                                         update_progress)
 
         # =====================
         # 5. PROCESS EACH CLIP
