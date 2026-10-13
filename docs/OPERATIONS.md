@@ -60,6 +60,16 @@ REM the pipeline, in its own window
 (`ModuleNotFoundError: No module named 'utils'`). Host and port come from `.env`
 (`API_HOST`, `API_PORT=5001`); the health route is `/api/health`.
 
+**`POST /api/jobs/{id}/restart` is not a dry run.** It wipes the job directory, re-downloads,
+re-renders **and re-uploads** every clip if the job row carries `auto_upload = 1` — the flag
+is stored per job, set when the job is created, and `upload_privacy NULL` falls back to
+`AUTO_UPLOAD_PRIVACY` (default **unlisted**). Check both columns before restarting an old job
+on a live channel:
+
+```bat
+sqlite3 ..\storage\app.db "select id, status, auto_upload, upload_privacy from jobs where id=89;"
+```
+
 The dev tools come from the declared manifest, installed into `.venv` on 2026-10-13
 (`pip install -r backend/requirements-dev.txt`). Lint is then the same rules CI runs:
 
