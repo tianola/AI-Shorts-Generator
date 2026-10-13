@@ -135,6 +135,12 @@ def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable
                     except Exception as meta_error:
                         from utils.logger import job_warning
                         job_warning(job_id, f"Could not write meta.json: {meta_error}")
+                # Which rung of the ladder worked is the first thing to look for
+                # when a video starts failing extraction, and the retry loop is
+                # silent about it otherwise.
+                from utils.logger import job_info
+                job_info(job_id, f"Extracted with player_client={client}"
+                                 f"{' + cookies' if use_cookies else ' (anonymous)'}")
                 # If we get here, download succeeded
                 break
         except NotEnoughSpaceError as e:
@@ -144,6 +150,10 @@ def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable
             _remove_partials(output_dir)
             break
         except Exception as e:
+            from utils.logger import job_warning
+            job_warning(job_id, f"player_client={client}"
+                                f"{' + cookies' if use_cookies else ' (anonymous)'} "
+                                f"failed: {e}")
             last_exception = e
             # Clean up any partial download so a later retry starts fresh
             _remove_partials(output_dir)
