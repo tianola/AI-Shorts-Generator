@@ -323,7 +323,14 @@ export function openClipStudio(clip) {
 
   if (ytStatusEl) {
     if (isYouTubeVideoId(clip.youtube_video_id)) {
-      ytStatusEl.innerHTML = `🟢 <strong>Live on YouTube:</strong> <a href="https://youtube.com/shorts/${encodeURIComponent(clip.youtube_video_id)}" target="_blank" style="color: #38bdf8; text-decoration: underline;">youtube.com/shorts/${escapeHtml(clip.youtube_video_id)}</a>`;
+      // Which arm this clip shipped with and what it earned, so the studio shows
+      // the experiment's result next to the video it belongs to. Both are blank
+      // until a stats sync has run (POST /api/analytics/sync-views).
+      const arm = clip.hook_style
+        ? ` · hook arm <strong>${escapeHtml(clip.hook_style)}</strong>` : '';
+      const views = clip.view_count === null || clip.view_count === undefined
+        ? '' : ` · <strong>${Number(clip.view_count).toLocaleString('en-US')}</strong> views`;
+      ytStatusEl.innerHTML = `🟢 <strong>Live on YouTube:</strong> <a href="https://youtube.com/shorts/${encodeURIComponent(clip.youtube_video_id)}" target="_blank" style="color: #38bdf8; text-decoration: underline;">youtube.com/shorts/${escapeHtml(clip.youtube_video_id)}</a>${arm}${views}`;
     } else if (clip.uploaded) {
       // Legacy rows were written with uploaded=true and a placeholder id by the
       // old "queue upload" button; they were never actually published.

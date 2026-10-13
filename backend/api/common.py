@@ -59,5 +59,10 @@ def clip_payload(clip: Clip) -> dict:
         "upload_error": clip.upload_error,
         "upload_retry_count": clip.upload_retry_count,
         "published_at": clip.published_at,
+        "hook_style": clip.hook_style,
+        "view_count": clip.view_count,
+        "like_count": clip.like_count,
+        "comment_count": clip.comment_count,
+        "stats_synced_at": clip.stats_synced_at,
         "created_at": clip.created_at,
     }

@@ -453,6 +453,7 @@ async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_t
         for i, clip in enumerate(clips):
             if i < len(hook_style_list):
                 style = hook_style_list[i]
+                clip["hook_style"] = style
                 # Customize hook title to highlight the style for testing
                 if style == "aggressive":
                     clip["title"] = f"[AGGRESSIVE] {clip.get('title', 'Viral Moment')}"
@@ -803,6 +804,8 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             end=clip_end,
             title=final_title,
             hook=clip.get("hook"),
+            # The A/B arm, so a later view-count sync can attribute the result.
+            hook_style=clip.get("hook_style"),
             score=v_stats.get("virality_score_100", 85.0),
             hook_score=clip.get("hook_score"),
             coherence_score=clip.get("coherence_score"),

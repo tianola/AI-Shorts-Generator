@@ -115,6 +115,16 @@ class Clip(Base):
     upload_retry_count = Column(Integer, default=0)
     published_at = Column(DateTime, nullable=True)  # Scheduled publish time
 
+    # The experiment record. A zero-view diagnostic job gives every clip of the
+    # job a different hook style, but a style only means something next to the
+    # number it earned, so both halves live here: which arm this clip shipped
+    # with, and what the platform reported back for it.
+    hook_style = Column(String, nullable=True)
+    view_count = Column(Integer, nullable=True)
+    like_count = Column(Integer, nullable=True)
+    comment_count = Column(Integer, nullable=True)
+    stats_synced_at = Column(DateTime, nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
 
