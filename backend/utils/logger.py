@@ -32,6 +32,20 @@ _configured = False
 _job_handlers: "OrderedDict[int, int]" = OrderedDict()
 
 
+def _app_log_path() -> str:
+    """Where the rotating application log lives.
+
+    ``APP_LOG_PATH`` exists so a test session can point it elsewhere: this module
+    configures its sinks at import time, before any fixture runs, so without it
+    every pytest run appends its error lines to the production log that
+    ``health_check.py`` reads.
+    """
+    configured = os.environ.get("APP_LOG_PATH")
+    if configured:
+        return configured
+    return os.path.join(settings.LOGS_DIR, "app.log")
+
+
 def configure_logging() -> None:
     """Replace loguru's unrotated default stderr sink with bounded sinks."""
     global _configured
@@ -42,9 +56,10 @@ def configure_logging() -> None:
     logger.remove()
 
     try:
-        os.makedirs(settings.LOGS_DIR, exist_ok=True)
+        app_log = _app_log_path()
+        os.makedirs(os.path.dirname(app_log), exist_ok=True)
         logger.add(
-            os.path.join(settings.LOGS_DIR, "app.log"),
+            app_log,
             level=settings.LOG_LEVEL,
             format=_FILE_FORMAT,
             rotation=APP_LOG_ROTATION,

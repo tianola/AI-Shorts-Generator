@@ -22,7 +22,7 @@ from typing import Callable, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from database.session import SessionLocal
+from database.session import SessionLocal, init_database
 from database.models import Job, Clip, JobProgress
 from config import settings
 from loguru import logger
@@ -1163,6 +1163,13 @@ def process_jobs():
     Main worker loop (polling fallback or arq dispatcher).
     """
     logger.info("Worker started. Polling for jobs...")
+    # The worker used to assume the API had booted first, because only
+    # main.py's lifespan ran init_database(). Started on its own - or just
+    # a few seconds ahead of the API - every query fails on a column the
+    # models declare but the file does not have yet, and the loop logs that
+    # error forever. The sync is additive and idempotent, so owning a copy
+    # of it costs nothing.
+    init_database()
     missing = log_media_tools()
 
     last_reclaim = 0.0

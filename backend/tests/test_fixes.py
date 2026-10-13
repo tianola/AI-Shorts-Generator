@@ -212,3 +212,31 @@ def test_clip_failure_logic_marks_failed(monkeypatch):
     src = Path(w.__file__).read_text(encoding="utf-8")
     assert "clip_errors" in src
     assert 'All {len(clips)} clips failed' in src or "All clips failed" in src
+
+
+# ---------------------------------------------------------------------------
+# Test 11: the application log sink is redirectable
+# ---------------------------------------------------------------------------
+def test_app_log_path_follows_the_env_override(monkeypatch):
+    from config import settings
+    from utils.logger import _app_log_path
+
+    elsewhere = os.path.join(tempfile.gettempdir(), "somewhere-else", "app.log")
+    monkeypatch.setenv("APP_LOG_PATH", elsewhere)
+    assert _app_log_path() == elsewhere
+
+    monkeypatch.delenv("APP_LOG_PATH", raising=False)
+    assert _app_log_path() == os.path.join(settings.LOGS_DIR, "app.log")
+
+
+def test_a_test_run_never_writes_the_production_log():
+    """utils/logger.py configures its sink at import time, so this is the only
+    hook: the file health_check.py judges the install by must stay ours."""
+    from config import settings
+    from utils.logger import _app_log_path
+
+    sink = os.path.abspath(_app_log_path())
+    production = os.path.abspath(settings.LOGS_DIR)
+    assert not sink.startswith(production + os.sep), (
+        f"test session would write into the operator's log directory: {sink}"
+    )

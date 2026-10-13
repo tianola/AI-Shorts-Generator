@@ -1,6 +1,6 @@
 """Shared test configuration.
 
-Two hazards this file exists to close:
+Three hazards this file exists to close:
 
 * The database. Only one module used to set TEST_DATABASE_URL, and whichever
   module imported database.session first decided the engine for the whole
@@ -9,16 +9,26 @@ Two hazards this file exists to close:
 * The storage tree. Routes and the worker resolve settings.JOBS_DIR at call
   time, so a test posting a fake upload wrote source.mp4 into
   storage/jobs/<id>/ where <id> can belong to a real job.
+* The application log. utils/logger.py adds its rotating file sink at import
+  time, so a test that deliberately provokes an error writes it into
+  storage/logs/app.log - the same file health_check.py reads to decide whether
+  the install is healthy. APP_LOG_PATH moves it into the system temp directory.
 
 Tests that shell out to ffmpeg/ffprobe are skipped with an explicit reason when
 the binaries are missing, instead of failing with a bare FileNotFoundError that
 hides real regressions: whole modules listed below, single tests via the
 FFMPEG_REQUIRED marker.
 """
+import atexit
 import os
 import shutil
+import tempfile
 
 os.environ.setdefault("TEST_DATABASE_URL", "sqlite:///:memory:")
+
+_LOG_DIR = tempfile.mkdtemp(prefix="ai-shorts-test-logs-")
+os.environ.setdefault("APP_LOG_PATH", os.path.join(_LOG_DIR, "app.log"))
+atexit.register(shutil.rmtree, _LOG_DIR, ignore_errors=True)
 
 import pytest
 
