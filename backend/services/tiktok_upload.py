@@ -227,7 +227,8 @@ def upload_all_clips_to_tiktok_for_job(
         # The per-clip auto-upload in the worker already published this clip.
         # Re-publishing produced duplicate TikTok posts from the same job.
         if clip.tiktok_video_id:
-            results.append({"index": clip.index, "skipped": True,
+            results.append({"clip_id": clip.id, "clip_index": clip.index,
+                            "index": clip.index, "skipped": True, "status": "skipped",
                             "reason": "already published", "tiktok_url": clip.tiktok_video_id})
             continue
 
@@ -293,13 +294,17 @@ def upload_all_clips_to_tiktok_for_job(
 
     uploaded_count = len([r for r in results if r["status"] == "uploaded"])
     failed_count = len([r for r in results if r["status"] == "failed"])
+    skipped_count = len([r for r in results if r["status"] == "skipped"])
 
     return {
-        "success": uploaded_count > 0,
+        # The worker publishes per clip while it renders, so this sweep normally
+        # finds every clip already posted. Nothing left to do is not a failure.
+        "success": failed_count == 0,
         "job_id": job_id,
         "username": auth_status.get("username"),
         "total_clips": total_clips,
         "uploaded_count": uploaded_count,
         "failed_count": failed_count,
+        "skipped_count": skipped_count,
         "results": results
     }
