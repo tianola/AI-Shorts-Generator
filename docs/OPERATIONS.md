@@ -40,7 +40,25 @@ set TEST_DATABASE_URL=sqlite:///:memory:
 ```
 
 `TEST_DATABASE_URL` is not optional convenience: without it the suite writes into the
-real `storage/app.db`. Baseline as of 2026-10-13 is **244 passed, 1 skipped**.
+real `storage/app.db`. Baseline as of 2026-10-13 is **246 passed, 1 skipped**. A run from
+`conftest.py` also defaults `APP_LOG_PATH` into the temp directory, because
+`utils/logger.py` opens its rotating file sink at import time — without that, test errors
+land in `storage/logs/app.log`, the file §9 reads to judge this install.
+
+The two long-running processes start from `backend/` too; the modules import each other as
+top-level names, so the repo root is not a working directory for them:
+
+```bat
+cd /d E:\01-AI-PROJECTS\ai-shorts-generator\backend
+REM the API on http://localhost:5001
+../.venv/Scripts/python.exe main.py
+REM the pipeline, in its own window
+../.venv/Scripts/python.exe worker.py
+```
+
+`python -m uvicorn backend.main:app` from the repo root does not work
+(`ModuleNotFoundError: No module named 'utils'`). Host and port come from `.env`
+(`API_HOST`, `API_PORT=5001`); the health route is `/api/health`.
 
 The dev tools come from the declared manifest, installed into `.venv` on 2026-10-13
 (`pip install -r backend/requirements-dev.txt`). Lint is then the same rules CI runs:
@@ -49,24 +67,33 @@ The dev tools come from the declared manifest, installed into `.venv` on 2026-10
 .venv\Scripts\ruff.exe check backend --select F,E9
 ```
 
-## 3. First start after 2026-10-13 — schema sync
+## 3. Schema sync — applied 2026-10-13 21:25:09
 
-`storage/app.db` is behind the models by ten columns. The boot-time `_sync_columns()`
-adds them, additively — it never drops or rewrites anything:
+The ten columns below were missing from `storage/app.db` while the models declared them.
+The boot-time `_sync_columns()` adds them, additively — it never drops or rewrites
+anything:
 
 - `jobs`: `claimed_by`, `claimed_at`, `upload_privacy`
 - `clips`: `score_breakdown`, `tiktok_video_id`, `hook_style`, `view_count`,
   `like_count`, `comment_count`, `stats_synced_at`
 
-Until that start happens, anything reading the experiment columns refuses and says so
-(`python -m scripts.hook_style_report` prints *"Refusing to read: the clips table has no
-hook_style / stats columns yet"*).
+They are in the file now (`jobs` has 25 columns, `clips` 36), so
+`python -m scripts.hook_style_report` and `GET /api/analytics/hook-styles` read normally.
+Keep this section for the next time the models outrun the database; the symptom is the
+same — `hook_style_report` prints *"Refusing to read: the clips table has no hook_style /
+stats columns yet"* and the worker fills its log with `no such column: …`.
+
+Both entry points run `init_database()` now. The API calls it from its lifespan and
+`process_jobs()` calls it before its loop, so the worker may start before, after or
+without the API. It used to assume the API had gone first: started a few seconds ahead on
+2026-10-13 it polled against the missing columns and logged the same error 104 times,
+because the loop survives a DB error and simply tries again.
 
 `claimed_at` matters more than it looks. The worker's reclaim sweep requeues any job at
-`status='processing'` whose lease expired **or is NULL**, so the first start after the
-sync would have requeued the eleven legacy stuck jobs and re-downloaded and re-rendered
-them. They were deleted on 2026-10-13 (see §7), so a clean start now adds the columns and
-requeues nothing.
+`status='processing'` whose lease expired **or is NULL**, so the first start after a sync
+that adds it requeues every legacy row at `processing`. That is why the eleven stuck jobs
+were deleted first (see §7). Check `SELECT count(*) FROM jobs WHERE status='processing'`
+before a boot that adds a lease column.
 
 ## 4. Database: backup, verify, restore
 
@@ -117,8 +144,22 @@ candidate — that file is the only copy of the output. `--include-uploaded-clip
 to deleting rendered clips that are safely on YouTube; `--older-than-days` (default 7)
 and `--keep-last` (default 2) bound how much of a job's output survives.
 
-The worker also protects itself: `utils.disk.has_headroom` / `reclaim` run before a
-download so a full disk cannot start a job.
+**The disk guards are all set to 10 GB and the volume is nearly full.** On 2026-10-13 `E:`
+had **17.5 GB free of 3726 GB**. Two checks exist, both against `MIN_FREE_DISK_GB`
+(default **10**): `worker.py` refuses to claim a job without headroom (it sleeps 15 s and
+asks again), and `services/youtube.py::yt_progress_hook` aborts a download once per
+whole percent if free space drops below the floor. Nothing checks before the **render**
+stage writes its outputs. So with 17.5 GB free a job is admitted, can consume ~7.5 GB of
+source before the download guard trips, and then renders with no preflight at all — and
+`job 80/source.mp4` alone is 17.2 GB. A volume that fills during a write is also the most
+plausible way `ix_jobs_id` went corrupt: the same transaction that adds the job row adds
+the index entry. Either reclaim space with the report above or raise `MIN_FREE_DISK_GB`
+above the largest source you plan to ingest; `df` on the volume before a long test costs
+nothing.
+
+`utils.disk.reclaim()` is a different thing: it deletes one finished job's
+`audio.wav` / `audio_groq.mp3` after transcription. Useful, not a guard — it cannot free
+space for a job that has not been claimed.
 
 ## 6. Reconcile the upload ledger
 
@@ -191,11 +232,18 @@ claimed the job within 60s, which is the wiring proof; the render itself continu
 | `storage/logs/app.log` | `utils/logger` loguru sink | 20 MB rotation, 14 days retention |
 | `storage/jobs/<id>/pipeline.log` | per-job loguru sink | 10 MB rotation, 14 days retention |
 | `storage/logs/worker.log`, `worker_error.log` | `utils/daemon_streams` | `MAX_DAEMON_LOG_BYTES` = 20 MB, renamed to `.N` — but only when the daemon starts, so one long run can exceed the cap |
+| `storage/logs/api.log`, `api.err.log`, `api_error.log` | `start_ai_shorts.ps1` `-RedirectStandardOutput` | **none** — truncated at each start, unbounded while running |
+
+`storage/logs/app.log` is also a **signal, not just a log** — §9 tails it to decide
+whether the install is healthy. `utils/logger.py` adds that sink at import time, which is
+why `APP_LOG_PATH` exists: `backend/tests/conftest.py` points it into the temp directory
+so a test run's deliberately-provoked errors never land here. If a Logs FAIL lists
+`Access is denied: …\pytest-of-thana\…` paths, that was test noise rather than the app
+(`0f8b1bc`, 2026-10-13) — the historical lines stay until rotation drops them.
 
 `storage/logs/worker_error.log.gz` (9.9 MB, 2026-10-12) is not produced by anything in
 this repo — no code path gzips a log. Someone compressed it by hand; it can be deleted
 with the rest of the old logs.
-| `storage/logs/api.log`, `api.err.log`, `api_error.log` | `start_ai_shorts.ps1` `-RedirectStandardOutput` | **none** — truncated at each start, unbounded while running |
 
 Total `storage/logs` today: 16 MB, so nothing is urgent. The launcher's redirect files are
 the only ones that can grow without limit during a long run; truncate them, not the
@@ -203,7 +251,11 @@ loguru sinks, if they ever get large.
 
 ## 11. Still a human decision
 
-- Run `prune_storage --apply` (37.1 GB).
+- Run `prune_storage --apply` (37.1 GB). The volume has **17.5 GB free**; this is the
+  cheapest way to make a long-video test safe (§5).
+- Decide `MIN_FREE_DISK_GB`: it stays at 10 GB while the largest source seen is 17.2 GB,
+  and no stage after the download checks anything (§5). Raise it, or accept that a big job
+  can render onto a full disk.
 - Run `reconcile_uploads --verify`, then decide about `--apply --reset-placeholders`.
 - **Duplicate shorts are live on YouTube.** Job 70 clips 0-2 each have two uploaded rows
   with six distinct video ids (`Lx1Eb12sWAs`/`ab5jGMdDxHA`, `Gp96VYc4WTE`/`VOq4SXTVFz8`,
