@@ -459,10 +459,10 @@ async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_t
                     clip["title"] = f"[AGGRESSIVE] {clip.get('title', 'Viral Moment')}"
                     clip["hook"] = f"YOU WON'T BELIEVE WHAT HAPPENED NEXT — {clip.get('hook', 'SHOCKING')}"
                 elif style == "curiosity":
-                    clip["title"] = f"[CURIOUS] The Secret No One Talks About"
+                    clip["title"] = "[CURIOUS] The Secret No One Talks About"
                     clip["hook"] = f"Wait until you hear what they hid — {clip.get('hook', 'SECRET')}"
                 elif style == "story-driven":
-                    clip["title"] = f"[STORY] The Full Story Behind This Moment"
+                    clip["title"] = "[STORY] The Full Story Behind This Moment"
                     clip["hook"] = f"This is why that happened — {clip.get('hook', 'STORY')}"
                 job_info(job_id, f"Clip {i + 1}: Hook style '{style}' applied")
     return clips
@@ -521,7 +521,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             crop_words(words_file, clip_start, clip_end, clip_words_file)
             job_info(job_id, f"Words cropped: {clip_words_file}")
         else:
-            job_info(job_id, f"Words already cropped")
+            job_info(job_id, "Words already cropped")
 
         # 5d. Generate ASS Captions with Selected Preset & Emojis
         captions_path = os.path.join(str(clip_dir), "captions.ass")
@@ -529,7 +529,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             create_captions(clip_words_file, captions_path, style_name=caption_style)
             job_info(job_id, f"Captions created with '{caption_style}' style: {captions_path}")
         else:
-            job_info(job_id, f"Captions already exist")
+            job_info(job_id, "Captions already exist")
 
         final_path = os.path.join(str(clip_dir), "final_short.mp4")
 
@@ -641,7 +641,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                 burn_captions(vertical_path, captions_path, final_path)
                 job_info(job_id, f"Final video (sequential): {final_path}")
             else:
-                job_info(job_id, f"Final video already exists")
+                job_info(job_id, "Final video already exists")
 
         # single-pass path: set vertical_path to final for virality call
         if _used_single_pass:
@@ -664,7 +664,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             v_stats = compute_composite_virality(clip.get("virality_score", 0.8), clip_transcript, vertical_path)
             metadata["virality_breakdown"] = v_stats
             job_info(job_id, f"Clip Virality Score: {v_stats['virality_score_100']}/100 (Visual: {v_stats['visual_intensity']})")
-        except Exception as e:
+        except Exception:
             v_stats = {"virality_score_100": 85.0, "virality_score": 0.85}
 
         # Generate Platform-Specific Copy (TikTok, Instagram Reels, YouTube Shorts)
@@ -797,41 +797,47 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         relative_final_path = os.path.relpath(final_path, settings.STORAGE_ROOT)
         relative_thumbnail_path = os.path.relpath(thumbnail_path, settings.STORAGE_ROOT) if thumbnail_result else None
 
-        clip_db = Clip(
-            job_id=job_id,
-            index=index,
-            start=clip_start,
-            end=clip_end,
-            title=final_title,
-            hook=clip.get("hook"),
-            # The A/B arm, so a later view-count sync can attribute the result.
-            hook_style=clip.get("hook_style"),
-            score=v_stats.get("virality_score_100", 85.0),
-            hook_score=clip.get("hook_score"),
-            coherence_score=clip.get("coherence_score"),
-            connection_score=clip.get("connection_score"),
-            trend_score=clip.get("trend_score"),
-            score_breakdown={
-                "llm": clip.get("llm_score_raw"),
-                "audio": clip.get("audio_energy_score"),
-                "keyword": clip.get("keyword_score"),
-                "density": clip.get("semantic_density"),
-                "structural": clip.get("structural_score"),
-            },
-            file_path=relative_final_path,
-            thumbnail_path=relative_thumbnail_path,
-            description=metadata.get("description", ""),
-            hashtags=metadata.get("hashtags", ["#Shorts"]),
-            platform_metadata=metadata.get("platform_copy", {}),
-            caption_style=caption_style,
-            layout_mode=resolved_layout,
-            uploaded=False,
-            upload_retry_count=0
-        )
+        # A reclaimed job re-enters this stage for clips it already recorded (the
+        # render stages skip on existing files). Reuse that row: a fresh Clip()
+        # has no youtube_video_id, so the re-upload guards below would never fire
+        # and a short already on YouTube would be published a second time.
+        clip_db = db.query(Clip).filter(Clip.job_id == job_id, Clip.index == index).first()
+        if clip_db is None:
+            clip_db = Clip(
+                job_id=job_id,
+                index=index,
+                start=clip_start,
+                end=clip_end,
+                title=final_title,
+                hook=clip.get("hook"),
+                # The A/B arm, so a later view-count sync can attribute the result.
+                hook_style=clip.get("hook_style"),
+                score=v_stats.get("virality_score_100", 85.0),
+                hook_score=clip.get("hook_score"),
+                coherence_score=clip.get("coherence_score"),
+                connection_score=clip.get("connection_score"),
+                trend_score=clip.get("trend_score"),
+                score_breakdown={
+                    "llm": clip.get("llm_score_raw"),
+                    "audio": clip.get("audio_energy_score"),
+                    "keyword": clip.get("keyword_score"),
+                    "density": clip.get("semantic_density"),
+                    "structural": clip.get("structural_score"),
+                },
+                file_path=relative_final_path,
+                thumbnail_path=relative_thumbnail_path,
+                description=metadata.get("description", ""),
+                hashtags=metadata.get("hashtags", ["#Shorts"]),
+                platform_metadata=metadata.get("platform_copy", {}),
+                caption_style=caption_style,
+                layout_mode=resolved_layout,
+                uploaded=False,
+                upload_retry_count=0
+            )
 
-        db.add(clip_db)
-        db.commit()
-        db.refresh(clip_db)
+            db.add(clip_db)
+            db.commit()
+            db.refresh(clip_db)
         clip_id = clip_db.id
 
         job_info(job_id, f"Clip {index + 1}/{total_clips} saved to DB with ID {clip_id}")
@@ -919,7 +925,7 @@ async def stage_publish_all_clips(job_id: int, db: Session, job: Job, upload_pri
                 from services.youtube_upload import upload_all_clips_for_job, get_youtube_auth_status
                 yt_status = get_youtube_auth_status()
                 if yt_status.get("authenticated"):
-                    job_info(job_id, f"Auto-uploading to YouTube Shorts...")
+                    job_info(job_id, "Auto-uploading to YouTube Shorts...")
                     upload_all_clips_for_job(job_id, db, privacy_status=upload_privacy)
                     job_info(job_id, f"YouTube Shorts auto-upload complete for Job #{job_id}")
             except Exception as yt_err:
