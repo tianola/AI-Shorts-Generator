@@ -1,12 +1,17 @@
 """Does the database's idea of what was published match what YouTube has?
 
-342 clips are in the database and 181 of them are flagged uploaded. Two of those
-carry the id 'queued' - a placeholder an old caller posted to the status endpoint,
+309 clips are in the database and 153 of them are flagged uploaded. One of those
+carries the id 'queued' - a placeholder an old caller posted to the status endpoint,
 which marked the clip published, recorded no video, and removed it from every
 pending list without anything ever reaching YouTube. The endpoint validates ids
 now, but the rows it let through are still there, and a clip whose file path
 moved (the renderer writes final_video.mp4, older jobs kept final_with_sfx.mp4)
 looks un-uploadable to the API even while the file sits in the clip directory.
+
+(The counts were 342/181 with two placeholders until 2026-10-13, when eleven
+legacy rows stuck at status='processing' - and their 33 clips, 28 of them
+already uploaded - were deleted. The full rows are preserved in
+storage/backups/stale-processing-jobs-*.json.)
 
 Usage:
     python -m scripts.reconcile_uploads                     # local audit, changes nothing
