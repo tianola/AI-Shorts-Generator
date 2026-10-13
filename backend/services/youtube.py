@@ -71,18 +71,26 @@ def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable
         'android': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
         'ios': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
     }
+    cookie_user_agent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+
+    # Cookies are a second pass, not a constant. A jar YouTube no longer trusts
+    # comes back as a page with no player response - and because the cookie file
+    # used to be applied to every client, one stale storage/secrets/cookies.txt
+    # failed all three attempts on a video that downloads fine anonymously
+    # (job 89, 2026-10-13: KeyError('INNERTUBE_CONTEXT') with cookies, success
+    # without them).
+    attempts = [(client, False) for client in clients]
+    if cookies_path:
+        attempts += [(client, True) for client in clients]
 
     last_exception = None
-    for client in clients:
+    for client, use_cookies in attempts:
         ydl_opts = base_ydl_opts.copy()
         ydl_opts['extractor_args'] = {'youtube': {'player_client': client}}
-        ydl_opts['user_agent'] = user_agents[client]
+        ydl_opts['user_agent'] = cookie_user_agent if use_cookies else user_agents[client]
 
-        # Apply cookie logic if cookies are found
-        if cookies_path:
+        if use_cookies:
             ydl_opts['cookiefile'] = cookies_path
-            # Override user_agent to match iPhone (as in original cookie logic)
-            ydl_opts['user_agent'] = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
         _last_hook_pct = [-1]
 
@@ -144,7 +152,8 @@ def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable
     else:
         # All clients failed
         if last_exception:
-            raise Exception(f"Download failed for {url}: {last_exception}")
+            tried = "anonymously and with cookies" if cookies_path else "anonymously (no cookie file found)"
+            raise Exception(f"Download failed for {url} after {len(attempts)} attempts ({tried}): {last_exception}")
         else:
             raise Exception(f"Download failed for {url}: Unknown error")
 

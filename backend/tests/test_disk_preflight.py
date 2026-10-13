@@ -131,3 +131,84 @@ def test_download_aborts_once_the_volume_is_full(tmp_path, monkeypatch):
         youtube.download_youtube("https://youtu.be/abcdef", 9902)
 
     assert len(attempts) == 1
+
+
+class _FakeJar:
+    """YoutubeDL stand-in that records whether each attempt was given cookies.
+
+    `refuse` raises for the attempts that should fail, so one fixture proves both
+    directions: cookies must not poison the anonymous pass, and they must still be
+    tried when anonymous extraction is not enough.
+    """
+
+    def __init__(self, opts, refuse, seen):
+        self.opts = opts
+        seen.append("cookiefile" in opts)
+        refuse(opts)
+        # Getting here means this attempt was allowed to succeed.
+        with open(self.opts["outtmpl"] % {"ext": "mp4"}, "wb") as f:
+            f.write(b"stub")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def extract_info(self, url, download=True):
+        return {"title": "x"}
+
+
+def _storage_with_cookies(tmp_path, monkeypatch):
+    from services import youtube
+
+    storage = tmp_path / "storage"
+    (storage / "secrets").mkdir(parents=True)
+    (storage / "secrets" / "cookies.txt").write_text("#Netscape\n", encoding="utf-8")
+    monkeypatch.setattr(settings, "STORAGE_ROOT", str(storage))
+    monkeypatch.setattr(type(settings), "JOBS_DIR", property(lambda self: str(tmp_path / "jobs")))
+    monkeypatch.setattr(settings, "YT_COOKIES_FILE", None)
+    # The download guard must not decide these tests: the host volume is not the point.
+    monkeypatch.setattr(youtube, "free_gb", lambda path=None: 500.0)
+
+
+def test_a_stale_cookie_jar_cannot_block_the_anonymous_attempt(tmp_path, monkeypatch):
+    """Job 89, 2026-10-13: storage/secrets/cookies.txt made every client fail on a
+    video that downloads fine anonymously, because the jar was applied to all of
+    them before any attempt was made without it."""
+    from services import youtube
+
+    _storage_with_cookies(tmp_path, monkeypatch)
+    seen = []
+    monkeypatch.setattr(
+        youtube.yt_dlp,
+        "YoutubeDL",
+        lambda opts: _FakeJar(opts, lambda o: None, seen),
+    )
+
+    target = youtube.download_youtube("https://youtu.be/abcdef", 9903)
+
+    assert os.path.exists(target)
+    assert seen == [False], "the cookie jar was consulted before a cookie-less attempt"
+
+
+def test_cookies_are_still_tried_when_anonymous_extraction_fails(tmp_path, monkeypatch):
+    from services import youtube
+
+    _storage_with_cookies(tmp_path, monkeypatch)
+
+    def refuse(opts):
+        if not opts.get("cookiefile"):
+            raise OSError("no player response without cookies")
+
+    seen = []
+    monkeypatch.setattr(
+        youtube.yt_dlp,
+        "YoutubeDL",
+        lambda opts: _FakeJar(opts, refuse, seen),
+    )
+
+    target = youtube.download_youtube("https://youtu.be/abcdef", 9904)
+
+    assert os.path.exists(target)
+    assert seen == [False, False, False, True], "the cookie pass never ran after the anonymous clients failed"
