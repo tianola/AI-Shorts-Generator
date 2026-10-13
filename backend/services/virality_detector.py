@@ -99,7 +99,7 @@ def compute_composite_virality(
         explanation = f"Exceptional hook strength with immediate curiosity trigger ({impact_count} power keywords) and continuous dynamic pacing."
     elif final_virality_100 >= 80:
         tier = "High Virality Candidate"
-        explanation = f"Solid retention structure with clear topic focus, good conversational energy, and strong TikTok keyword density."
+        explanation = "Solid retention structure with clear topic focus, good conversational energy, and strong TikTok keyword density."
     else:
         tier = "Standard Clip"
         explanation = "Balanced informative segment suitable for organic topic discovery and playlist highlights."

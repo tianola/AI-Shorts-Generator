@@ -1,13 +1,5 @@
 import json
 import httpx
-from typing import Optional
-from loguru import logger
-
-from config import settings
-
-
-import json
-import httpx
 from typing import Optional, Type, TypeVar
 from pydantic import BaseModel
 from loguru import logger

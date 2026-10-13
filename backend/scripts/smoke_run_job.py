@@ -55,7 +55,7 @@ def main(youtube_url: str):
 	try:
 		process_job(job_id)
 		print("Job processing finished")
-	except Exception as e:
+	except Exception:
 		import traceback
 		print("Job failed with exception:\n")
 		traceback.print_exc()

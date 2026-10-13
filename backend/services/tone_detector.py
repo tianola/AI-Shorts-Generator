@@ -92,7 +92,7 @@ def classify_content_tone(transcript_text: str, story_type: str = "") -> Dict[st
 
     # Stage 0: Deterministic safety blocklist
     if is_transcript_somber(transcript_text):
-        logger.info(f"Tone Gating: Transcript blocked due to somber/sensitive keywords.")
+        logger.info("Tone Gating: Transcript blocked due to somber/sensitive keywords.")
         return {
             "tone_category": "somber_tragic",
             "popup_eligible": False,

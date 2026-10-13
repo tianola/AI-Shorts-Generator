@@ -87,7 +87,6 @@ def test_resume_url_changed_redownloads():
 # Test 4: metadata fallback keys
 # ---------------------------------------------------------------------------
 def test_metadata_fallback():
-    from database.models import Clip
     # Clip() with only required fields — description/hashtags default to None,
     # but our worker code now uses .get() so a dict without those keys is safe.
     metadata = {"title": "T"}  # no description/hashtags
@@ -206,7 +205,6 @@ def test_suggest_clips_registered():
 # Test 10: all-clips-failed marks job failed
 # ---------------------------------------------------------------------------
 def test_clip_failure_logic_marks_failed(monkeypatch):
-    from worker import process_job_async
     # The actual DB flow is heavy; instead verify the decision helper exists
     # and the completed block references clip_errors. We assert the worker module
     # contains the failure branch (lightweight check).

@@ -172,7 +172,6 @@ class TestWorkerResolvesLayout:
         not with 'auto'. Simulate the worker's resolution logic directly so
         the test doesn't depend on the full job database stack.
         """
-        from unittest.mock import MagicMock, patch, call
 
         # --- Reproduce the exact resolution block from worker.py (lines 494-504) ---
         layout_choice = "auto"
@@ -185,7 +184,7 @@ class TestWorkerResolvesLayout:
 
         def fake_build_vertical_filter(path, mode=None, **kwargs):
             captured_mode.append(mode)
-            return f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920[vsingle]"
+            return "[0:v]crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920[vsingle]"
 
         import services.smart_crop as sc
         import services.vertical as vert

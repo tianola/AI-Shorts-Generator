@@ -17,7 +17,6 @@ Content ID waveform + frame matching.
 import os
 import shutil
 import subprocess
-import tempfile
 import logging
 
 logger = logging.getLogger(__name__)

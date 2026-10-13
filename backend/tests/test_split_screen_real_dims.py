@@ -22,7 +22,7 @@ def _parse_crop(filtergraph: str, label: str) -> tuple[int, int, int, int]:
     import re
     # find the crop call in the segment that ends at the [label] output
     # e.g. "crop=1215:720:0:0,scale=..."
-    pattern = rf"crop=(\d+):(\d+):(\d+):(\d+)"
+    pattern = r"crop=(\d+):(\d+):(\d+):(\d+)"
     # Extract the portion up to [label]
     seg_match = re.search(rf"(.*?)\[{re.escape(label)}\]", filtergraph)
     if not seg_match:

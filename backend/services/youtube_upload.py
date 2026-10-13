@@ -193,7 +193,7 @@ def format_shorts_metadata(
     if source_title and source_title.strip():
         desc_lines.append(f"\n🎬 Original Story: {source_title.strip()}")
     
-    desc_lines.append(f"\n👉 Like, Share & Subscribe for more daily viral clips!\n")
+    desc_lines.append("\n👉 Like, Share & Subscribe for more daily viral clips!\n")
     desc_lines.append(hashtags_str)
 
     return {
