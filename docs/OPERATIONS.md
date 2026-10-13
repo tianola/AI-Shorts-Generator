@@ -40,7 +40,7 @@ set TEST_DATABASE_URL=sqlite:///:memory:
 ```
 
 `TEST_DATABASE_URL` is not optional convenience: without it the suite writes into the
-real `storage/app.db`. Baseline as of 2026-10-13 is **246 passed, 1 skipped**. A run from
+real `storage/app.db`. Baseline as of 2026-10-13 is **248 passed, 1 skipped**. A run from
 `conftest.py` also defaults `APP_LOG_PATH` into the temp directory, because
 `utils/logger.py` opens its rotating file sink at import time — without that, test errors
 land in `storage/logs/app.log`, the file §9 reads to judge this install.
@@ -65,6 +65,18 @@ The dev tools come from the declared manifest, installed into `.venv` on 2026-10
 
 ```bat
 .venv\Scripts\ruff.exe check backend --select F,E9
+```
+
+A declared-but-uninstalled **runtime** dependency does not always announce itself.
+`google-api-python-client` (`backend/requirements.txt:39`) was missing from `.venv` on
+2026-10-13 and `/api/youtube/status` answered `authenticated: false` — the channel looked
+disconnected rather than broken, which silently blocked uploads and the view-count sync
+while `No module named 'googleapiclient'` accumulated in `app.log`. If YouTube looks
+unauthenticated but `client_secrets.json` is present, refresh the install before touching
+the credentials:
+
+```bat
+.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 ```
 
 ## 3. Schema sync — applied 2026-10-13 21:25:09
@@ -131,7 +143,11 @@ REM report only - add --apply to delete exactly that report
 ../.venv/Scripts/python.exe -m scripts.prune_storage --apply
 ```
 
-Measured 2026-10-13: **143 files, 37.1 GB** reclaimable. Categories it reports:
+Measured 2026-10-13: **143 files, 37.1 GB** reclaimable — **and `--apply` was run the same
+night (22:10) after the user approved it in plain terms.** The report was written to
+`storage/backups/prune-plan-20261013-221001.txt` *before* deleting, and
+`prune-applied-*.txt` records what went: 143 files, 37.1 GB. `E:` went from **17.5 GB free
+to about 54 GB**. Categories the report gives:
 
 - `[orphan]` — job directory with no job row and no clip rows (the deleted stuck jobs
   became exactly this; their ~4.9 GB is in the 37.1 GB)
@@ -144,8 +160,9 @@ candidate — that file is the only copy of the output. `--include-uploaded-clip
 to deleting rendered clips that are safely on YouTube; `--older-than-days` (default 7)
 and `--keep-last` (default 2) bound how much of a job's output survives.
 
-**The disk guards are all set to 10 GB and the volume is nearly full.** On 2026-10-13 `E:`
-had **17.5 GB free of 3726 GB**. Two checks exist, both against `MIN_FREE_DISK_GB`
+**The disk guards are all set to 10 GB and the volume runs nearly full.** On 2026-10-13 `E:`
+had **17.5 GB free of 3726 GB** before the prune above took it to ~54 GB; the numbers here
+describe the mechanism, which the reclaim did not change. Two checks exist, both against `MIN_FREE_DISK_GB`
 (default **10**): `worker.py` refuses to claim a job without headroom (it sleeps 15 s and
 asks again), and `services/youtube.py::yt_progress_hook` aborts a download once per
 whole percent if free space drops below the floor. Nothing checks before the **render**
@@ -153,9 +170,9 @@ stage writes its outputs. So with 17.5 GB free a job is admitted, can consume ~7
 source before the download guard trips, and then renders with no preflight at all — and
 `job 80/source.mp4` alone is 17.2 GB. A volume that fills during a write is also the most
 plausible way `ix_jobs_id` went corrupt: the same transaction that adds the job row adds
-the index entry. Either reclaim space with the report above or raise `MIN_FREE_DISK_GB`
-above the largest source you plan to ingest; `df` on the volume before a long test costs
-nothing.
+the index entry. Reclaim space with the report above when it runs low, and remember that
+one long source video alone is tens of gigabytes; `df` on the volume before a long test
+costs nothing.
 
 `utils.disk.reclaim()` is a different thing: it deletes one finished job's
 `audio.wav` / `audio_groq.mp3` after transcription. Useful, not a guard — it cannot free
@@ -251,8 +268,10 @@ loguru sinks, if they ever get large.
 
 ## 11. Still a human decision
 
-- Run `prune_storage --apply` (37.1 GB). The volume has **17.5 GB free**; this is the
-  cheapest way to make a long-video test safe (§5).
+- ~~Run `prune_storage --apply` (37.1 GB). The volume has **17.5 GB free**; this is the
+  cheapest way to make a long-video test safe (§5).~~ **Done 2026-10-13 22:10**, approved
+  explicitly and ledged first — `E:` is at ~54 GB. The report is worth re-running
+  periodically; the categories it flags reappear with every finished job.
 - Decide `MIN_FREE_DISK_GB`: it stays at 10 GB while the largest source seen is 17.2 GB,
   and no stage after the download checks anything (§5). Raise it, or accept that a big job
   can render onto a full disk.
