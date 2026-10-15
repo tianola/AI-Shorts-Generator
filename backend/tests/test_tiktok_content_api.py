@@ -304,6 +304,42 @@ def test_oauth_error_from_the_token_endpoint_is_surfaced(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# PKCE — TikTok's consent screen refuses an authorize request without a challenge
+# --------------------------------------------------------------------------
+
+def test_pkce_challenge_matches_the_rfc_7636_vector():
+    # The canonical verifier/challenge pair from RFC 7636 Appendix B. If the
+    # encoding ever grows padding or leaves the base64url alphabet, TikTok
+    # rejects the exchange and the failure looks like a bad app secret.
+    verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    assert api.pkce_challenge(verifier) == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+
+def test_generated_verifier_is_within_the_pkce_range():
+    verifier = api.new_code_verifier()
+    assert 43 <= len(verifier) <= 128
+    assert all(char.isalnum() or char in "-_" for char in verifier)
+
+
+def test_authorize_url_carries_the_challenge_only_when_one_is_given(secrets_dir):
+    assert "code_challenge" not in api.authorization_url(state="S")
+    with_challenge = api.authorization_url(state="S", code_challenge="CHAL")
+    assert "code_challenge=CHAL" in with_challenge
+    assert "code_challenge_method=S256" in with_challenge
+
+
+def test_the_token_exchange_sends_the_verifier_that_paired_with_the_challenge(secrets_dir, monkeypatch):
+    transport = FakeTransport({
+        "oauth/token": {"access_token": "A", "refresh_token": "R", "expires_in": 3600, "open_id": "O"},
+        "user/info": {"data": {"user_name": "clipperevrything"}},
+    })
+    monkeypatch.setattr(api, "requests", transport)
+    api.exchange_code("CODE", code_verifier="VERIFIER")
+    token_call = next(c for c in transport.calls if c["url"].endswith("oauth/token/"))
+    assert token_call["data"]["code_verifier"] == "VERIFIER"
+
+
+# --------------------------------------------------------------------------
 # the service layer the worker calls
 # --------------------------------------------------------------------------
 
@@ -351,3 +387,32 @@ def test_visibility_translates_to_tiktok_privacy_values():
     assert tiktok_privacy_for("unlisted") in api.PRIVACY_LEVELS
     with pytest.raises(ValueError):
         tiktok_privacy_for("PUBLIC_TO_SELF")  # the value the old code invented
+
+
+# --------------------------------------------------------------------------
+# the endpoints a browser actually hits
+# --------------------------------------------------------------------------
+
+def _api_client():
+    from fastapi.testclient import TestClient
+    from main import app
+    return TestClient(app)
+
+
+def test_the_auth_url_endpoint_offers_a_pkce_challenge(secrets_dir, monkeypatch):
+    monkeypatch.setattr(settings, "TIKTOK_REDIRECT_URI",
+                        "http://localhost:5001/api/tiktok/oauth2callback")
+    response = _api_client().post("/api/tiktok/auth-url")
+    assert response.status_code == 200
+    auth_url = response.json()["auth_url"]
+    assert "code_challenge=" in auth_url, "TikTok rejects an authorize request without PKCE"
+    assert "code_challenge_method=S256" in auth_url
+    assert api.load_token() is None, "offering a consent link must not store anything"
+
+
+def test_the_callback_refuses_a_state_the_server_does_not_know(secrets_dir):
+    # A restart between opening the link and landing here loses the verifier, so
+    # the exchange could only fail with an opaque invalid_grant from TikTok.
+    response = _api_client().get("/api/tiktok/oauth2callback?code=CODE&state=never-issued")
+    assert response.status_code == 400
+    assert "no longer known to the server" in response.text

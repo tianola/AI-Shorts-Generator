@@ -81,12 +81,21 @@ def _resolve_tiktok_privacy(value: Optional[str]) -> str:
 
 @router.post("/tiktok/auth-url")
 async def generate_tiktok_auth_url(redirect_uri: Optional[str] = None):
-    """The TikTok consent URL to open once, which returns to the callback below."""
+    """The TikTok consent URL to open once, which returns to the callback below.
+
+    TikTok insists on PKCE, so the verifier is minted here and kept beside the
+    state until the callback spends it.
+    """
     from services import tiktok_content_api as api
     try:
         state = api.new_state()
-        _TIKTOK_OAUTH_STATES[state] = (redirect_uri or settings.TIKTOK_REDIRECT_URI)
-        return {"auth_url": api.authorization_url(state=state, target_redirect_uri=redirect_uri),
+        verifier = api.new_code_verifier()
+        _TIKTOK_OAUTH_STATES[state] = {
+            "redirect_uri": redirect_uri or settings.TIKTOK_REDIRECT_URI,
+            "code_verifier": verifier,
+        }
+        return {"auth_url": api.authorization_url(state=state, target_redirect_uri=redirect_uri,
+                                                  code_challenge=api.pkce_challenge(verifier)),
                 "state": state,
                 "redirect_uri": redirect_uri or settings.TIKTOK_REDIRECT_URI}
     except api.TikTokAPIError as e:
@@ -105,9 +114,19 @@ async def tiktok_oauth2_callback(code: Optional[str] = None, state: Optional[str
     if not code:
         return HTMLResponse(_tiktok_page("TikTok connection failed",
                                          "<p class='bad'>No authorization code was returned.</p>"), status_code=400)
-    redirect = _TIKTOK_OAUTH_STATES.pop(state, None) or settings.TIKTOK_REDIRECT_URI
+    pending = _TIKTOK_OAUTH_STATES.pop(state, None)
+    if state and pending is None:
+        # The verifier only ever lives in this dict: a restart between opening
+        # the consent screen and landing here makes the exchange impossible.
+        return HTMLResponse(_tiktok_page(
+            "TikTok connection failed",
+            "<p class='bad'>This sign-in attempt is no longer known to the server "
+            "(it was used once already, or the app restarted since). Open Connect "
+            "again to get a fresh link.</p>"), status_code=400)
+    pending = pending or {}
+    redirect = pending.get("redirect_uri") or settings.TIKTOK_REDIRECT_URI
     try:
-        token = api.exchange_code(code, redirect)
+        token = api.exchange_code(code, redirect, code_verifier=pending.get("code_verifier"))
     except Exception as e:
         return HTMLResponse(_tiktok_page("TikTok connection failed",
                                          f"<p class='bad'>{_escape(str(e))}</p>"), status_code=500)

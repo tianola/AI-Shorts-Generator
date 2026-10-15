@@ -19,7 +19,14 @@ the Content Posting API product and the ``video.publish`` scope granted, plus an
 OAuth authorisation from the account that should own the posts. A browser
 ``session_id`` cannot do any of this, which is why the legacy
 ``storage/secrets/tiktok_token.json`` is no longer treated as publishable.
+
+The consent screen **requires PKCE**: without ``code_challenge`` it refuses with
+"code_challenge" as the named problem and returns no code at all (hit live on
+2026-10-15 with a real app), so ``/auth-url`` generates a verifier, sends its
+S256 challenge, and the callback hands the verifier to the token exchange.
 """
+import base64
+import hashlib
 import json
 import math
 import os
@@ -180,8 +187,14 @@ def redirect_uri() -> str:
     return settings.TIKTOK_REDIRECT_URI
 
 
-def authorization_url(state: Optional[str] = None, target_redirect_uri: Optional[str] = None) -> str:
-    """The URL to send the user to once. TikTok redirects back with ?code=."""
+def authorization_url(state: Optional[str] = None, target_redirect_uri: Optional[str] = None,
+                      code_challenge: Optional[str] = None) -> str:
+    """The URL to send the user to once. TikTok redirects back with ?code=.
+
+    ``code_challenge`` is not optional in practice — TikTok's consent screen
+    rejects a request without it — but it stays a parameter so a caller that
+    already holds a verifier pair is the one that decides.
+    """
     from urllib.parse import urlencode
     key, _secret = get_client_credentials()
     params = {
@@ -192,11 +205,28 @@ def authorization_url(state: Optional[str] = None, target_redirect_uri: Optional
     }
     if state:
         params["state"] = state
+    if code_challenge:
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"
     return f"{AUTHORIZE_URL}?{urlencode(params)}"
 
 
 def new_state() -> str:
     return secrets.token_urlsafe(16)
+
+
+def new_code_verifier() -> str:
+    """A PKCE verifier: 43-128 characters of the unreserved base64url set.
+
+    ``token_urlsafe(64)`` yields 86 of them, which is inside RFC 7636's range.
+    """
+    return secrets.token_urlsafe(64)
+
+
+def pkce_challenge(code_verifier: str) -> str:
+    """S256: base64url of the SHA-256 of the verifier, padding stripped."""
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
 def _request_token(form: Dict[str, Any]) -> Dict[str, Any]:
@@ -219,13 +249,21 @@ def _request_token(form: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def exchange_code(code: str, target_redirect_uri: Optional[str] = None) -> Dict[str, Any]:
-    """Turn an authorization code into a stored token."""
-    payload = _request_token({
+def exchange_code(code: str, target_redirect_uri: Optional[str] = None,
+                  code_verifier: Optional[str] = None) -> Dict[str, Any]:
+    """Turn an authorization code into a stored token.
+
+    The verifier must be the one whose challenge went up to the consent screen,
+    otherwise TikTok answers `invalid_grant`.
+    """
+    form: Dict[str, Any] = {
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": target_redirect_uri or redirect_uri(),
-    })
+    }
+    if code_verifier:
+        form["code_verifier"] = code_verifier
+    payload = _request_token(form)
     token = save_token(_token_from_response(payload))
     try:
         token["username"] = fetch_username(token["access_token"])
