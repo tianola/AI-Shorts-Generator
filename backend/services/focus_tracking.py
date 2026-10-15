@@ -136,11 +136,19 @@ def compute_smooth_yolo_trajectory(
     target_w: int = 1080,
     target_h: int = 1920,
     deadband_pct: float = 0.05,
-    ema_alpha: float = 0.35
+    ema_alpha: float = 0.35,
+    focus_boxes: Optional[list] = None
 ) -> list:
     """
     Build a smooth (timestamp, crop_x, crop_y, crop_w, crop_h) trajectory.
     Uses Deadband filtering and Exponential Moving Average (EMA) to prevent camera jitter.
+
+    ``focus_boxes`` ([(timestamp, (x, y, w, h)), ...]) pins the follow to one
+    subject — the person who is talking, or the object the clip is about.
+    Without it the largest box in each frame wins, which in a three-person
+    shot drifts to whoever happens to be closest to the camera. Samples where
+    the focus is not in frame are skipped, so the crop holds its last position
+    through a brief occlusion instead of jumping to a bystander.
     """
     crop_w = int(src_h * target_w / target_h)
     crop_h = src_h
@@ -155,7 +163,18 @@ def compute_smooth_yolo_trajectory(
     raw_centers = []
     valid_ts = []
 
+    focus_map = {round(float(ts), 4): box for ts, box in (focus_boxes or [])}
     for ts, dets in samples:
+        if focus_map:
+            box = focus_map.get(round(float(ts), 4))
+            if box is None:
+                continue
+            x, y, w, h = box
+            cx, cy = x + w / 2.0, y + h / 2.0
+            raw_centers.append((cx, cy))
+            valid_ts.append(ts)
+            continue
+
         persons = [d for d in dets if d["cls"] == 0]
         if persons:
             pcenters = _person_centers(dets)
@@ -275,10 +294,11 @@ def build_face_crop_filter(
     src_w: int,
     src_h: int,
     target_w: int = 1080,
-    target_h: int = 1920
+    target_h: int = 1920,
+    focus_boxes: Optional[list] = None
 ) -> str:
-    """Produce the ffmpeg crop filter for YOLO trajectory."""
-    traj = compute_smooth_yolo_trajectory(samples, src_w, src_h, target_w, target_h)
+    """Produce the ffmpeg crop filter for the YOLO trajectory."""
+    traj = compute_smooth_yolo_trajectory(samples, src_w, src_h, target_w, target_h, focus_boxes=focus_boxes)
     if not traj:
         return ""
     from services.vertical import _build_timed_crop

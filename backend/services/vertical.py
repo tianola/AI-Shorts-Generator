@@ -229,15 +229,23 @@ def build_vertical_filter(
     Modes:
       - 'static': uniform center crop
       - 'fit_blur': centered fit over an atmospheric blurred 9:16 background
-      - 'split_screen': two-speaker stacked split (requires 2 detected persons)
-      - 'single_speaker' / 'face_tracked': smooth YOLO face-follow crop
+      - 'split_screen': two-speaker stacked split (only for a real two-shot)
+      - 'single_speaker' / 'face_tracked': smooth YOLO follow of the subject
+
+    'auto' resolves through :mod:`services.reframe_plan`, which also names the
+    subject to follow: the person carrying the clip, or the object the clip is
+    about. The analysis is memoised per file, so the layout question and the
+    crop question stop paying for the same YOLO sampling pass twice.
     """
+    from services import reframe_plan
+
+    analysis = reframe_plan.analyse_clip(input_video)
     if mode is None or mode in ("auto", "adaptive", ""):
-        from services.smart_crop import detect_adaptive_layout
-        mode = detect_adaptive_layout(input_video)
+        mode, focus = reframe_plan.decide_layout(analysis)
+    else:
+        focus = analysis.get("focus")
 
     from services.focus_tracking import (
-        sample_frames,
         build_split_screen_filter,
         build_face_crop_filter,
         build_blurred_fit_filter as _build_blur,
@@ -252,18 +260,25 @@ def build_vertical_filter(
 
     if mode == "split_screen":
         try:
-            samples = sample_frames(input_video, sample_interval=0.5)
-            persons_list = []
-            for _ts, dets in samples:
-                p = [d for d in dets if d["cls"] == 0]
-                if len(p) >= 2:
-                    p.sort(key=lambda d: d["box"][0])
-                    persons_list = p
-                    break
-            if len(persons_list) >= 2:
+            two_shot = analysis.get("two_shot")
+            if two_shot:
+                boxes = [reframe_plan.representative_box(t) for t in two_shot]
+            else:
+                # An explicit request is honoured even when the detector found
+                # no qualifying pair: take the two people the clip actually
+                # shows, from the analysis rather than the first lucky frame.
+                ranked = sorted(
+                    analysis.get("tracks") or [],
+                    key=lambda tr: len(tr["timeline"]),
+                    reverse=True,
+                )
+                if len(ranked) < 2:
+                    ranked = []
+                boxes = [reframe_plan.representative_box(tr) for tr in ranked[:2]]
+            if len(boxes) == 2:
                 _src_w, _src_h = _probe_size(input_video)
                 return build_split_screen_filter(
-                    persons_list[0]["box"], persons_list[1]["box"],
+                    boxes[0], boxes[1],
                     src_w=_src_w, src_h=_src_h,
                     target_w=target_width, target_h=target_height,
                 ).replace("[outv]", "[vsingle]")
@@ -274,11 +289,12 @@ def build_vertical_filter(
     if mode in ("face_tracked", "single_speaker"):
         try:
             src_w, src_h = _probe_size(input_video)
-            samples = sample_frames(input_video, sample_interval=0.5)
+            samples = analysis.get("samples") or []
             if samples:
                 frag = build_face_crop_filter(
                     samples, src_w, src_h,
                     target_width, target_height,
+                    focus_boxes=(focus or {}).get("boxes"),
                 )
                 if frag:
                     return f"[0:v]{frag},scale={target_width}:{target_height}:force_original_aspect_ratio=decrease[vsingle]"

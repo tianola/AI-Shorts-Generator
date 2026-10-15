@@ -4,50 +4,23 @@ import os
 import subprocess
 import cv2
 from services.vertical import make_vertical, make_vertical_static
-from services.focus_tracking import sample_frames, build_split_screen_filter, build_blurred_fit_filter
+from services.focus_tracking import build_split_screen_filter, build_blurred_fit_filter
 from config import settings
 from utils.logger import job_info, job_error
 
 
 def detect_adaptive_layout(video_path: str, sample_interval: float = 0.5) -> str:
-    """
-    Intelligently analyze video content across sampled frames to automatically select the optimal layout:
-      - 'split_screen': 2 distinct separated speakers (e.g. podcast / interview).
-      - 'single_speaker': 1 active speaker / tracked focal person.
-      - 'fit_blur': wide landscape, screen share, gaming, or scene without clear faces.
+    """Pick the layout a human editor would pick for this clip.
+
+    Delegates to :mod:`services.reframe_plan`, which requires exactly two
+    persistent, comparably sized people before it stacks the frame — the old
+    rule here asked whether two boxes existed anywhere in the clip and said
+    yes to a presenter with a passer-by, or a three-person shot.
     """
     try:
-        samples = sample_frames(video_path, sample_interval=sample_interval)
-        if not samples:
-            return "single_speaker"
-
-        two_speaker_count = 0
-        single_speaker_count = 0
-        total_samples = len(samples)
-
-        for ts, dets in samples:
-            persons = [d for d in dets if d.get("cls") == 0 and d.get("conf", 0) >= 0.25]
-            if len(persons) >= 2:
-                # Check horizontal separation between the two primary persons
-                p_sorted = sorted(persons, key=lambda d: d["box"][0])
-                box1 = p_sorted[0]["box"]
-                box2 = p_sorted[1]["box"]
-                c1 = box1[0] + box1[2] / 2.0
-                c2 = box2[0] + box2[2] / 2.0
-                # If they are separated by at least 15% of width (~200px)
-                if abs(c2 - c1) >= 200:
-                    two_speaker_count += 1
-                else:
-                    single_speaker_count += 1
-            elif len(persons) == 1:
-                single_speaker_count += 1
-
-        if total_samples > 0 and (two_speaker_count / total_samples) >= 0.30:
-            return "split_screen"
-        elif total_samples > 0 and ((single_speaker_count + two_speaker_count) / total_samples) >= 0.20:
-            return "single_speaker"
-        else:
-            return "fit_blur"
+        from services import reframe_plan
+        mode, _focus = reframe_plan.resolve(video_path, sample_interval=sample_interval)
+        return mode
     except Exception as e:
         job_error(0, f"Adaptive layout detection error: {e}")
         return "single_speaker"
@@ -76,18 +49,16 @@ def smart_crop_video(
 
     if mode == "split_screen":
         try:
-            samples = sample_frames(input_file, sample_interval=0.5)
-            # Find sample with at least 2 people
-            persons_list = []
-            for ts, dets in samples:
-                p = [d for d in dets if d["cls"] == 0]
-                if len(p) >= 2:
-                    p.sort(key=lambda d: d["box"][0])  # left to right
-                    persons_list = p
-                    break
-            if len(persons_list) >= 2:
-                p1_box = persons_list[0]["box"]
-                p2_box = persons_list[1]["box"]
+            from services import reframe_plan
+            analysis = reframe_plan.analyse_clip(input_file)
+            two_shot = analysis.get("two_shot")
+            if two_shot:
+                boxes = [reframe_plan.representative_box(t) for t in two_shot]
+            else:
+                ranked = sorted(analysis.get("tracks") or [], key=lambda tr: len(tr["timeline"]), reverse=True)
+                boxes = [reframe_plan.representative_box(tr) for tr in ranked[:2]] if len(ranked) >= 2 else []
+            if len(boxes) == 2:
+                p1_box, p2_box = boxes
                 # Probe real source dimensions — never assume 1920x1080
                 _cap = cv2.VideoCapture(input_file)
                 _src_w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if _cap.isOpened() else 1920
