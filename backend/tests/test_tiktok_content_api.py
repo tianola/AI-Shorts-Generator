@@ -306,9 +306,24 @@ def test_oauth_error_from_the_token_endpoint_is_surfaced(monkeypatch):
     assert "code expired" in str(exc.value)
 
 
+def test_every_endpoint_lives_on_a_host_tiktok_actually_publishes():
+    # ``identity.tiktok.com`` shows up in some write-ups of the v2 flow but is not
+    # in DNS at all (NXDOMAIN from a public resolver, 2026-10-16); an exchange
+    # pointed there dies in getaddrinfo before TikTok ever sees the code.
+    from urllib.parse import urlparse
+    resolvable = {"www.tiktok.com", "open.tiktokapis.com"}
+    endpoints = (api.AUTHORIZE_URL, api.TOKEN_URL, api.USER_INFO_URL,
+                 api.DIRECT_POST_INIT_URL, api.INBOX_INIT_URL, api.STATUS_URL)
+    for url in endpoints:
+        assert urlparse(url).hostname in resolvable, url
+    assert api.TOKEN_URL == "https://open.tiktokapis.com/v2/oauth/token/"
+
+
 # --------------------------------------------------------------------------
 # PKCE — TikTok's consent screen refuses an authorize request without a challenge
 # --------------------------------------------------------------------------
+
+
 
 def test_pkce_challenge_is_tiktoks_hex_not_the_rfc_base64url():
     # RFC 7636 says base64url(-digest, unpadded); TikTok's Login Kit docs say

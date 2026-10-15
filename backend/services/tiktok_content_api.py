@@ -7,7 +7,7 @@ This replaces the publish path that used to invent a video id after a
 Endpoints (Content Posting API v2):
 
   authorize  GET  https://www.tiktok.com/v2/auth/authorize/
-  token      POST https://identity.tiktok.com/v2/oauth/token/
+  token      POST https://open.tiktokapis.com/v2/oauth/token/
   init       POST https://open.tiktokapis.com/v2/post/publish/            (DIRECT_PUBLISH / DRAFT)
              POST https://open.tiktokapis.com/v2/post/publish/video/init/ (UPLOAD, lands in the user's inbox)
   chunk      PUT  {upload_url from init}   Content-Range: bytes {first}-{last}/{total}
@@ -43,8 +43,11 @@ import requests
 from utils.logger import logger
 
 AUTHORIZE_URL = "https://www.tiktok.com/v2/auth/authorize/"
-TOKEN_URL = "https://identity.tiktok.com/v2/oauth/token/"
 API_ROOT = "https://open.tiktokapis.com"
+# The token endpoint is on the API host, not ``identity.tiktok.com`` — that name
+# is not published in DNS at all, so an exchange pointed there fails before any
+# request is sent.
+TOKEN_URL = f"{API_ROOT}/v2/oauth/token/"
 USER_INFO_URL = f"{API_ROOT}/v2/user/info/"
 DIRECT_POST_INIT_URL = f"{API_ROOT}/v2/post/publish/"
 INBOX_INIT_URL = f"{API_ROOT}/v2/post/publish/video/init/"
