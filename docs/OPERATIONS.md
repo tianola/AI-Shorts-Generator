@@ -60,6 +60,18 @@ REM the pipeline, in its own window
 (`ModuleNotFoundError: No module named 'utils'`). Host and port come from `.env`
 (`API_HOST`, `API_PORT=5001`); the health route is `/api/health`.
 
+`start_ai_shorts.ps1` starts both of those for you, and until 2026-10-15 it could not:
+it looked for `backend\.venv\Scripts\AiShortsAPI.exe`, a console shim in a venv that is
+not the one this project runs on. `backend\.venv` still exists on disk with a full
+`site-packages`, but its interpreter refuses to start (`failed to locate pyvenv.cfg`),
+so `Test-Path` passed, `Start-Process` returned a PID, and the script printed
+"AI Shorts Generator started" over two processes that were already dead. The launcher now
+probes each candidate venv by *executing* it (`.venv` at the repo root first), starts
+`python.exe main.py` / `python.exe worker.py`, and only reports success after
+`/api/health` answers 200 — it exits 0 early if something already answers there.
+Do not "repair" `backend\.venv`; the root `.venv` (Python 3.14) is the install the tests
+and the running app use.
+
 **`POST /api/jobs/{id}/restart` is not a dry run.** It wipes the job directory, re-downloads,
 re-renders **and re-uploads** every clip if the job row carries `auto_upload = 1` — the flag
 is stored per job, set when the job is created, and `upload_privacy NULL` falls back to
