@@ -62,7 +62,10 @@ def secrets_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "STORAGE_ROOT", str(tmp_path))
     monkeypatch.setattr(settings, "TIKTOK_CLIENT_KEY", "test_key")
     monkeypatch.setattr(settings, "TIKTOK_CLIENT_SECRET", "test_secret")
+    # Most of these tests exercise DRAFT, which only a Direct-Post-approved app
+    # can use; the upload-only reality is covered by its own tests below.
     monkeypatch.setattr(settings, "TIKTOK_POST_MODE", "DRAFT")
+    monkeypatch.setattr(settings, "TIKTOK_SCOPES", "user.info.basic,video.publish")
     return tmp_path / "secrets"
 
 
@@ -307,18 +310,20 @@ def test_oauth_error_from_the_token_endpoint_is_surfaced(monkeypatch):
 # PKCE — TikTok's consent screen refuses an authorize request without a challenge
 # --------------------------------------------------------------------------
 
-def test_pkce_challenge_matches_the_rfc_7636_vector():
-    # The canonical verifier/challenge pair from RFC 7636 Appendix B. If the
-    # encoding ever grows padding or leaves the base64url alphabet, TikTok
-    # rejects the exchange and the failure looks like a bad app secret.
+def test_pkce_challenge_is_tiktoks_hex_not_the_rfc_base64url():
+    # RFC 7636 says base64url(-digest, unpadded); TikTok's Login Kit docs say
+    # "you must use hex encoding of SHA256". A spec-correct challenge is refused
+    # by the consent screen with code_challenge named as the problem, exactly like
+    # a missing one — verified live 2026-10-15. Vector: RFC 7636 Appendix B verifier.
     verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-    assert api.pkce_challenge(verifier) == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+    assert api.pkce_challenge(verifier) == \
+        "13d31e961a1ad8ec2f16b10c4c982e0876a878ad6df144566ee1894acb70f9c3"
 
 
 def test_generated_verifier_is_within_the_pkce_range():
     verifier = api.new_code_verifier()
     assert 43 <= len(verifier) <= 128
-    assert all(char.isalnum() or char in "-_" for char in verifier)
+    assert all(char in "0123456789abcdef" for char in verifier)
 
 
 def test_authorize_url_carries_the_challenge_only_when_one_is_given(secrets_dir):
@@ -326,6 +331,31 @@ def test_authorize_url_carries_the_challenge_only_when_one_is_given(secrets_dir)
     with_challenge = api.authorization_url(state="S", code_challenge="CHAL")
     assert "code_challenge=CHAL" in with_challenge
     assert "code_challenge_method=S256" in with_challenge
+
+
+def test_the_consent_screen_asks_for_the_scopes_the_app_holds(secrets_dir, monkeypatch):
+    # An app with only "Upload to TikTok" has no video.publish in its scope list,
+    # and asking for a scope it lacks makes the consent screen refuse everything.
+    monkeypatch.setattr(settings, "TIKTOK_SCOPES", "user.info.basic,video.upload")
+    url = api.authorization_url(state="S", code_challenge="CHAL")
+    assert "video.upload" in url
+    assert "video.publish" not in url
+
+
+def test_draft_and_direct_publish_are_refused_locally_without_video_publish(secrets_dir, monkeypatch, tmp_path):
+    # Both go through the direct-post init endpoint. Failing here, before any
+    # network call, beats a TikTok rejection that names some other parameter.
+    monkeypatch.setattr(settings, "TIKTOK_SCOPES", "user.info.basic,video.upload")
+    for mode in ("DRAFT", "DIRECT_PUBLISH"):
+        with pytest.raises(api.TikTokAPIError) as exc:
+            api.upload_video(_video(tmp_path, 10), "hi", "SELF_ONLY", post_mode=mode, dry_run=True)
+        assert "video.publish" in str(exc.value)
+
+
+def test_upload_mode_needs_no_direct_post_rights(secrets_dir, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "TIKTOK_SCOPES", "user.info.basic,video.upload")
+    plan = api.upload_video(_video(tmp_path, 10), "hi", "SELF_ONLY", post_mode="UPLOAD", dry_run=True)
+    assert plan["init_url"].endswith("/v2/post/publish/video/init/")
 
 
 def test_the_token_exchange_sends_the_verifier_that_paired_with_the_challenge(secrets_dir, monkeypatch):
@@ -407,6 +437,9 @@ def test_the_auth_url_endpoint_offers_a_pkce_challenge(secrets_dir, monkeypatch)
     auth_url = response.json()["auth_url"]
     assert "code_challenge=" in auth_url, "TikTok rejects an authorize request without PKCE"
     assert "code_challenge_method=S256" in auth_url
+    offered = auth_url.split("code_challenge=")[1].split("&")[0]
+    assert len(offered) == 64 and all(char in "0123456789abcdef" for char in offered), \
+        "TikTok wants the hex digest; the RFC's base64url form is refused"
     assert api.load_token() is None, "offering a consent link must not store anything"
 
 

@@ -211,11 +211,20 @@ class Settings(BaseSettings):
         default="http://localhost:5001/api/tiktok/oauth2callback",
         description="Must match an allowed redirect URI on the TikTok app."
     )
+    TIKTOK_SCOPES: str = Field(
+        default="user.info.basic,video.upload",
+        description="Scopes the TikTok app has actually been granted, comma separated. "
+                    "video.upload is what a Content Posting app gets by default "
+                    "('Upload to TikTok'); video.publish only appears once the app is "
+                    "approved for Direct Post, and asking for a scope the app does not "
+                    "have makes the consent screen refuse the connection."
+    )
     TIKTOK_POST_MODE: str = Field(
-        default="DRAFT",
-        description="DRAFT saves each publish to the account's drafts (safe default "
-                    "for a freshly connected app), DIRECT_PUBLISH posts it outright, "
-                    "UPLOAD drops it in the user's inbox for a manual tap."
+        default="UPLOAD",
+        description="UPLOAD drops the clip in the account's inbox for a manual tap "
+                    "(the safe default, and the only mode a video.upload app can use). "
+                    "DRAFT saves to the account's drafts and DIRECT_PUBLISH posts "
+                    "outright — both need the app to hold video.publish."
     )
 
     @field_validator('TIKTOK_POST_MODE')

@@ -15,17 +15,20 @@ Endpoints (Content Posting API v2):
   user info  GET  https://open.tiktokapis.com/v2/user/info/
 
 Credentials are a TikTok for Developers *app* (client key + client secret) with
-the Content Posting API product and the ``video.publish`` scope granted, plus an
-OAuth authorisation from the account that should own the posts. A browser
-``session_id`` cannot do any of this, which is why the legacy
-``storage/secrets/tiktok_token.json`` is no longer treated as publishable.
+the Content Posting API product, the scopes that product actually granted the
+app (``video.upload`` by default, ``video.publish`` only after Direct Post is
+approved — see ``TIKTOK_SCOPES``), plus an OAuth authorisation from the account
+that should own the posts. A browser ``session_id`` cannot do any of this, which
+is why the legacy ``storage/secrets/tiktok_token.json`` is no longer treated as
+publishable.
 
 The consent screen **requires PKCE**: without ``code_challenge`` it refuses with
 "code_challenge" as the named problem and returns no code at all (hit live on
 2026-10-15 with a real app), so ``/auth-url`` generates a verifier, sends its
 S256 challenge, and the callback hands the verifier to the token exchange.
+TikTok's flavour of S256 is the *hex* digest of SHA-256 rather than the base64url
+of RFC 7636 — a spec-correct challenge is rejected the same way a missing one is.
 """
-import base64
 import hashlib
 import json
 import math
@@ -47,14 +50,33 @@ DIRECT_POST_INIT_URL = f"{API_ROOT}/v2/post/publish/"
 INBOX_INIT_URL = f"{API_ROOT}/v2/post/publish/video/init/"
 STATUS_URL = f"{API_ROOT}/v2/post/publish/status/fetch/"
 
-SCOPES = "user.info.basic,video.publish"
+# ``video.publish`` is only granted to apps approved for the Content Posting
+# API's *Direct Post* feature; an app that has only "Upload to TikTok" sees
+# ``video.upload`` in its scope list. Asking for a scope the app does not have
+# makes the consent screen refuse the request outright — hit live on 2026-10-15,
+# where the app's own scope list had no ``video.publish`` at all.
+BASIC_SCOPE = "user.info.basic"
+UPLOAD_SCOPE = "video.upload"
+PUBLISH_SCOPE = "video.publish"
+
+
+def requested_scopes() -> str:
+    """The scopes to put on the consent screen, as configured for this app."""
+    from config import settings
+    return (settings.TIKTOK_SCOPES or f"{BASIC_SCOPE},{UPLOAD_SCOPE}").strip()
+
+
+def has_direct_post_rights() -> bool:
+    return PUBLISH_SCOPE in [s.strip() for s in requested_scopes().split(",")]
+
 
 # Content Posting API privacy enum. TikTok has no 'unlisted': the closest thing
 # to a link-only post is follower-only, and 'private' means a true self-only post.
 PRIVACY_LEVELS = ("PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY")
 
-# DIRECT_PUBLISH posts outright (needs the app to have passed review for the
-# product), DRAFT parks it in the account's drafts, UPLOAD parks it in the inbox.
+# UPLOAD parks the clip in the account's inbox and needs only ``video.upload``.
+# DRAFT and DIRECT_PUBLISH both go through the direct-post init endpoint and
+# therefore need the app to hold ``video.publish``.
 POST_MODES = ("DIRECT_PUBLISH", "DRAFT", "UPLOAD")
 
 MAX_VIDEO_BYTES = 4 * 1024 * 1024 * 1024  # the API's 4 GB ceiling
@@ -199,7 +221,7 @@ def authorization_url(state: Optional[str] = None, target_redirect_uri: Optional
     key, _secret = get_client_credentials()
     params = {
         "client_key": key,
-        "scope": SCOPES,
+        "scope": requested_scopes(),
         "response_type": "code",
         "redirect_uri": target_redirect_uri or redirect_uri(),
     }
@@ -216,17 +238,19 @@ def new_state() -> str:
 
 
 def new_code_verifier() -> str:
-    """A PKCE verifier: 43-128 characters of the unreserved base64url set.
-
-    ``token_urlsafe(64)`` yields 86 of them, which is inside RFC 7636's range.
-    """
-    return secrets.token_urlsafe(64)
+    """64 hex characters — inside RFC 7636's 43-128 range, and a charset TikTok
+    cannot object to."""
+    return secrets.token_hex(32)
 
 
 def pkce_challenge(code_verifier: str) -> str:
-    """S256: base64url of the SHA-256 of the verifier, padding stripped."""
-    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    """TikTok's S256 is ``hexdigest`` of the SHA-256, not RFC 7636's base64url.
+
+    A spec-correct base64url challenge is *named* by the consent screen as a bad
+    ``code_challenge`` even though it is present, so this deviates from the RFC on
+    purpose. Changing it back re-breaks the connection.
+    """
+    return hashlib.sha256(code_verifier.encode("ascii")).hexdigest()
 
 
 def _request_token(form: Dict[str, Any]) -> Dict[str, Any]:
@@ -436,9 +460,15 @@ def upload_video(
 
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found at {video_path}")
-    mode = (post_mode or settings.TIKTOK_POST_MODE or "DRAFT").upper()
+    mode = (post_mode or settings.TIKTOK_POST_MODE or "UPLOAD").upper()
     if mode not in POST_MODES:
         raise TikTokAPIError(f"Unknown post_mode '{mode}'. Expected one of {', '.join(POST_MODES)}.")
+    if mode != "UPLOAD" and not has_direct_post_rights():
+        raise TikTokAPIError(
+            f"post_mode {mode} goes through the direct-post endpoint, which needs the "
+            f"'{PUBLISH_SCOPE}' scope the app has not been granted. Use "
+            f"TIKTOK_POST_MODE=UPLOAD, or apply for Direct Post and set "
+            f"TIKTOK_SCOPES=user.info.basic,{PUBLISH_SCOPE}.")
     if privacy_level not in PRIVACY_LEVELS:
         raise TikTokAPIError(f"Unknown privacy_level '{privacy_level}'. Expected one of {', '.join(PRIVACY_LEVELS)}.")
 

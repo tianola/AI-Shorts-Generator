@@ -131,11 +131,17 @@ async def tiktok_oauth2_callback(code: Optional[str] = None, state: Optional[str
         return HTMLResponse(_tiktok_page("TikTok connection failed",
                                          f"<p class='bad'>{_escape(str(e))}</p>"), status_code=500)
     username = token.get("username") or "your account"
+    mode = settings.TIKTOK_POST_MODE
+    caveat = ("they will land in your TikTok inbox for you to post by hand"
+              if mode == "UPLOAD" else
+              "the app holds video.publish, so nothing stops it posting on its own"
+              if mode == "DIRECT_PUBLISH" else
+              "they will sit in your drafts until you publish them")
     return HTMLResponse(_tiktok_page(
         "TikTok connected",
         f"<p class='ok'>Signed in as {_escape(username)}. Clips will be sent as "
-        f"<b>{_escape(settings.TIKTOK_POST_MODE)}</b> — change TIKTOK_POST_MODE to "
-        f"DIRECT_PUBLISH once you trust the output.</p>"))
+        f"<b>{_escape(mode)}</b> — {caveat}. Scopes granted: "
+        f"{_escape(api.requested_scopes())}.</p>"))
 
 
 class TikTokClientSecretsRequest(BaseModel):

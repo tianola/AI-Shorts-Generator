@@ -70,6 +70,8 @@ def get_tiktok_auth_status() -> Dict[str, Any]:
         "has_token": authenticated,
         "client_configured": status["client_configured"],
         "post_mode": status["post_mode"],
+        "scopes": api.requested_scopes(),
+        "direct_post_available": api.has_direct_post_rights(),
         "connected_at": status.get("expires_at"),
         "token_path": status["token_path"] if authenticated else str(legacy_file.resolve()),
         "note": None if authenticated else (
