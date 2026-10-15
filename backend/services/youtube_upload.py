@@ -299,6 +299,11 @@ def upload_clip_to_youtube(
 
     job_info(0, f"YouTube Shorts upload SUCCESS: {shorts_url}")
 
+    # Every real publish resets the pacing clock, whichever path made it: the
+    # worker's per-clip upload, a batch sweep, or a one-click from the UI.
+    from utils.upload_pacing import note_upload
+    note_upload("youtube")
+
     return {
         "success": True,
         "video_id": video_id,
@@ -314,10 +319,15 @@ def upload_all_clips_for_job(
     db,
     privacy_status: str = "unlisted",
     category_id: str = "24",
-    clip_progress_callback = None
+    clip_progress_callback = None,
+    pace: bool = False,
+    stop=None
 ) -> Dict[str, Any]:
     """
     Batch upload all rendered clips from a specific job directly to YouTube Shorts.
+
+    ``pace`` spaces the publishes like the worker's per-clip path does; the API
+    endpoints leave it off, because a human pressing "upload" asked for them now.
     """
     from database.models import Clip, Job
     from datetime import datetime
@@ -400,6 +410,18 @@ def upload_all_clips_for_job(
         title = clip.title or f"Viral Moment #{clip.index + 1}"
         description = clip.description or "Watch this viral moment!"
         hashtags = clip.hashtags or ["#Shorts", "#Viral", "#Trending"]
+
+        if pace:
+            from utils.upload_pacing import wait_for_slot
+            waited = wait_for_slot("youtube", stop=stop)
+            if stop is not None and stop.is_set():
+                job_info(job_id, f"Lease lost during upload pacing; stopping the YouTube sweep before clip #{clip.index}")
+                results.append({"clip_id": clip.id, "clip_index": clip.index,
+                                "title": title, "status": "skipped",
+                                "reason": "lease lost during pacing"})
+                break
+            if waited:
+                job_info(job_id, f"⏳ Spacing the publish: waited {int(waited)} s")
 
         try:
             res = upload_clip_to_youtube(

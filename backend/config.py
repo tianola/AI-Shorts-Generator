@@ -177,6 +177,21 @@ class Settings(BaseSettings):
         default="unlisted",
         description="Visibility for automatic uploads: 'public', 'unlisted' or 'private'"
     )
+    UPLOAD_MIN_GAP_SECONDS: int = Field(
+        default=900,
+        ge=0,
+        le=86400,
+        description="Minimum spacing between publishes on the same platform. "
+                    "Time already spent rendering the next clip counts against it. "
+                    "0 disables pacing."
+    )
+    UPLOAD_GAP_JITTER_SECONDS: int = Field(
+        default=300,
+        ge=0,
+        le=86400,
+        description="Random extra delay added on top of UPLOAD_MIN_GAP_SECONDS, so "
+                    "the cadence is not exactly repeatable."
+    )
 
     @field_validator('AUTO_UPLOAD_PRIVACY')
     def validate_upload_privacy(cls, v):

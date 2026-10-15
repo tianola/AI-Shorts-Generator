@@ -188,10 +188,15 @@ def upload_clip_to_tiktok(
 def upload_all_clips_to_tiktok_for_job(
     job_id: int,
     db,
-    privacy_level: str = "PUBLIC_TO_SELF"
+    privacy_level: str = "PUBLIC_TO_SELF",
+    pace: bool = False,
+    stop=None
 ) -> Dict[str, Any]:
     """
     Batch upload all rendered clips from a specific job directly to TikTok.
+
+    ``pace`` spaces the publishes; harmless today (nothing records a TikTok
+    publish timestamp yet) and live as soon as the real API path does.
     """
     from database.models import Clip, Job
     from pathlib import Path
@@ -263,6 +268,17 @@ def upload_all_clips_to_tiktok_for_job(
         title = clip.title or f"Viral Moment #{clip.index + 1}"
         description = clip.description or "Watch this viral moment!"
         hashtags = clip.hashtags or ["#TikTok", "#Viral", "#FYP"]
+
+        if pace:
+            from utils.upload_pacing import wait_for_slot
+            waited = wait_for_slot("tiktok", stop=stop)
+            if stop is not None and stop.is_set():
+                results.append({"clip_id": clip.id, "clip_index": clip.index,
+                                "title": title, "status": "skipped",
+                                "reason": "lease lost during pacing"})
+                break
+            if waited:
+                logger.info(f"⏳ Spacing the TikTok publish: waited {int(waited)} s")
 
         try:
             res = upload_clip_to_tiktok(

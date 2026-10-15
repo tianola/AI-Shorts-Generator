@@ -468,11 +468,14 @@ async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_t
     return clips
 
 
-async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index: int, clip: dict, total_clips: int, clip_errors: list, video_path: str, words_file: str, source_title: Optional[str], source_channel: Optional[str], upload_privacy: str, tiktok_privacy: str, update_progress: Callable[[str, int], None]) -> None:
+async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index: int, clip: dict, total_clips: int, clip_errors: list, video_path: str, words_file: str, source_title: Optional[str], source_channel: Optional[str], upload_privacy: str, tiktok_privacy: str, update_progress: Callable[[str, int], None], lease_stop: Optional[threading.Event] = None) -> None:
     """Render one clip end to end: cut, crop, captions, effects, metadata, upload.
     Every failure is recorded in clip_errors instead of raised, because one bad
     segment must not throw away the other clips a job already rendered. The
     caller decides whether enough of them survived to call the job completed.
+
+    ``lease_stop`` lets an upload-pacing wait abort: a job another worker
+    already reclaimed must not keep publishing.
     """
     clip_start = clip["start"]
     clip_end = clip["end"]
@@ -850,28 +853,36 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             # YouTube Immediate Upload
             try:
                 from services.youtube_upload import get_youtube_auth_status, upload_clip_to_youtube
+                from utils.upload_pacing import await_for_slot
                 yt_status = get_youtube_auth_status()
                 if yt_status.get("authenticated"):
                     if clip_db.youtube_video_id:
                         job_info(job_id, f"Clip {index + 1} already on YouTube ({clip_db.youtube_video_id}), skipping re-upload")
                     else:
-                        job_info(job_id, f"⚡ [Auto-Upload] Uploading Clip {index + 1}/{total_clips} to YouTube Shorts as '{upload_privacy}'...")
-                        yt_res = upload_clip_to_youtube(
-                            video_path=final_path,
-                            title=final_title,
-                            description=metadata.get("description", ""),
-                            hashtags=metadata.get("hashtags", ["#Shorts"]),
-                            source_title=source_title,
-                            privacy_status=upload_privacy,
-                            job_id=job_id
-                        )
-                        clip_db.uploaded = True
-                        clip_db.youtube_video_id = yt_res.get("video_id")
-                        clip_db.published_at = datetime.utcnow()
-                        clip_db.upload_error = None
-                        db.commit()
-                        db.refresh(clip_db)
-                        job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} on YouTube: {yt_res.get('shorts_url')}")
+                        waited = await await_for_slot("youtube", stop=lease_stop)
+                        if lease_stop is not None and lease_stop.is_set():
+                            job_warning(job_id, f"Lease lost while pacing Clip {index + 1}; leaving it unpublished rather than racing another worker")
+                        else:
+                            if waited:
+                                job_info(job_id, f"⏳ Clip {index + 1} rendered; waited {int(waited)} s since the last publish to keep the channel's cadence human")
+                                update_progress(f"⏳ Clip {index + 1}/{total_clips} ready — spacing the publish ({int(waited)} s)...", current_clip_pct)
+                            job_info(job_id, f"⚡ [Auto-Upload] Uploading Clip {index + 1}/{total_clips} to YouTube Shorts as '{upload_privacy}'...")
+                            yt_res = upload_clip_to_youtube(
+                                video_path=final_path,
+                                title=final_title,
+                                description=metadata.get("description", ""),
+                                hashtags=metadata.get("hashtags", ["#Shorts"]),
+                                source_title=source_title,
+                                privacy_status=upload_privacy,
+                                job_id=job_id
+                            )
+                            clip_db.uploaded = True
+                            clip_db.youtube_video_id = yt_res.get("video_id")
+                            clip_db.published_at = datetime.utcnow()
+                            clip_db.upload_error = None
+                            db.commit()
+                            db.refresh(clip_db)
+                            job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} on YouTube: {yt_res.get('shorts_url')}")
             except Exception as yt_err:
                 job_warning(job_id, f"Per-clip YouTube auto-upload skipped/failed for Clip #{index + 1}: {yt_err}")
                 clip_db.upload_error = str(yt_err)
@@ -880,6 +891,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             # TikTok Immediate Upload
             try:
                 from services.tiktok_upload import get_tiktok_auth_status, upload_clip_to_tiktok
+                from utils.upload_pacing import await_for_slot
                 tt_status = get_tiktok_auth_status()
                 if tt_status.get("authenticated"):
                     # The upload used to leave no trace, so the
@@ -887,19 +899,25 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                     if clip_db.tiktok_video_id:
                         job_info(job_id, f"Clip {index + 1} already on TikTok ({clip_db.tiktok_video_id}), skipping re-upload")
                     else:
-                        job_info(job_id, f"⚡ [Auto-Upload] Publishing Clip {index + 1}/{total_clips} to TikTok as '{tiktok_privacy}'...")
-                        tt_res = upload_clip_to_tiktok(
-                            video_path=final_path,
-                            title=final_title,
-                            description=metadata.get("description", ""),
-                            hashtags=metadata.get("hashtags", ["#Shorts"]),
-                            source_title=source_title,
-                            privacy_level=tiktok_privacy
-                        )
-                        clip_db.tiktok_video_id = tt_res.get("video_id") or tt_res.get("tiktok_url")
-                        db.commit()
-                        db.refresh(clip_db)
-                        job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} Published to TikTok: {tt_res.get('tiktok_url')}")
+                        waited = await await_for_slot("tiktok", stop=lease_stop)
+                        if lease_stop is not None and lease_stop.is_set():
+                            job_warning(job_id, f"Lease lost while pacing TikTok publish for Clip {index + 1}; leaving it unpublished")
+                        else:
+                            if waited:
+                                job_info(job_id, f"⏳ Clip {index + 1}: waited {int(waited)} s since the last TikTok publish")
+                            job_info(job_id, f"⚡ [Auto-Upload] Publishing Clip {index + 1}/{total_clips} to TikTok as '{tiktok_privacy}'...")
+                            tt_res = upload_clip_to_tiktok(
+                                video_path=final_path,
+                                title=final_title,
+                                description=metadata.get("description", ""),
+                                hashtags=metadata.get("hashtags", ["#Shorts"]),
+                                source_title=source_title,
+                                privacy_level=tiktok_privacy
+                            )
+                            clip_db.tiktok_video_id = tt_res.get("video_id") or tt_res.get("tiktok_url")
+                            db.commit()
+                            db.refresh(clip_db)
+                            job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} Published to TikTok: {tt_res.get('tiktok_url')}")
             except Exception as tt_err:
                 job_warning(job_id, f"Per-clip TikTok auto-upload skipped/failed for Clip #{index + 1}: {tt_err}")
 
@@ -910,7 +928,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         return
 
 
-async def stage_publish_all_clips(job_id: int, db: Session, job: Job, upload_privacy: str, tiktok_privacy: str, update_progress: Callable[[str, int], None]) -> None:
+async def stage_publish_all_clips(job_id: int, db: Session, job: Job, upload_privacy: str, tiktok_privacy: str, update_progress: Callable[[str, int], None], lease_stop: Optional[threading.Event] = None) -> None:
     """Publish every rendered clip when the job asked for it on completion.
     Runs only for a job where every clip rendered: a partially failed job is
     left for a human to review, never swept into a channel automatically.
@@ -926,7 +944,8 @@ async def stage_publish_all_clips(job_id: int, db: Session, job: Job, upload_pri
                 yt_status = get_youtube_auth_status()
                 if yt_status.get("authenticated"):
                     job_info(job_id, "Auto-uploading to YouTube Shorts...")
-                    upload_all_clips_for_job(job_id, db, privacy_status=upload_privacy)
+                    upload_all_clips_for_job(job_id, db, privacy_status=upload_privacy,
+                                             pace=True, stop=lease_stop)
                     job_info(job_id, f"YouTube Shorts auto-upload complete for Job #{job_id}")
             except Exception as yt_err:
                 job_warning(job_id, f"YouTube auto-upload failed: {yt_err}")
@@ -935,7 +954,8 @@ async def stage_publish_all_clips(job_id: int, db: Session, job: Job, upload_pri
             try:
                 from services.tiktok_upload import upload_all_clips_to_tiktok_for_job
                 job_info(job_id, f"Auto-uploading to TikTok as '{tiktok_privacy}'...")
-                upload_all_clips_to_tiktok_for_job(job_id, db, privacy_level=tiktok_privacy)
+                upload_all_clips_to_tiktok_for_job(job_id, db, privacy_level=tiktok_privacy,
+                                                   pace=True, stop=lease_stop)
                 job_info(job_id, f"TikTok auto-upload complete for Job #{job_id}")
             except Exception as tt_err:
                 job_warning(job_id, f"TikTok auto-upload failed: {tt_err}")
@@ -1092,7 +1112,7 @@ async def process_job_async(job_id: int):
             await process_clip(db, job, job_id, job_dir, index, clip, total_clips,
                                clip_errors, video_path, words_file, source_title,
                                source_channel, upload_privacy, tiktok_privacy,
-                               update_progress)
+                               update_progress, lease_stop=lease_stop)
         # =====================
         # 6. COMPLETE JOB
         # =====================
@@ -1121,7 +1141,8 @@ async def process_job_async(job_id: int):
             # 7. AUTO-UPLOAD ON COMPLETION (YouTube & TikTok)
             # =========================================================
             await stage_publish_all_clips(job_id, db, job, upload_privacy,
-                                          tiktok_privacy, update_progress)
+                                          tiktok_privacy, update_progress,
+                                          lease_stop=lease_stop)
 
     except Exception as e:
         # Mark job as failed
