@@ -62,15 +62,17 @@ REM the pipeline, in its own window
 
 `start_ai_shorts.ps1` starts both of those for you, and until 2026-10-15 it could not:
 it looked for `backend\.venv\Scripts\AiShortsAPI.exe`, a console shim in a venv that is
-not the one this project runs on. `backend\.venv` still exists on disk with a full
-`site-packages`, but its interpreter refuses to start (`failed to locate pyvenv.cfg`),
-so `Test-Path` passed, `Start-Process` returned a PID, and the script printed
+not the one this project runs on. That venv existed with a full `site-packages`, but its
+interpreter refused to start (`failed to locate pyvenv.cfg` on every command), so
+`Test-Path` passed, `Start-Process` returned a PID, and the script printed
 "AI Shorts Generator started" over two processes that were already dead. The launcher now
 probes each candidate venv by *executing* it (`.venv` at the repo root first), starts
 `python.exe main.py` / `python.exe worker.py`, and only reports success after
 `/api/health` answers 200 — it exits 0 early if something already answers there.
-Do not "repair" `backend\.venv`; the root `.venv` (Python 3.14) is the install the tests
-and the running app use.
+`backend\.venv` is **gone** (deleted 2026-10-15, 1.9 GB; manifest
+`storage/backups/deleted-backend-venv-manifest-20261015-095522.txt`) — nothing in the repo,
+no scheduled task and no Startup entry resolved against it, and if it ever comes back it
+must be through the root `.venv`, which is the install the tests and the running app use.
 
 **`POST /api/jobs/{id}/restart` is not a dry run.** It wipes the job directory, re-downloads,
 re-renders **and re-uploads** every clip if the job row carries `auto_upload = 1` — the flag
@@ -158,6 +160,22 @@ returned `wrong # of entries in index ix_jobs_id` / `row 31 missing from index
 ix_jobs_id` — a row present in the table but absent from its own index, which makes
 id-keyed reads silently miss it. `REINDEX` rebuilt it and integrity returned `ok`. Run
 `PRAGMA integrity_check` occasionally; it is cheap and nothing else in the stack checks.
+
+**Deleting job rows is a hand-run, ledger-first operation** (there is no UI for it). On
+2026-10-15 the user asked for the old jobs gone: **61 of 78 `jobs` rows, 147 of 319 clips,
+61 `job_progress` rows and 48 job directories (3.65 GB)** were deleted, and **17 jobs were
+kept on purpose** — every job whose clips carry a live published `youtube_video_id` /
+`tiktok_video_id` (those rows are the only map to what is on the channel, and job 70's are
+what makes the duplicate-short deletion still possible), job 89 (the hook experiment's
+arms), job 49 (the `queued` placeholder `reconcile_uploads` still owes), and job 90 because
+it was in flight at that minute. Order that ran, in `storage/backups/delete_old_jobs_20261015.py`:
+checkpoint WAL → `VACUUM INTO` backup → JSON ledger of every deleted row → **one**
+`BEGIN IMMEDIATE` transaction deleting `job_progress`, `clips`, then `jobs` → rename each
+directory to `<id>.deleting` before removing it (so a locked file cannot leave a
+half-deleted job visible) → `integrity_check` + `foreign_key_check`. Artifacts:
+`app-before-old-jobs-deleted-20261015-070050.sqlite`, `deleted-old-jobs-20261015-070050.json`.
+After it: 17 jobs / 172 clips, integrity `ok`, 0 FK violations, `E:` **56.4 GB free**.
+Do not script this against a live queue without the in-flight re-check — the script refuses.
 
 ## 5. Reclaim disk
 
