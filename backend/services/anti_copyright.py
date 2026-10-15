@@ -50,6 +50,7 @@ def _run_transform(src: str, dst: str) -> None:
     speed = 1.02          # 2% faster — invisible, breaks frame fingerprint
     semitones = 1.5       # +1.5 semitones pitch shift
     pitch_factor = 2 ** (semitones / 12.0)  # ≈ 1.0905
+    work_rate = 48000     # the rate the pitch trick is calculated against
 
     #
     # Video filter chain:
@@ -58,9 +59,11 @@ def _run_transform(src: str, dst: str) -> None:
     #   eq=saturation=1.05 → +5% saturation
     #
     # Audio filter chain:
+    #   aformat=work_rate  → pin the sample rate before the maths (see below)
     #   atempo=speed       → speed up audio to match video
-    #   asetrate=sr*pitch  → resample to shift pitch up
-    #   aresample=44100    → restore sample rate to standard 44.1 kHz
+    #   asetrate=rate*pitch → tape-speed trick: raises pitch AND shortens audio
+    #   aresample=rate     → back to the working rate, duration unchanged
+    #   atempo=1/pitch     → undo the shortening so only the pitch survives
     #   equalizer @ 100Hz  → low-shelf +2 dB
     #   equalizer @ 8000Hz → high-shelf -2 dB
     #
@@ -71,10 +74,24 @@ def _run_transform(src: str, dst: str) -> None:
         f"eq=saturation=1.05"
     )
 
+    # asetrate multiplies a rate you name, so that number has to be the rate the
+    # audio is really at. The chain hardcoded 44100 while yt-dlp rips arrive at
+    # either 44.1 kHz or 48 kHz, which made the transform source-dependent:
+    #   44.1 kHz in → the pitch trick also cut the audio 9% shorter than the
+    #       picture, so the voice ran ahead of the captions that were already
+    #       burned in and the tail of the clip played silent (job 90: 28.59 s of
+    #       audio against 31.23 s of video).
+    #   48 kHz in   → asetrate=48092 was a 0.2% nudge: the pitch shift silently
+    #       never happened, so the audio fingerprint was left intact.
+    # aformat pins the rate first, which makes both halves of the trick correct
+    # regardless of the source. Measured on 5 s clips at both rates: A/V gap
+    # -0.034 s and a 440 Hz tone landing on 479.8 Hz.
     af = (
+        f"aformat=sample_rates={work_rate},"
         f"atempo={speed:.4f},"
-        f"asetrate=44100*{pitch_factor:.6f},"
-        f"aresample=44100,"
+        f"asetrate={work_rate}*{pitch_factor:.6f},"
+        f"aresample={work_rate},"
+        f"atempo={1.0 / pitch_factor:.6f},"
         f"equalizer=f=100:t=h:width=200:g=2,"
         f"equalizer=f=8000:t=h:width=2000:g=-2"
     )

@@ -110,14 +110,16 @@ def render_title_frame(
     draw = ImageDraw.Draw(img)
 
     font_path = _find_font(bold=True)
-    fs = int(58 * scale)
+    fs = int(74 * scale)
     try:
         font = ImageFont.truetype(font_path, fs)
     except Exception:
         font = ImageFont.load_default()
 
-    lines = _wrap_title(title, max_chars=22, max_lines=2)
-    max_text_w = int(W * 0.84)
+    # 18 chars/line instead of 22: the wrap is what decided how large the
+    # headline could get, and at 22 every title shrank itself to fit.
+    lines = _wrap_title(title, max_chars=18, max_lines=2)
+    max_text_w = int(W * 0.88)
     while fs > 28 * scale:
         try:
             font = ImageFont.truetype(font_path, fs)
@@ -144,13 +146,21 @@ def render_title_frame(
     shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=int(6 * scale)))
     img.alpha_composite(shadow_layer)
 
-    # Crisp text outline
-    outline_w = int(4 * scale)
+    # Black outline for legibility, and a yellow rim outside it so the headline
+    # separates from bright footage the way a sticker does.
+    outline_w = int(6 * scale)
+    rim_w = int(11 * scale)
+    accent_rim = (255, 229, 0, 255)
     y_curr = y0
     for ln in lines:
         bb = draw.textbbox((0, 0), ln, font=font)
         tw = bb[2] - bb[0]
         x = (W - tw) // 2
+        for dx in range(-rim_w, rim_w + 1, 2):
+            for dy in range(-rim_w, rim_w + 1, 2):
+                r2 = dx * dx + dy * dy
+                if r2 > outline_w * outline_w and r2 <= rim_w * rim_w:
+                    draw.text((x + dx, y_curr + dy), ln, font=font, fill=accent_rim)
         for dx in range(-outline_w, outline_w + 1, 2):
             for dy in range(-outline_w, outline_w + 1, 2):
                 if dx * dx + dy * dy <= outline_w * outline_w:
@@ -227,14 +237,23 @@ def render_title_frame(
             sub_font = ImageFont.load_default()
 
         wm_text = watermark_handle or settings.WATERMARK_HANDLE
-        # Truncate if too long
-        while True:
+        avatar_size = int(24 * scale)
+        pad_x = int(10 * scale)
+
+        # Right edge, vertically centred: the top strip belongs to the headline.
+        # Capped narrower than the old top-centre pill because at mid-height it
+        # overlaps the action instead of the empty sky.
+        max_cap_w = int(W * 0.60)
+        text_budget = max_cap_w - (2 * pad_x + avatar_size + int(8 * scale))
+
+        # Truncate to the shared budget so the text can never spill past the
+        # capsule edge the way it did when only the handle was measured.
+        h_box = wdraw.textbbox((0, 0), wm_text, font=pill_font)
+        h_w = h_box[2] - h_box[0]
+        while h_w > text_budget and len(wm_text) > 5:
+            wm_text = wm_text[:-1] + "..."
             h_box = wdraw.textbbox((0, 0), wm_text, font=pill_font)
             h_w = h_box[2] - h_box[0]
-            if h_w < int(W * 0.45) or len(wm_text) <= 5:
-                break
-            wm_text = wm_text[:-1] + "..."
-            
         h_h = h_box[3] - h_box[1]
 
         s_text = ""
@@ -246,20 +265,17 @@ def render_title_frame(
             s_text = f" • Original: {clean_src[:20]}"
             s_box = wdraw.textbbox((0, 0), s_text, font=sub_font)
             s_w = s_box[2] - s_box[0]
+            # The handle is the branding; the source credit gives way first.
+            while s_w > text_budget - h_w and len(s_text) > 12:
+                s_text = s_text[:-4] + "..."
+                s_box = wdraw.textbbox((0, 0), s_text, font=sub_font)
+                s_w = s_box[2] - s_box[0]
 
-        avatar_size = int(24 * scale)
-        pad_x = int(10 * scale)
         capsule_w = pad_x + avatar_size + int(8 * scale) + h_w + s_w + pad_x
-        # Max width cap to prevent overflow
-        max_cap_w = int(W * 0.88)
-        if capsule_w > max_cap_w:
-            capsule_w = max_cap_w
-
         capsule_h = avatar_size + int(10 * scale)
 
-        # Center horizontally in the top safe zone (above title)
-        bx = (W - capsule_w) // 2
-        by = int(50 * scale)  # Y = 100px in 1080x1920
+        bx = W - capsule_w - int(28 * scale)
+        by = int(H * 0.5) - capsule_h // 2
 
         # Capsule Drop Shadow
         sd_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -335,16 +351,19 @@ def _ffmpeg_overlay(
     # Slide-up: start lower, settle to 0
     y_expr = f"{slide}*(1-{fade_expr})"
     # Scale-pop with overshoot: 0.9 -> pop_scale -> 1.0
+    # Scale-pop with overshoot: 0.9 -> pop_scale -> 1.0. The sin() arc has to
+    # reach PI to land back on zero; a shorter phase leaves the card oversized
+    # for the rest of the clip (see build_single_pass_filter).
     if breathe:
         scale_expr = (
             f"0.9+0.10*({fade_expr})"
-            f"+({pop_scale}-1.0)*sin(clip((t-{start_delay})/0.6,0,1)*PI/1.5)"
+            f"+({pop_scale}-1.0)*sin(clip((t-{start_delay})/0.6,0,1)*PI)"
             f"+0.015*sin(2*PI*t/2.4)"
         )
     else:
         scale_expr = (
             f"0.9+0.10*({fade_expr})"
-            f"+({pop_scale}-1.0)*sin(clip((t-{start_delay})/0.6,0,1)*PI/1.5)"
+            f"+({pop_scale}-1.0)*sin(clip((t-{start_delay})/0.6,0,1)*PI)"
         )
 
     def esc(s):

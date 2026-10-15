@@ -455,9 +455,13 @@ def build_single_pass_filter(
         extra_inputs.append({"path": title_png, "kind": "png"})
         title_idx = next_idx
         next_idx += 1
+        # The overshoot has to return to zero: sin() peaks at PI/2 and only
+        # crosses zero again at PI, so the phase sweep must reach PI. With PI/1.5
+        # the clip() saturates mid-arc and the card stays pinned ~10% oversized
+        # for the rest of the clip, cropping its own edges (and the tag).
         scale_expr = (
             "0.9+0.10*clip(t/0.45,0,1)"
-            "+0.12*sin(clip(t/0.6,0,1)*PI/1.5)"
+            "+0.12*sin(clip(t/0.6,0,1)*PI)"
             "+0.015*sin(2*PI*t/2.4)"
         )
         y_expr = "36*(1-clip(t/0.45,0,1))"
