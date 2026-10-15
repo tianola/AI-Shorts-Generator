@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClipForge — automatic short-video editor</title>
+<meta name="description" content="ClipForge turns long videos into vertical short clips and hands them back to the creator for a final tap to post.">
+<style>
+:root{--bg:#12121a;--fg:#f2f2f6;--mut:#9a9aa8;--acc:#00c8dc;--acc2:#e60078}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:46rem;margin:0 auto;padding:4rem 1.5rem 6rem}
+h1{font-size:2.4rem;line-height:1.15;margin:0 0 .6rem}
+h1 span{color:var(--acc)}
+h2{font-size:1.15rem;margin:3rem 0 .5rem;color:var(--acc2);text-transform:uppercase;letter-spacing:.08em}
+p{margin:.6rem 0}
+.lede{color:var(--mut);font-size:1.15rem;max-width:34rem}
+ul{padding-left:1.2rem}
+li{margin:.45rem 0}
+nav{display:flex;gap:1.2rem;margin-top:3rem}
+a{color:var(--acc)}
+footer{margin-top:4rem;color:var(--mut);font-size:.9rem;border-top:1px solid #26262f;padding-top:1.5rem}
+</style>
+</head>
+<body>
+<main>
+<h1>Clip<span>Forge</span></h1>
+<p class="lede">A local editor that takes a long video, finds the parts where someone is actually talking, and renders them as vertical short clips with captions.</p>
+
+<h2>What it does</h2>
+<ul>
+<li>Downloads a video you point it at and transcribes it.</li>
+<li>Picks segments by speech density and keeps the speaker framed in 9:16.</li>
+<li>Burns in captions and a title card, then writes one MP4 per clip on your own disk.</li>
+<li>Nothing leaves your machine unless you tell it to go somewhere.</li>
+</ul>
+
+<h2>How TikTok fits in</h2>
+<p>You connect your own TikTok account once, through TikTok's official Login Kit, and ClipForge uploads finished clips to that account using the official Content Posting API. Uploads land in your TikTok inbox, where you review each one and tap post yourself. ClipForge never publishes on its own, never reads anyone else's content, and only ever writes to the single account that authorised it.</p>
+<p>The only TikTok data ClipForge reads is your profile handle and avatar, so the settings screen can show you which account is connected. It does not read your videos, your followers, your statistics or your messages.</p>
+
+<h2>Who makes it</h2>
+<p>One person, in Greece, for their own channel. The fastest way to reach me is a DM to <a href="https://www.tiktok.com/@ClippinEvrything">@ClippinEvrything</a>.</p>
+
+<nav>
+<a href="terms.html">Terms of Service</a>
+<a href="privacy.html">Privacy Policy</a>
+</nav>
+
+<footer>ClipForge · Terms and Privacy are linked above and apply to this tool and its TikTok integration.</footer>
+</main>
+</body>
+</html>
