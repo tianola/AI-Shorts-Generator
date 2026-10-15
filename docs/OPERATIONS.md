@@ -40,7 +40,7 @@ set TEST_DATABASE_URL=sqlite:///:memory:
 ```
 
 `TEST_DATABASE_URL` is not optional convenience: without it the suite writes into the
-real `storage/app.db`. Baseline as of 2026-10-13 is **248 passed, 1 skipped**. A run from
+real `storage/app.db`. Baseline as of 2026-10-14 is **249 passed, 1 skipped**. A run from
 `conftest.py` also defaults `APP_LOG_PATH` into the temp directory, because
 `utils/logger.py` opens its rotating file sink at import time — without that, test errors
 land in `storage/logs/app.log`, the file §9 reads to judge this install.
@@ -63,8 +63,11 @@ REM the pipeline, in its own window
 **`POST /api/jobs/{id}/restart` is not a dry run.** It wipes the job directory, re-downloads,
 re-renders **and re-uploads** every clip if the job row carries `auto_upload = 1` — the flag
 is stored per job, set when the job is created, and `upload_privacy NULL` falls back to
-`AUTO_UPLOAD_PRIVACY` (default **unlisted**). Check both columns before restarting an old job
-on a live channel:
+`AUTO_UPLOAD_PRIVACY` (default **unlisted**). Visibility maps across platforms
+(`api/tiktok.py`): `unlisted` becomes TikTok `PUBLIC_TO_SELF`, which only the account owner
+sees — it is not `PUBLIC_TO_EVERYONE`. Even so, a restarted job creates real objects on both
+accounts and spends their daily upload quota. Check both columns before restarting an old
+job on a live channel:
 
 ```bat
 sqlite3 ..\storage\app.db "select id, status, auto_upload, upload_privacy from jobs where id=89;"
