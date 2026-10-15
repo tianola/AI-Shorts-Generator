@@ -13,6 +13,7 @@ from sqlalchemy import text
 from database.models import Clip, Job
 from database.session import SessionLocal, init_database
 from scripts import reconcile_uploads as rec
+from services import tiktok_content_api as tiktok_api
 
 
 @pytest.fixture
@@ -328,3 +329,45 @@ def test_the_stale_path_count_is_reported(tmp_path):
 
     assert "1 clip(s) record a path that is not the rendered file" in \
         rec.format_report(report)
+
+# ---------------------------------------------------------------------------
+# the TikTok ids the old stub invented
+# ---------------------------------------------------------------------------
+
+def test_an_invented_tiktok_id_is_caught(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(tiktok_api, "stored_ids", lambda: [])
+    _make_clip(db, str(tmp_path), tiktok_video_id="1791921111_ceab6a9a")
+
+    findings = rec.audit_tiktok(db)
+    assert findings[0]["verdict"] == "fabricated"
+    assert "never sent to TikTok" in rec.format_tiktok_audit(findings)
+
+
+def test_an_id_the_real_client_recorded_is_believed(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(tiktok_api, "stored_ids", lambda: ["7620000000000000001"])
+    _make_clip(db, str(tmp_path), tiktok_video_id="7620000000000000001")
+
+    findings = rec.audit_tiktok(db)
+    assert findings[0]["verdict"] == "published"
+    assert "[published]" not in rec.format_tiktok_audit(findings)  # nothing to list
+
+
+def test_a_url_in_the_id_column_is_its_own_problem(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(tiktok_api, "stored_ids", lambda: [])
+    _make_clip(db, str(tmp_path),
+               tiktok_video_id="https://www.tiktok.com/@x/video/123")
+
+    assert rec.audit_tiktok(db)[0]["verdict"] == "not_an_id"
+
+
+def test_reset_clears_invented_ids_and_keeps_real_ones(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(tiktok_api, "stored_ids", lambda: ["7620000000000000001"])
+    fake = _make_clip(db, str(tmp_path), tiktok_video_id="1791921111_ceab6a9a")
+    real = _make_clip(db, str(tmp_path), index=1, tiktok_video_id="7620000000000000001")
+
+    cleared, errors = rec.reset_tiktok_placeholders(db, rec.audit_tiktok(db))
+
+    assert (cleared, errors) == (1, [])
+    values = dict(db.execute(text("SELECT id, tiktok_video_id FROM clips")).all())
+    assert values[fake.id] is None, "the fake publish must stop blocking a real one"
+    assert values[real.id] == "7620000000000000001"

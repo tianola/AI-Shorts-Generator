@@ -917,7 +917,8 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                             clip_db.tiktok_video_id = tt_res.get("video_id") or tt_res.get("tiktok_url")
                             db.commit()
                             db.refresh(clip_db)
-                            job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} Published to TikTok: {tt_res.get('tiktok_url')}")
+                            where = tt_res.get("tiktok_url") or f"{tt_res.get('status')} ({tt_res.get('post_mode')})"
+                            job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} Published to TikTok: {where}")
             except Exception as tt_err:
                 job_warning(job_id, f"Per-clip TikTok auto-upload skipped/failed for Clip #{index + 1}: {tt_err}")
 
@@ -1075,7 +1076,8 @@ async def process_job_async(job_id: int):
     # auto-upload job went straight to a public feed with no way to review it.
     upload_privacy = (getattr(job, "upload_privacy", None)
                       or getattr(settings, "AUTO_UPLOAD_PRIVACY", "unlisted"))
-    tiktok_privacy = "PUBLIC_TO_EVERYONE" if upload_privacy == "public" else "PUBLIC_TO_SELF"
+    from services.tiktok_upload import tiktok_privacy_for
+    tiktok_privacy = tiktok_privacy_for(upload_privacy)
 
     try:
         # =====================

@@ -19,6 +19,8 @@ Usage:
     python -m scripts.reconcile_uploads --status placeholder_id
     python -m scripts.reconcile_uploads --apply             # rewrite stale file paths
     python -m scripts.reconcile_uploads --apply --reset-placeholders
+    python -m scripts.reconcile_uploads --tiktok                       # audit TikTok ids only
+    python -m scripts.reconcile_uploads --apply --reset-tiktok-placeholders
 
 --apply only ever repairs pointers and clears flags that were set on a lie. It
 never marks a clip uploaded, and it never uploads anything: publishing stays a
@@ -301,6 +303,87 @@ PROBLEM_STATUSES = ("placeholder_id", "no_video_recorded", "duplicate_id",
                     "id_without_flag", "id_not_on_youtube", "blocked_by_retries")
 
 
+# ---------------------------------------------------------------------------
+# TikTok: the ids the old stub invented
+# ---------------------------------------------------------------------------
+
+# upload_clip_to_tiktok used to return f"{int(time.time())}_{uuid4().hex[:8]}"
+# without contacting TikTok at all, and the worker stored it as proof of a
+# publish. A real Content Posting API id is a long digit string, so this shape
+# identifies the fabrications unambiguously.
+FABRICATED_TIKTOK_ID_RE = re.compile(r"^\d{10}_[0-9a-f]{8}$")
+
+
+def audit_tiktok(db) -> List[dict]:
+    """Every clip that claims a TikTok post, with a verdict on the id."""
+    from services import tiktok_content_api as api
+
+    real = set(api.stored_ids())
+    rows = db.execute(text('SELECT id, job_id, "index", tiktok_video_id FROM clips '
+                           'WHERE tiktok_video_id IS NOT NULL AND tiktok_video_id <> "" '
+                           'ORDER BY job_id, "index"')).all()
+    findings = []
+    for row in rows:
+        recorded = str(row[3])
+        if recorded in real:
+            verdict, note = "published", "recorded by the Content Posting API client on this machine"
+        elif FABRICATED_TIKTOK_ID_RE.match(recorded):
+            verdict = "fabricated"
+            note = ("never sent to TikTok — the id was generated locally by the old "
+                    "upload stub")
+        elif recorded.isdigit():
+            verdict, note = "plausible", "TikTok-shaped; verify against the account before trusting it"
+        else:
+            verdict, note = "not_an_id", "stored value is a URL or placeholder, not a video id"
+        findings.append({"clip_id": row[0], "job_id": row[1], "index": row[2],
+                         "tiktok_video_id": recorded, "verdict": verdict, "note": note})
+    return findings
+
+
+def format_tiktok_audit(findings: List[dict]) -> str:
+    counts: Dict[str, int] = {}
+    for finding in findings:
+        counts[finding["verdict"]] = counts.get(finding["verdict"], 0) + 1
+    lines = [f"{'tiktok verdict':<24}{'clips':>6}"]
+    for verdict, count in sorted(counts.items(), key=lambda kv: -kv[1]):
+        lines.append(f"{verdict:<24}{count:>6}")
+    if not findings:
+        lines.append("")
+        lines.append("No clip claims a TikTok post.")
+    for finding in findings:
+        if finding["verdict"] == "published":
+            continue
+        lines.append(f"  clip {finding['clip_id']} (job {finding['job_id']}, "
+                     f"index {finding['index']}) [{finding['verdict']}] "
+                     f"id={finding['tiktok_video_id']!r} — {finding['note']}")
+    fabricated = counts.get("fabricated", 0)
+    if fabricated:
+        lines.append("")
+        lines.append(f"{fabricated} clip(s) are marked published on TikTok without a request ever "
+                     "having been made. --apply --reset-tiktok-placeholders clears those ids so the "
+                     "clips become publishable for real instead of being skipped as duplicates.")
+    return "\n".join(lines)
+
+
+def reset_tiktok_placeholders(db, findings: List[dict]) -> tuple:
+    """Clear invented TikTok ids. Never touches a real one, never deletes a clip."""
+    cleared = 0
+    errors = []
+    for finding in findings:
+        if finding["verdict"] not in ("fabricated", "not_an_id"):
+            continue
+        try:
+            db.execute(text("UPDATE clips SET tiktok_video_id=NULL WHERE id=:c"),
+                       {"c": finding["clip_id"]})
+            db.commit()
+            cleared += 1
+        except Exception as exc:
+            db.rollback()
+            errors.append(f"clip {finding['clip_id']}: {exc}")
+    return cleared, errors
+
+
+
 def format_report(report: Report, limit: int = 40, only: Optional[str] = None) -> str:
     lines = [f"{'status':<24}{'clips':>6}"]
     for status, count in sorted(report.counts().items(), key=lambda kv: -kv[1]):
@@ -343,10 +426,27 @@ def main(argv=None) -> int:
                         help="with --apply: clear the uploaded flag on clips whose id is not a "
                              "video id, putting them back on the pending list")
     parser.add_argument("--status", default=None, help="only list clips in this status")
+    parser.add_argument("--tiktok", action="store_true",
+                        help="audit tiktok_video_id instead of the YouTube state")
+    parser.add_argument("--reset-tiktok-placeholders", action="store_true",
+                        help="with --apply: clear TikTok ids that were invented locally")
     parser.add_argument("--list-all", action="store_true")
     args = parser.parse_args(argv)
 
     db = SessionLocal()
+    if args.tiktok or args.reset_tiktok_placeholders:
+        findings = audit_tiktok(db)
+        print(format_tiktok_audit(findings))
+        if args.reset_tiktok_placeholders and not args.apply:
+            print("\nRead-only run: nothing was changed. Add --apply to clear the ids above.")
+        elif args.reset_tiktok_placeholders:
+            cleared, errors = reset_tiktok_placeholders(db, findings)
+            print(f"\nCleared {cleared} invented TikTok id(s).")
+            for error in errors:
+                print(f"  failed: {error}", file=sys.stderr)
+        db.close()
+        return 0
+
     try:
         clips = load_clips(db)
     except LookupError as exc:

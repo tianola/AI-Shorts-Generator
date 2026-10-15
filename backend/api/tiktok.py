@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -16,6 +17,11 @@ from database.models import Clip, Job
 from database.session import get_database
 
 router = APIRouter()
+
+# state -> redirect_uri for the consent URLs we handed out. In-process on
+# purpose: this is a single-user local app and the state is only ever consumed
+# by the browser that asked for it.
+_TIKTOK_OAUTH_STATES: dict = {}
 
 # ===========================================================================
 # TIKTOK DIRECT PUBLISHING & BATCH UPLOAD ENDPOINTS
@@ -60,16 +66,87 @@ async def disconnect_tiktok_endpoint():
 
 
 _TIKTOK_PRIVACY = {"public": "PUBLIC_TO_EVERYONE",
-                   "unlisted": "PUBLIC_TO_SELF",
-                   "private": "PRIVATE"}
+                   "unlisted": "FOLLOWER_OF_CREATOR",
+                   "private": "SELF_ONLY"}
 
 
 def _resolve_tiktok_privacy(value: Optional[str]) -> str:
     """Map a YouTube-style visibility to its TikTok equivalent."""
+    from services.tiktok_upload import tiktok_privacy_for
     normalized = (value or settings.AUTO_UPLOAD_PRIVACY).lower().strip()
     if normalized not in _TIKTOK_PRIVACY:
         raise HTTPException(status_code=400, detail=f"Invalid privacy_level '{value}'")
-    return _TIKTOK_PRIVACY[normalized]
+    return tiktok_privacy_for(normalized)
+
+
+@router.post("/tiktok/auth-url")
+async def generate_tiktok_auth_url(redirect_uri: Optional[str] = None):
+    """The TikTok consent URL to open once, which returns to the callback below."""
+    from services import tiktok_content_api as api
+    try:
+        state = api.new_state()
+        _TIKTOK_OAUTH_STATES[state] = (redirect_uri or settings.TIKTOK_REDIRECT_URI)
+        return {"auth_url": api.authorization_url(state=state, target_redirect_uri=redirect_uri),
+                "state": state,
+                "redirect_uri": redirect_uri or settings.TIKTOK_REDIRECT_URI}
+    except api.TikTokAPIError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/tiktok/oauth2callback", response_class=HTMLResponse)
+async def tiktok_oauth2_callback(code: Optional[str] = None, state: Optional[str] = None,
+                                 error: Optional[str] = None, error_description: Optional[str] = None):
+    """TikTok lands here with ?code=; exchange it and store the token."""
+    from services import tiktok_content_api as api
+
+    if error:
+        return HTMLResponse(_tiktok_page("TikTok connection failed",
+                                         f"<p class='bad'>{_escape(error_description or error)}</p>"), status_code=400)
+    if not code:
+        return HTMLResponse(_tiktok_page("TikTok connection failed",
+                                         "<p class='bad'>No authorization code was returned.</p>"), status_code=400)
+    redirect = _TIKTOK_OAUTH_STATES.pop(state, None) or settings.TIKTOK_REDIRECT_URI
+    try:
+        token = api.exchange_code(code, redirect)
+    except Exception as e:
+        return HTMLResponse(_tiktok_page("TikTok connection failed",
+                                         f"<p class='bad'>{_escape(str(e))}</p>"), status_code=500)
+    username = token.get("username") or "your account"
+    return HTMLResponse(_tiktok_page(
+        "TikTok connected",
+        f"<p class='ok'>Signed in as {_escape(username)}. Clips will be sent as "
+        f"<b>{_escape(settings.TIKTOK_POST_MODE)}</b> — change TIKTOK_POST_MODE to "
+        f"DIRECT_PUBLISH once you trust the output.</p>"))
+
+
+class TikTokClientSecretsRequest(BaseModel):
+    client_key: str
+    client_secret: str
+
+
+@router.post("/tiktok/client-credentials")
+async def save_tiktok_client_credentials(req: TikTokClientSecretsRequest):
+    """Store the app's client key/secret so the OAuth flow can start."""
+    from services import tiktok_content_api as api
+    try:
+        api.save_client_credentials(req.client_key, req.client_secret)
+        return {"success": True, "client_configured": True}
+    except api.TikTokAPIError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _escape(value: str) -> str:
+    import html
+    return html.escape(str(value or ""))
+
+
+def _tiktok_page(heading: str, body_html: str) -> str:
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{_escape(heading)}</title>
+<style>body{{font-family:system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0}}
+.card{{max-width:34rem;padding:2rem;border:1px solid #333;border-radius:12px;background:#181818;text-align:center}}
+.ok{{color:#4ade80}} .bad{{color:#f87171}}</style></head>
+<body><div class="card"><h2>{_escape(heading)}</h2>{body_html}</div></body></html>"""
 
 
 @router.post("/clips/{clip_id}/upload-tiktok")

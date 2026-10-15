@@ -22,13 +22,13 @@ export async function checkTikTokStatus() {
     if (res.authenticated) {
       if (topbarLabel) topbarLabel.textContent = `TikTok: ${res.username || 'Connected'}`;
       if (topbarDot) topbarDot.style.background = '#00f2fe';
-      if (banner) banner.innerHTML = `🟢 <strong>Connected:</strong> <span style="color: #00f2fe;">${escapeHtml(res.username)}</span>`;
+      if (banner) banner.innerHTML = `🟢 <strong>Connected:</strong> <span style="color: #00f2fe;">${escapeHtml(res.username)}</span> — clips are sent as <strong>${escapeHtml(res.post_mode || 'DRAFT')}</strong>.`;
       if (usernameInput) usernameInput.value = res.username || '';
       if (disconnectBtn) disconnectBtn.style.display = 'block';
     } else {
       if (topbarLabel) topbarLabel.textContent = 'TikTok Auth';
       if (topbarDot) topbarDot.style.background = '#64748b';
-      if (banner) banner.innerHTML = `⚪ <strong>No TikTok account connected.</strong> Link your TikTok handle to enable 1-click publishing.`;
+      if (banner) banner.innerHTML = `⚪ <strong>TikTok cannot publish yet.</strong> ${escapeHtml(res.note || 'Connect the account through OAuth.')}`;
       if (disconnectBtn) disconnectBtn.style.display = 'none';
     }
     return res;
@@ -83,9 +83,16 @@ export function setupTikTokIntegration() {
       });
 
       if (res.success) {
-        if (resultMsg) resultMsg.innerHTML = `<span style="color: #22c55e;">🎉 Connected as <strong>${escapeHtml(res.username)}</strong>!</span>`;
+        // A saved session_id is display-only: it has never been able to post, so
+        // the message says what it is instead of claiming a connection.
+        if (resultMsg && res.publishing === false) {
+          resultMsg.innerHTML = `<span style="color: #f59e0b;">⚠️ ${escapeHtml(res.message || 'Saved, but this cannot publish.')}</span>`;
+        } else if (resultMsg) {
+          resultMsg.innerHTML = `<span style="color: #22c55e;">🎉 Connected as <strong>${escapeHtml(res.username)}</strong>!</span>`;
+        }
         if (sessionInput) sessionInput.value = '';
         await checkTikTokStatus();
+        if (res.publishing === false) return;
         setTimeout(() => {
           if (modal) modal.style.display = 'none';
           if (resultMsg) resultMsg.textContent = '';
@@ -95,7 +102,36 @@ export function setupTikTokIntegration() {
       if (resultMsg) resultMsg.innerHTML = `<span style="color: #ef4444;">❌ Failed: ${escapeHtml(err.message)}</span>`;
     } finally {
       saveBtn.disabled = false;
-      saveBtn.textContent = '✅ Connect TikTok Account';
+      saveBtn.textContent = 'Save handle (does not enable publishing)';
+    }
+  });
+
+  const oauthBtn = document.getElementById('tiktokOAuthBtn');
+  oauthBtn?.addEventListener('click', async () => {
+    const key = document.getElementById('tiktokClientKeyInput')?.value.trim() || '';
+    const secret = document.getElementById('tiktokClientSecretInput')?.value.trim() || '';
+    if (!key || !secret) {
+      if (resultMsg) resultMsg.innerHTML = '<span style="color: #ef4444;">Paste the app client key and secret first.</span>';
+      return;
+    }
+    oauthBtn.disabled = true;
+    oauthBtn.textContent = 'Starting TikTok sign-in...';
+    try {
+      await fetchJson(`${API_PREFIX}/tiktok/client-credentials`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_key: key, client_secret: secret })
+      });
+      const res = await fetchJson(`${API_PREFIX}/tiktok/auth-url`, { method: 'POST' });
+      if (res.auth_url) {
+        window.open(res.auth_url, '_blank', 'noopener');
+        if (resultMsg) resultMsg.innerHTML = '<span style="color: #22c55e;">TikTok sign-in opened in a new tab — approve it there, then reload.</span>';
+      }
+    } catch (err) {
+      if (resultMsg) resultMsg.innerHTML = `<span style="color: #ef4444;">❌ ${escapeHtml(err.message)}</span>`;
+    } finally {
+      oauthBtn.disabled = false;
+      oauthBtn.textContent = '🔑 Authorise with TikTok (OAuth)';
     }
   });
 

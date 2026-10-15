@@ -1,6 +1,9 @@
 """
-TikTok Upload & Channel Management Service for AI Shorts Generator.
-Supports direct posting, session/cookie authentication, and viral SEO formatting.
+TikTok publishing service for AI Shorts Generator.
+
+The HTTP work lives in services/tiktok_content_api.py (Content Posting API v2);
+this module is the layer the worker and the API endpoints talk to: credential
+status, viral caption formatting, and per-job batch publishing.
 """
 import os
 import json
@@ -10,6 +13,25 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# YouTube-style visibility -> TikTok's privacy enum. TikTok has no 'unlisted';
+# FOLLOWER_OF_CREATOR is the nearest thing to "not for the whole world".
+TIKTOK_PRIVACY_BY_VISIBILITY = {
+    "public": "PUBLIC_TO_EVERYONE",
+    "unlisted": "FOLLOWER_OF_CREATOR",
+    "private": "SELF_ONLY",
+}
+
+
+def tiktok_privacy_for(visibility: Optional[str]) -> str:
+    """Translate an AUTO_UPLOAD_PRIVACY value, rejecting anything unknown."""
+    normalized = (visibility or "").lower().strip()
+    if normalized not in TIKTOK_PRIVACY_BY_VISIBILITY:
+        raise ValueError(
+            f"Unknown TikTok visibility '{visibility}'. "
+            f"Expected one of {sorted(TIKTOK_PRIVACY_BY_VISIBILITY)}"
+        )
+    return TIKTOK_PRIVACY_BY_VISIBILITY[normalized]
 
 def get_secrets_dir() -> Path:
     from config import settings
@@ -21,43 +43,48 @@ def get_tiktok_token_path() -> Path:
     return get_secrets_dir() / "tiktok_token.json"
 
 def get_tiktok_auth_status() -> Dict[str, Any]:
-    """Check if valid TikTok authentication credentials exist."""
-    token_file = get_tiktok_token_path()
-    if not token_file.exists() or token_file.stat().st_size == 0:
-        return {
-            "authenticated": False,
-            "username": None,
-            "auth_type": None,
-            "has_token": False,
-            "token_path": str(token_file.resolve())
-        }
+    """Publishing readiness, straight from the OAuth token store.
 
-    try:
-        with open(token_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            username = data.get("username") or data.get("creator_username")
-            session_id = data.get("session_id") or data.get("access_token")
-            is_valid = bool(username and session_id)
-            return {
-                "authenticated": is_valid,
-                "username": username if is_valid else None,
-                "auth_type": data.get("auth_type", "session_id"),
-                "has_token": is_valid,
-                "connected_at": data.get("connected_at"),
-                "token_path": str(token_file.resolve())
-            }
-    except Exception as e:
-        logger.warning(f"Error reading TikTok credentials: {e}")
-        return {
-            "authenticated": False,
-            "username": None,
-            "auth_type": None,
-            "has_token": False,
-            "token_path": str(token_file.resolve())
-        }
+    The legacy ``tiktok_token.json`` held a scraped browser session_id, which
+    the Content Posting API has never accepted. It used to be enough to make
+    this report 'authenticated' and let the upload path return a made-up video
+    id, so it no longer counts: a stored session is reported as a note, never
+    as a connection.
+    """
+    from services import tiktok_content_api as api
+
+    status = api.connection_status()
+    legacy_username = None
+    legacy_file = get_tiktok_token_path()
+    if legacy_file.exists() and legacy_file.stat().st_size:
+        try:
+            legacy_username = json.loads(legacy_file.read_text(encoding="utf-8")).get("username")
+        except Exception:
+            legacy_username = None
+
+    authenticated = bool(status["connected"])
+    return {
+        "authenticated": authenticated,
+        "username": status.get("username") or (legacy_username if not authenticated else None),
+        "auth_type": "oauth2" if authenticated else ("session_id" if legacy_username else None),
+        "has_token": authenticated,
+        "client_configured": status["client_configured"],
+        "post_mode": status["post_mode"],
+        "connected_at": status.get("expires_at"),
+        "token_path": status["token_path"] if authenticated else str(legacy_file.resolve()),
+        "note": None if authenticated else (
+            "A TikTok app client key/secret and an OAuth connection are required to publish; "
+            "the stored browser session_id cannot post."
+            if legacy_username else "TikTok is not connected."
+        ),
+    }
 
 def save_tiktok_credentials(username: str, session_id: str, auth_type: str = "session_id") -> Dict[str, Any]:
-    """Save TikTok session/token credentials."""
+    """Store a legacy session_id — kept so the settings page does not break.
+
+    It cannot publish. Callers get the truth in ``publishing`` rather than a
+    success that only looks like one.
+    """
     clean_username = (username or "").strip()
     if not clean_username.startswith("@") and clean_username:
         clean_username = f"@{clean_username}"
@@ -77,21 +104,25 @@ def save_tiktok_credentials(username: str, session_id: str, auth_type: str = "se
     with open(token_file, "w", encoding="utf-8") as f:
         json.dump(token_data, f, indent=2)
 
-    logger.info(f"TikTok credentials saved for {clean_username}")
+    logger.info(f"TikTok session_id stored for {clean_username} (cannot publish — needs OAuth)")
     return {
         "success": True,
         "username": clean_username,
-        "authenticated": True
+        "authenticated": False,
+        "publishing": False,
+        "message": "Saved, but a session_id cannot post to TikTok. Connect the account "
+                   "through the TikTok app OAuth flow (/api/tiktok/auth-url) to publish.",
     }
 
 def disconnect_tiktok_account() -> bool:
     """Disconnect and delete stored TikTok credentials."""
+    from services import tiktok_content_api as api
+    api.disconnect()
     token_file = get_tiktok_token_path()
     if token_file.exists():
         try:
             token_file.unlink()
             logger.info("TikTok account disconnected successfully.")
-            return True
         except Exception as e:
             logger.error(f"Failed to delete TikTok credentials: {e}")
             return False
@@ -148,55 +179,71 @@ def upload_clip_to_tiktok(
     description: str,
     hashtags: Optional[List[str]] = None,
     source_title: Optional[str] = None,
-    privacy_level: str = "PUBLIC_TO_SELF"
+    privacy_level: str = "SELF_ONLY",
+    post_mode: Optional[str] = None,
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
+    """Publish one clip through the TikTok Content Posting API.
+
+    Raises if TikTok refuses or the account is not connected — this never
+    returns a video id that TikTok did not hand back.
     """
-    Upload a video file to TikTok.
-    Requires connected TikTok profile credentials.
-    """
+    from services import tiktok_content_api as api
+
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found at {video_path}")
 
-    auth_status = get_tiktok_auth_status()
-    if not auth_status.get("authenticated"):
-        raise ValueError("❌ TikTok account is NOT connected! Please connect your TikTok profile in settings before uploading.")
+    if not dry_run:
+        auth_status = get_tiktok_auth_status()
+        if not auth_status.get("authenticated"):
+            raise ValueError(
+                "❌ TikTok is not connected through OAuth, so nothing can be published. "
+                "Create a TikTok for Developers app (Content Posting API + video.publish), "
+                "set its client key/secret, then authorise the account at /api/tiktok/auth-url. "
+                "A browser session_id is not accepted by the API."
+            )
 
-    from config import settings as _settings
-    username = auth_status.get("username") or _settings.WATERMARK_HANDLE
     meta = format_tiktok_metadata(title, description, hashtags, source_title=source_title)
-    
-    import uuid
-    import time
-    video_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
-    
-    logger.info(f"Publishing clip to TikTok for {username}: {meta['title']} ({video_path})")
-    time.sleep(0.6)  # Direct upload stream simulation
+    result = api.upload_video(
+        video_path=video_path,
+        caption=meta["caption"],
+        privacy_level=privacy_level,
+        post_mode=post_mode,
+        dry_run=dry_run,
+    )
+    if result.get("dry_run"):
+        return {**result, "title": meta["title"], "caption": meta["caption"]}
 
-    clean_user = username.lstrip("@")
-    tiktok_url = f"https://www.tiktok.com/@{clean_user}/video/{video_id}"
+    from utils.upload_pacing import note_upload
+    note_upload("tiktok")
 
+    logger.info(f"Published to TikTok ({result['post_mode']}): {meta['title']} "
+                f"publish_id={result['publish_id']} video_id={result['video_id']}")
     return {
-        "success": True,
-        "video_id": video_id,
-        "tiktok_url": tiktok_url,
-        "username": username,
+        "success": result.get("status") == "PUBLISH_COMPLETE" or result.get("post_mode") != "DIRECT_PUBLISH",
+        "video_id": result.get("video_id") or result.get("publish_id"),
+        "publish_id": result.get("publish_id"),
+        "tiktok_url": result.get("tiktok_url"),
+        "status": result.get("status"),
+        "post_mode": result.get("post_mode"),
+        "privacy_level": result.get("privacy_level"),
+        "username": result.get("username"),
         "title": meta["title"],
         "caption": meta["caption"],
-        "privacy_level": privacy_level
     }
 
 def upload_all_clips_to_tiktok_for_job(
     job_id: int,
     db,
-    privacy_level: str = "PUBLIC_TO_SELF",
+    privacy_level: str = "SELF_ONLY",
     pace: bool = False,
     stop=None
 ) -> Dict[str, Any]:
     """
-    Batch upload all rendered clips from a specific job directly to TikTok.
+    Batch publish all rendered clips from a job through the Content Posting API.
 
-    ``pace`` spaces the publishes; harmless today (nothing records a TikTok
-    publish timestamp yet) and live as soon as the real API path does.
+    ``pace`` spaces the publishes against the same per-platform clock the
+    worker's per-clip upload uses.
     """
     from database.models import Clip, Job
     from pathlib import Path

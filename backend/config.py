@@ -201,6 +201,31 @@ class Settings(BaseSettings):
         return v.lower()
 
     # ====================
+    # TIKTOK CONTENT POSTING API (v2)
+    # ====================
+    # The app credentials come from TikTok for Developers; the browser session_id
+    # in storage/secrets/tiktok_token.json cannot post anything.
+    TIKTOK_CLIENT_KEY: str = Field(default="", description="TikTok app client key (env only, or storage/secrets/tiktok_client.json)")
+    TIKTOK_CLIENT_SECRET: str = Field(default="", description="TikTok app client secret (env only, or storage/secrets/tiktok_client.json)")
+    TIKTOK_REDIRECT_URI: str = Field(
+        default="http://localhost:5001/api/tiktok/oauth2callback",
+        description="Must match an allowed redirect URI on the TikTok app."
+    )
+    TIKTOK_POST_MODE: str = Field(
+        default="DRAFT",
+        description="DRAFT saves each publish to the account's drafts (safe default "
+                    "for a freshly connected app), DIRECT_PUBLISH posts it outright, "
+                    "UPLOAD drops it in the user's inbox for a manual tap."
+    )
+
+    @field_validator('TIKTOK_POST_MODE')
+    def validate_tiktok_post_mode(cls, v):
+        allowed = ['DRAFT', 'DIRECT_PUBLISH', 'UPLOAD']
+        if v.upper() not in allowed:
+            raise ValueError(f"TIKTOK_POST_MODE must be one of {allowed}")
+        return v.upper()
+
+    # ====================
     # WORKER
     # ====================
     JOB_LEASE_MINUTES: int = Field(

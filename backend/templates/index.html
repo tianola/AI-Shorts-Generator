@@ -580,6 +580,27 @@
 			⚪ <strong>No TikTok account connected.</strong> Link your TikTok handle to enable 1-click publishing.
 		  </div>
 
+		  <div style="display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid rgba(0, 242, 254, 0.25); border-radius: 10px;">
+			<div style="font-size: 0.8rem; color: var(--muted); line-height: 1.45;">
+			  <strong>Publishing runs on the TikTok Content Posting API.</strong> Create an app at
+			  <em>TikTok for Developers</em>, enable <em>Content Posting API</em> (scopes
+			  <code>user.info.basic</code>, <code>video.publish</code>), add
+			  <code>http://localhost:5001/api/tiktok/oauth2callback</code> as an allowed redirect URI,
+			  then paste its key and secret here and authorise the account once.
+			</div>
+			<div>
+			  <label class="field-label" for="tiktokClientKeyInput">Client key</label>
+			  <input id="tiktokClientKeyInput" class="studio-input" type="text" placeholder="sbaw1k9t..." autocomplete="off" style="width: 100%; box-sizing: border-box;" />
+			</div>
+			<div>
+			  <label class="field-label" for="tiktokClientSecretInput">Client secret</label>
+			  <input id="tiktokClientSecretInput" class="studio-input" type="password" placeholder="App secret (stored in storage/secrets/tiktok_client.json)" autocomplete="off" style="width: 100%; box-sizing: border-box;" />
+			</div>
+			<button type="button" class="primary-btn" id="tiktokOAuthBtn" style="flex: 1; background: linear-gradient(135deg, #00f2fe, #4facfe); color: #000; font-weight: 700; padding: 10px; border: none; border-radius: 8px; cursor: pointer;">
+			  🔑 Authorise with TikTok (OAuth)
+			</button>
+		  </div>
+
 		  <div style="display: flex; flex-direction: column; gap: 10px;">
 			<div>
 			  <label class="field-label" for="tiktokUsernameInput">TikTok Username / Handle</label>
@@ -587,10 +608,10 @@
 			</div>
 
 			<div>
-			  <label class="field-label" for="tiktokSessionInput">TikTok Session ID or Access Token</label>
+			  <label class="field-label" for="tiktokSessionInput">TikTok Session ID (legacy — cannot publish)</label>
 			  <input id="tiktokSessionInput" class="studio-input" type="password" placeholder="Paste sessionid cookie or access token" style="width: 100%; box-sizing: border-box;" />
 			  <div style="font-size: 0.74rem; color: var(--muted); margin-top: 4px; line-height: 1.4;">
-				💡 <em>How to get sessionid:</em> On tiktok.com, press <strong>F12</strong> → <strong>Application</strong> → <strong>Cookies</strong> → <code>https://www.tiktok.com</code> → copy the value of <strong>sessionid</strong>.
+			  ⚠️ <em>A scraped <code>sessionid</code> is not an API credential.</em> Saving one here only records the handle for display; publishing needs the OAuth connection above.
 			  </div>
 			</div>
 
