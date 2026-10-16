@@ -221,19 +221,33 @@ class Settings(BaseSettings):
         description="Visibility for automatic uploads: 'public', 'unlisted' or 'private'"
     )
     UPLOAD_MIN_GAP_SECONDS: int = Field(
-        default=900,
+        default=3600,
         ge=0,
         le=86400,
-        description="Minimum spacing between publishes on the same platform. "
-                    "Time already spent rendering the next clip counts against it. "
-                    "0 disables pacing."
+        description="Minimum spacing between publishes on the same platform. The "
+                    "publish queue schedules the next clip this far after the last one "
+                    "that actually went out, so the wait is a row in the database and "
+                    "survives a worker restart. 0 disables pacing."
     )
     UPLOAD_GAP_JITTER_SECONDS: int = Field(
-        default=300,
+        default=600,
         ge=0,
         le=86400,
         description="Random extra delay added on top of UPLOAD_MIN_GAP_SECONDS, so "
                     "the cadence is not exactly repeatable."
+    )
+    PUBLISH_RETRY_MINUTES: int = Field(
+        default=30,
+        ge=1,
+        description="How long a clip waits before an ordinary retry: a dead token, a "
+                    "network fault, a missing file. The clip stays in the queue."
+    )
+    PUBLISH_LIMIT_RETRY_HOURS: int = Field(
+        default=6,
+        ge=1,
+        description="How long a clip waits when YouTube answers uploadLimitExceeded. "
+                    "That is the channel's upload budget, not a fault in the clip, so "
+                    "it is not charged as a retry attempt."
     )
 
     @field_validator('AUTO_UPLOAD_PRIVACY')

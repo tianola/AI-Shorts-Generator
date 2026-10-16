@@ -113,7 +113,12 @@ class Clip(Base):
     tiktok_video_id = Column(String, nullable=True)
     upload_error = Column(Text, nullable=True)
     upload_retry_count = Column(Integer, default=0)
-    published_at = Column(DateTime, nullable=True)  # Scheduled publish time
+    published_at = Column(DateTime, nullable=True)  # When it actually went out
+    # The publish queue. When this clip may go out; NULL means it is not queued.
+    # The worker claims a clip by moving this value, which is what stops two
+    # workers uploading the same video, and it is why the spacing survives a
+    # restart: the clock is this column, not a dict in a process.
+    publish_due_at = Column(DateTime, nullable=True)
 
     # The experiment record. A zero-view diagnostic job gives every clip of the
     # job a different hook style, but a style only means something next to the

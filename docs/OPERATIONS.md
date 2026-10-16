@@ -75,13 +75,17 @@ no scheduled task and no Startup entry resolved against it, and if it ever comes
 must be through the root `.venv`, which is the install the tests and the running app use.
 
 **`POST /api/jobs/{id}/restart` is not a dry run.** It wipes the job directory, re-downloads,
-re-renders **and re-uploads** every clip if the job row carries `auto_upload = 1` — the flag
+re-renders **and re-publishes** every clip if the job row carries `auto_upload = 1` — the flag
 is stored per job, set when the job is created, and `upload_privacy NULL` falls back to
-`AUTO_UPLOAD_PRIVACY` (default **unlisted**). Visibility maps across platforms
-(`api/tiktok.py`): `unlisted` becomes TikTok `PUBLIC_TO_SELF`, which only the account owner
-sees — it is not `PUBLIC_TO_EVERYONE`. Even so, a restarted job creates real objects on both
-accounts and spends their daily upload quota. Check both columns before restarting an old
-job on a live channel:
+`AUTO_UPLOAD_PRIVACY` (default **unlisted**). It no longer uploads on the spot: each rendered
+clip is parked in `clips.publish_due_at` and the worker releases one YouTube publish per
+`UPLOAD_MIN_GAP_SECONDS` (default **3600**, plus up to `UPLOAD_GAP_JITTER_SECONDS=600`), so the
+shorts still reach the channel, one an hour, and a worker restart cannot make the next one
+immediate. TikTok still publishes in place. Visibility maps across platforms
+(`api/tiktok.py`): `unlisted` becomes TikTok `FOLLOWER_OF_CREATOR` — the `PUBLIC_TO_SELF` this
+section used to claim does not exist in TikTok's enum (corrected 2026-10-15). Either way, a
+restarted job creates real objects on both accounts and spends their daily upload quota. Check
+both columns before restarting an old job on a live channel:
 
 ```bat
 sqlite3 ..\storage\app.db "select id, status, auto_upload, upload_privacy from jobs where id=89;"

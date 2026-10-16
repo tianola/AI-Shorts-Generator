@@ -14,13 +14,14 @@ import time
 import json
 import asyncio
 import socket
+import random
 import subprocess
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
-from sqlalchemy import text
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 from database.session import SessionLocal, init_database
 from database.models import Job, Clip, JobProgress
@@ -561,7 +562,7 @@ async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_t
     return clips
 
 
-async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index: int, clip: dict, total_clips: int, clip_errors: list, video_path: str, words_file: str, source_title: Optional[str], source_channel: Optional[str], upload_privacy: str, tiktok_privacy: str, update_progress: Callable[[str, int], None], lease_stop: Optional[threading.Event] = None) -> None:
+async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index: int, clip: dict, total_clips: int, clip_errors: list, video_path: str, words_file: str, source_title: Optional[str], source_channel: Optional[str], tiktok_privacy: str, update_progress: Callable[[str, int], None], lease_stop: Optional[threading.Event] = None) -> None:
     """Render one clip end to end: cut, crop, captions, effects, metadata, upload.
     Every failure is recorded in clip_errors instead of raised, because one bad
     segment must not throw away the other clips a job already rendered. The
@@ -958,47 +959,23 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         job_info(job_id, f"Clip {index + 1}/{total_clips} saved to DB with ID {clip_id}")
 
         # =========================================================
-        # 5i. IMMEDIATE PER-CLIP AUTO-UPLOAD (YouTube & TikTok)
-        # Uploads progressively as each clip renders (prevents batch bursts)
+        # 5i. AUTO-UPLOAD: YouTube joins the queue, TikTok publishes here
+        # The YouTube clip is parked in the database rather than uploaded the
+        # second it renders: the queue releases one publish per gap, and the clock
+        # for that lives in the clip row, so neither a burst nor a worker restart
+        # changes the cadence the channel is seen with.
         # =========================================================
         if getattr(job, "auto_upload", False):
-            # YouTube Immediate Upload
             try:
-                from services.youtube_upload import get_youtube_auth_status, upload_clip_to_youtube
-                from utils.upload_pacing import await_for_slot
-                yt_status = get_youtube_auth_status()
-                if yt_status.get("authenticated"):
-                    if clip_db.youtube_video_id:
-                        job_info(job_id, f"Clip {index + 1} already on YouTube ({clip_db.youtube_video_id}), skipping re-upload")
-                    else:
-                        waited = await await_for_slot("youtube", stop=lease_stop)
-                        if lease_stop is not None and lease_stop.is_set():
-                            job_warning(job_id, f"Lease lost while pacing Clip {index + 1}; leaving it unpublished rather than racing another worker")
-                        else:
-                            if waited:
-                                job_info(job_id, f"⏳ Clip {index + 1} rendered; waited {int(waited)} s since the last publish to keep the channel's cadence human")
-                                update_progress(f"⏳ Clip {index + 1}/{total_clips} ready — spacing the publish ({int(waited)} s)...", current_clip_pct)
-                            job_info(job_id, f"⚡ [Auto-Upload] Uploading Clip {index + 1}/{total_clips} to YouTube Shorts as '{upload_privacy}'...")
-                            yt_res = upload_clip_to_youtube(
-                                video_path=final_path,
-                                title=final_title,
-                                description=metadata.get("description", ""),
-                                hashtags=metadata.get("hashtags", ["#Shorts"]),
-                                source_title=source_title,
-                                privacy_status=upload_privacy,
-                                job_id=job_id
-                            )
-                            clip_db.uploaded = True
-                            clip_db.youtube_video_id = yt_res.get("video_id")
-                            clip_db.published_at = datetime.utcnow()
-                            clip_db.upload_error = None
-                            db.commit()
-                            db.refresh(clip_db)
-                            job_info(job_id, f"🎉 Clip {index + 1}/{total_clips} on YouTube: {yt_res.get('shorts_url')}")
+                if clip_db.youtube_video_id:
+                    job_info(job_id, f"Clip {index + 1} already on YouTube ({clip_db.youtube_video_id}), skipping")
+                else:
+                    enqueue_clips_for_publish(db, job_id)
+                    db.refresh(clip_db)
+                    job_info(job_id, f"Clip {index + 1}/{total_clips} queued for YouTube, "
+                                     f"due {clip_db.publish_due_at:%Y-%m-%d %H:%M} UTC")
             except Exception as yt_err:
-                job_warning(job_id, f"Per-clip YouTube auto-upload skipped/failed for Clip #{index + 1}: {yt_err}")
-                clip_db.upload_error = str(yt_err)
-                db.commit()
+                job_warning(job_id, f"Could not queue Clip #{index + 1} for YouTube: {yt_err}")
 
             # TikTok Immediate Upload
             try:
@@ -1041,27 +1018,193 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         return
 
 
-async def stage_publish_all_clips(job_id: int, db: Session, job: Job, upload_privacy: str, tiktok_privacy: str, update_progress: Callable[[str, int], None], lease_stop: Optional[threading.Event] = None) -> None:
-    """Publish every rendered clip when the job asked for it on completion.
+PUBLISH_CLAIM_MINUTES = 30
+
+
+def next_publish_slot(db, now: Optional[datetime] = None) -> datetime:
+    """The earliest moment the next YouTube publish may go out.
+
+    The spacing used to live in a dict inside the pacing module, so a worker
+    restart reset it and the very next upload fired immediately. The last publish
+    that actually happened is already recorded on its clip row, so the queue reads
+    the gap from the database and survives the restart.
+    """
+    now = now or datetime.utcnow()
+    gap = max(0, int(settings.UPLOAD_MIN_GAP_SECONDS))
+    if gap == 0:
+        return now
+    last = db.query(func.max(Clip.published_at)).filter(
+        Clip.youtube_video_id.isnot(None),
+        Clip.youtube_video_id != "",
+    ).scalar()
+    if not last:
+        return now
+    jitter = max(0, int(settings.UPLOAD_GAP_JITTER_SECONDS))
+    return max(now, last + timedelta(seconds=gap + random.uniform(0, jitter)))
+
+
+def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None) -> int:
+    """Park every rendered clip of a job in the publish queue.
+
+    Idempotent: a clip that already waits keeps the slot it was given, and one that
+    already has a video id is finished. Returns how many rows were added.
+    """
+    now = now or datetime.utcnow()
+    pending = db.query(Clip).filter(
+        Clip.job_id == job_id,
+        Clip.publish_due_at.is_(None),
+        or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
+    ).order_by(Clip.index.asc()).all()
+    if not pending:
+        return 0
+    slot = next_publish_slot(db, now=now)
+    for clip in pending:
+        clip.publish_due_at = slot
+    db.commit()
+    return len(pending)
+
+
+def claim_clip_for_publish(db, clip_id: int, expected_due: datetime,
+                           now: Optional[datetime] = None) -> bool:
+    """Take one queued clip, refusing it if anybody moved it first.
+
+    The claim moves the due time out rather than deleting it: a worker that dies
+    mid-upload leaves a row that simply becomes due again, the same way an expired
+    job lease comes back to the queue.
+    """
+    now = now or datetime.utcnow()
+    result = db.execute(
+        text("UPDATE clips SET publish_due_at=:held "
+             "WHERE id=:cid AND publish_due_at=:expected"),
+        {"held": now + timedelta(minutes=PUBLISH_CLAIM_MINUTES),
+         "cid": clip_id, "expected": expected_due},
+    )
+    db.commit()
+    return result.rowcount == 1
+
+
+def _clip_video_path(clip) -> Optional[str]:
+    if not clip.file_path:
+        return None
+    if os.path.exists(clip.file_path):
+        return clip.file_path
+    candidate = Path(settings.STORAGE_ROOT) / clip.file_path
+    return str(candidate) if candidate.exists() else None
+
+
+def _source_title_for_job(job_id: int) -> Optional[str]:
+    meta_file = Path(settings.STORAGE_ROOT) / "jobs" / str(job_id) / "meta.json"
+    try:
+        if meta_file.exists():
+            return json.loads(meta_file.read_text(encoding="utf-8")).get("title")
+    except Exception:
+        return None
+    return None
+
+
+def _record_publish_failure(db, clip, now: datetime, message: str) -> None:
+    """Keep the clip queued and decide when it may be tried again.
+
+    YouTube's upload limit is the channel's budget, not a fault in this clip, so it
+    is not charged as an attempt: the clip waits hours instead of retiring after
+    three refusals on a busy day. Everything else counts, and a clip that fails
+    MAX_UPLOAD_RETRIES times leaves the queue for a human to read.
+    """
+    clip.upload_error = message
+    if "uploadLimitExceeded" in message:
+        clip.publish_due_at = now + timedelta(
+            hours=max(1, int(settings.PUBLISH_LIMIT_RETRY_HOURS)))
+        db.commit()
+        return
+    clip.upload_retry_count = (clip.upload_retry_count or 0) + 1
+    if clip.upload_retry_count >= max(1, int(settings.MAX_UPLOAD_RETRIES)):
+        clip.publish_due_at = None
+        job_warning(clip.job_id, f"Clip #{clip.index} left the publish queue after "
+                                 f"{clip.upload_retry_count} failed attempts: {message}")
+    else:
+        clip.publish_due_at = now + timedelta(
+            minutes=max(1, int(settings.PUBLISH_RETRY_MINUTES)))
+    db.commit()
+
+
+def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[Callable] = None) -> int:
+    """Upload the single oldest clip whose time has come. Returns 1 when one went out.
+
+    One clip per call, so the poll loop paces itself: after a publish the next slot
+    is an hour away and every later pass finds nothing due.
+    """
+    now = now or datetime.utcnow()
+    row = db.query(Clip, Job).join(Job, Clip.job_id == Job.id).filter(
+        Clip.publish_due_at.isnot(None),
+        Clip.publish_due_at <= now,
+        Job.auto_upload.is_(True),
+        or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
+    ).order_by(Clip.publish_due_at.asc()).first()
+    if not row:
+        return 0
+
+    clip, job = row
+    if not claim_clip_for_publish(db, clip.id, clip.publish_due_at, now=now):
+        return 0
+    db.expire_all()
+
+    video_path = _clip_video_path(clip)
+    if not video_path:
+        _record_publish_failure(db, clip, now,
+                                "Rendered file is missing, nothing was uploaded")
+        job_warning(job.id, f"Clip #{clip.index} could not be published: no file at {clip.file_path}")
+        return 0
+
+    if uploader is None:
+        from services.youtube_upload import upload_clip_to_youtube
+        uploader = upload_clip_to_youtube
+    try:
+        res = uploader(
+            video_path=video_path,
+            title=clip.title or f"Viral Moment #{clip.index + 1}",
+            description=clip.description or "Watch this viral moment!",
+            hashtags=clip.hashtags or ["#Shorts", "#Viral", "#Trending"],
+            source_title=_source_title_for_job(job.id),
+            privacy_status=getattr(job, "upload_privacy", None) or settings.AUTO_UPLOAD_PRIVACY,
+            job_id=job.id,
+        )
+    except Exception as e:
+        _record_publish_failure(db, clip, now, str(e))
+        job_warning(job.id, f"Queued clip #{clip.index} failed to publish: {e}")
+        return 0
+
+    clip.uploaded = True
+    clip.youtube_video_id = res.get("video_id")
+    clip.published_at = datetime.utcnow()
+    clip.publish_due_at = None
+    clip.upload_error = None
+    db.commit()
+    job_info(job.id, f"🎉 Clip #{clip.index} published from the queue: {res.get('shorts_url')}")
+    from utils.upload_pacing import note_upload
+    note_upload("youtube")
+    return 1
+
+
+async def stage_publish_all_clips(job_id: int, db: Session, job: Job, tiktok_privacy: str, update_progress: Callable[[str, int], None], lease_stop: Optional[threading.Event] = None) -> None:
+    """Queue every rendered clip when the job asked for it on completion.
+
     Runs only for a job where every clip rendered: a partially failed job is
-    left for a human to review, never swept into a channel automatically.
+    left for a human to review, never swept into a channel automatically. YouTube
+    clips are parked in the publish queue here instead of uploaded in place,
+    because a sweep that uploads on the spot ignores the spacing — that is how five
+    clips of job 91 went out inside four seconds. TikTok still publishes directly.
     """
     if getattr(job, "auto_upload", False):
         try:
             job_info(job_id, f"Auto-upload triggered for Job #{job_id}...")
-            update_progress("⚡ Auto-uploading clips to YouTube & TikTok...", 100)
+            update_progress("⚡ Queuing clips for YouTube & TikTok...", 100)
 
-            # Auto upload to YouTube if authenticated
             try:
-                from services.youtube_upload import upload_all_clips_for_job, get_youtube_auth_status
-                yt_status = get_youtube_auth_status()
-                if yt_status.get("authenticated"):
-                    job_info(job_id, "Auto-uploading to YouTube Shorts...")
-                    upload_all_clips_for_job(job_id, db, privacy_status=upload_privacy,
-                                             pace=True, stop=lease_stop)
-                    job_info(job_id, f"YouTube Shorts auto-upload complete for Job #{job_id}")
+                queued = enqueue_clips_for_publish(db, job_id)
+                job_info(job_id, f"Queued {queued} clip(s) for YouTube, one publish every "
+                                 f"{int(settings.UPLOAD_MIN_GAP_SECONDS // 60)} min")
             except Exception as yt_err:
-                job_warning(job_id, f"YouTube auto-upload failed: {yt_err}")
+                job_warning(job_id, f"YouTube queue step failed: {yt_err}")
 
             # Auto upload to TikTok
             try:
@@ -1229,7 +1372,7 @@ async def process_job_async(job_id: int):
         for index, clip in enumerate(clips):
             await process_clip(db, job, job_id, job_dir, index, clip, total_clips,
                                clip_errors, video_path, words_file, source_title,
-                               source_channel, upload_privacy, tiktok_privacy,
+                               source_channel, tiktok_privacy,
                                update_progress, lease_stop=lease_stop)
         # =====================
         # 6. COMPLETE JOB
@@ -1258,7 +1401,7 @@ async def process_job_async(job_id: int):
             # =========================================================
             # 7. AUTO-UPLOAD ON COMPLETION (YouTube & TikTok)
             # =========================================================
-            await stage_publish_all_clips(job_id, db, job, upload_privacy,
+            await stage_publish_all_clips(job_id, db, job,
                                           tiktok_privacy, update_progress,
                                           lease_stop=lease_stop)
 
@@ -1317,6 +1460,13 @@ def process_jobs():
         db = SessionLocal()
 
         try:
+            # The publish queue drains on its own clock, ahead of the guards below:
+            # a clip whose hour has come goes out even when this worker cannot start
+            # a new render, because uploading needs neither ffmpeg nor free disk.
+            try:
+                publish_queued_clips(db)
+            except Exception as queue_err:
+                logger.error(f"YouTube publish queue failed: {queue_err}")
             if missing:
                 # Claiming a job we cannot render would only burn it into
                 # 'failed', so leave jobs queued until the tools appear.
