@@ -10,8 +10,11 @@ import numpy as np
 import cv2
 from typing import Tuple, Optional
 
-# YOLO COCO classes we treat as "focus-worthy objects"
-FOCUS_CLASSES = {
+# YOLO COCO classes we treat as "focus-worthy objects".
+# person is the tracking subject; the rest are the things a clip can be *about*
+# (the demo on a desk, the pet in the shot, the product being described), which
+# is what :mod:`services.scene_attention` matches spoken words against.
+DEFAULT_FOCUS_CLASSES = {
     0: "person",
     62: "tv",
     63: "laptop",
@@ -22,7 +25,36 @@ FOCUS_CLASSES = {
     39: "bottle",
     53: "pizza",
     46: "banana",
+    2: "car",
+    15: "cat",
+    16: "dog",
+    65: "remote",
+    66: "keyboard",
+    73: "book",
 }
+
+
+def resolve_focus_classes(env_value: Optional[str] = None) -> dict:
+    """The focus-worthy classes, overridable with YOLO_FOCUS_CLASSES.
+
+    The override names classes (``laptop,cell phone,dog``), because a name is
+    what every consumer here reads back — and an unknown name is dropped rather
+    than silently widening the detector. ``person`` is always kept: the tracking
+    that every layout decision reads would stop without it.
+    """
+    raw = (os.getenv("YOLO_FOCUS_CLASSES", "") if env_value is None else env_value).strip()
+    if not raw:
+        return dict(DEFAULT_FOCUS_CLASSES)
+    by_name = {name.lower(): (cls_id, name) for cls_id, name in DEFAULT_FOCUS_CLASSES.items()}
+    resolved = {0: "person"}
+    for token in raw.split(","):
+        hit = by_name.get(token.strip().lower())
+        if hit:
+            resolved[hit[0]] = hit[1]
+    return resolved
+
+
+FOCUS_CLASSES = resolve_focus_classes()
 
 # COCO classes considered "unsafe content" for smart blurring. The ids here are
 # the real COCO 80-class indices — the previous list was off by one in several

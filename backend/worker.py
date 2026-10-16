@@ -135,7 +135,7 @@ def _clear_derived_artifacts(job_dir, job_id):
     stale_files = [
         "audio.wav", "words.json", "segments.json", "transcript.txt",
         "short.mp4", "vertical.mp4", "final_short.mp4", "final_with_title.mp4",
-        "final_with_sfx.mp4", "popup_card.png", "captions.ass",
+        "final_with_sfx.mp4", "popup_card.png", "captions.ass", "diarization.json",
     ]
     for name in stale_files:
         p = os.path.join(str(job_dir), name)
@@ -182,6 +182,20 @@ def _drop_transcription_input(job_dir, job_id):
     if freed:
         job_info(job_id, f"Removed transcription input, freed {freed / 1024**2:.1f} MB")
     return freed
+
+
+def load_clip_diarization(job_dir, clip_start: float, clip_end: float) -> list:
+    """Speaker turns inside one clip, re-zeroed to clip time. [] when none."""
+    try:
+        path = os.path.join(str(job_dir), "diarization.json")
+        if not os.path.exists(path):
+            return []
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        from services.diarization import slice_turns
+        return slice_turns(data.get("turns") or [], clip_start, clip_end)
+    except Exception:
+        return []
 
 
 def cut_clip(
@@ -415,6 +429,85 @@ async def stage_transcribe(job_id: int, job: Job, job_dir: Path, audio_path: str
     return segments, segments_file, words_file, source_title, source_channel
 
 
+async def stage_diarize(job_id: int, job_dir: Path, video_path: str, update_progress: Callable[[str, int], None]) -> list:
+    """Who speaks when across the source, written to diarization.json.
+
+    Soft by design: a missing HF token, a gated model, or an undecodable
+    source leaves the job with no speaker turns and a logged warning — every
+    later stage reads 'no diarization' as the old behavior, not as an error.
+    """
+    diarization_file = os.path.join(str(job_dir), "diarization.json")
+    if os.path.exists(diarization_file):
+        try:
+            with open(diarization_file, "r", encoding="utf-8") as f:
+                turns = (json.load(f) or {}).get("turns") or []
+            job_info(job_id, f"Diarization already on disk: {len(turns)} speaker turns (resume)")
+            return turns
+        except Exception as e:
+            job_warning(job_id, f"Could not read existing diarization.json ({e}); re-running diarization")
+
+    if not settings.DIARIZATION_ENABLED:
+        job_info(job_id, "Step 3b/8: Speaker diarization disabled (DIARIZATION_ENABLED=false), skipping")
+        return []
+
+    job_info(job_id, "Step 3b/8: Speaker diarization (pyannote, CPU)...")
+    update_progress("Identifying speakers...", 51)
+    try:
+        from services.diarization import try_diarize
+        turns = try_diarize(video_path)
+    except Exception as e:
+        # try_diarize is soft-fail by contract; the stage must be too.
+        turns = None
+        job_warning(job_id, f"Diarization stage error ({e}); continuing without speaker turns")
+    if turns is None:
+        job_warning(job_id, "Speaker diarization unavailable; layouts fall back to motion/object heuristics")
+        return []
+    try:
+        with open(diarization_file, "w", encoding="utf-8") as f:
+            json.dump({"model": settings.DIARIZATION_MODEL, "turns": turns}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        job_warning(job_id, f"Diarization computed but could not be written to disk: {e}")
+    job_info(job_id, f"Diarization: {len(turns)} speaker turns")
+    return turns
+
+
+async def stage_scene_attention(job_id: int, clip_dir, short_path: str, clip_words_file: str,
+                                 clip_transcript: str) -> Optional[dict]:
+    """What each scene of this clip is about, for the reframe decision.
+
+    The keyword tier is local and always cheap; the text tier is one gateway call
+    per clip, and the vision tier is off unless it is explicitly switched on. The
+    whole stage is skipped when SCENE_ATTENTION_ENABLED is false, and any failure
+    — a dead gateway, an unreadable transcript — degrades to None with a log line,
+    leaving the crop on the person heuristics it already used.
+    """
+    if not getattr(settings, "SCENE_ATTENTION_ENABLED", True):
+        return None
+    try:
+        from services import reframe_plan
+        from services.scene_attention import build_attention
+        analysis = reframe_plan.analyse_clip(short_path)
+        attention = await build_attention(analysis, clip_words_file, clip_transcript or "")
+    except Exception as e:
+        job_warning(job_id, f"Scene attention unavailable ({e}); cropping stays on the person heuristics")
+        return None
+    if not attention:
+        return None
+    for note in attention.get("notes") or []:
+        job_info(job_id, f"Scene attention: {note}")
+    scenes = attention.get("scenes") or []
+    if scenes:
+        job_info(job_id, "Scene attention focuses: " + "; ".join(
+            f"{scene.get('target')} {float(scene.get('start') or 0.0):.1f}-{float(scene.get('end') or 0.0):.1f}s"
+            for scene in scenes))
+    try:
+        with open(os.path.join(str(clip_dir), "attention.json"), "w", encoding="utf-8") as f:
+            json.dump(attention, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        job_warning(job_id, f"Scene attention computed but could not be written to disk: {e}")
+    return attention
+
+
 async def stage_score_audio_energy(job_id: int, video_path: str, segments: list, segments_file: str, update_progress: Callable[[str, int], None]) -> list:
     """Rank each segment by loudness so clip selection has a signal beyond text.
     Fails soft: a broken RMS pass leaves the neutral 0.5 score rather than
@@ -505,17 +598,6 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # =====================
         # User's chosen preset on the job ALWAYS takes precedence to keep all clips consistent
         layout_choice = getattr(job, "default_layout_mode", None) or clip.get("layout") or "auto"
-        if layout_choice in ("auto", "adaptive", None, ""):
-            try:
-                from services.smart_crop import detect_adaptive_layout
-                resolved_layout = detect_adaptive_layout(short_path)
-                job_info(job_id, f"Auto-detected adaptive layout for clip {index}: '{resolved_layout}'")
-            except Exception as e:
-                job_info(job_id, f"Adaptive layout detection fallback: {e}")
-                resolved_layout = "single_speaker"
-        else:
-            resolved_layout = layout_choice
-
         caption_style = getattr(job, "default_caption_style", None) or clip.get("caption_style") or "mrbeast"
 
         # 5c. Crop Words
@@ -526,6 +608,38 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         else:
             job_info(job_id, "Words already cropped")
 
+        # ---- transcript (used for SFX selection + virality) ----
+        clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
+
+        # ---- speaker diarization for this clip ([] when the source had none) ----
+        clip_turns = load_clip_diarization(job_dir, clip_start, clip_end)
+        if clip_turns:
+            job_info(job_id, f"Diarization: {len(clip_turns)} speaker turns in clip {index + 1}")
+
+        # ---- scene attention: what the clip is about, moment to moment ----
+        # Worth a model call only when the crop will actually follow something:
+        # a preset static/fit_blur/split_screen never reads the focus trajectory.
+        clip_attention = None
+        if settings.SCENE_ATTENTION_ENABLED and (
+                layout_choice in ("auto", "adaptive", None, "")
+                or layout_choice in ("single_speaker", "face_tracked")):
+            clip_attention = await stage_scene_attention(
+                job_id, clip_dir, short_path, clip_words_file, clip_transcript)
+
+        # Layout resolution runs after the voices and the scene read are known, so
+        # the reframe decision can follow who is talking and what they describe.
+        if layout_choice in ("auto", "adaptive", None, ""):
+            try:
+                from services.smart_crop import detect_adaptive_layout
+                resolved_layout = detect_adaptive_layout(short_path, diarization=clip_turns or None,
+                                                          attention=clip_attention)
+                job_info(job_id, f"Auto-detected adaptive layout for clip {index}: '{resolved_layout}'")
+            except Exception as e:
+                job_info(job_id, f"Adaptive layout detection fallback: {e}")
+                resolved_layout = "single_speaker"
+        else:
+            resolved_layout = layout_choice
+
         # 5d. Generate ASS Captions with Selected Preset & Emojis
         captions_path = os.path.join(str(clip_dir), "captions.ass")
         if not os.path.exists(captions_path):
@@ -535,9 +649,6 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             job_info(job_id, "Captions already exist")
 
         final_path = os.path.join(str(clip_dir), "final_short.mp4")
-
-        # ---- transcript (used for SFX selection + virality) ----
-        clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
 
         # ---- Content safety: smart blur (optional) ----
         smart_blur_frag = None
@@ -594,7 +705,8 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                 from services.sfx import pick_sfx_for_clip, _find_sfx_file
                 from services.render import render_single_pass as _rsp
 
-                vertical_frag = build_vertical_filter(short_path, mode=resolved_layout)
+                vertical_frag = build_vertical_filter(short_path, mode=resolved_layout,
+                                                      diarization=clip_turns or None, attention=clip_attention)
                 sfx_list = pick_sfx_for_clip(clip.get("title", "") or "", clip_transcript, job.style_prompt or "")
                 sfx_files = []
                 sfx_ts = []
@@ -1094,6 +1206,10 @@ async def process_job_async(job_id: int):
         # =====================
         segments, segments_file, words_file, source_title, source_channel = \
             await stage_transcribe(job_id, job, job_dir, audio_path, update_progress)
+        # =====================
+        # 3b. SPEAKER DIARIZATION (who talks when, for the reframe decisions)
+        # =====================
+        await stage_diarize(job_id, job_dir, video_path, update_progress)
         # =====================
         # 4. AUDIO ENERGY PRE-PASS (before clip selection)
         # =====================

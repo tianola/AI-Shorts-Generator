@@ -230,6 +230,305 @@ class TestFocusTrajectory:
 
 
 # ---------------------------------------------------------------------------
+# diarization: the voice picks the subject
+# ---------------------------------------------------------------------------
+
+
+def _turns(*specs):
+    return [{"speaker": speaker, "start": a, "end": b} for speaker, a, b in specs]
+
+
+def _shot_reverse_shot(switch_at: float = 5.0, n: int = 20):
+    """Only the speaker's own shot is on screen — a camera that cuts on turns."""
+    frames = []
+    for i in range(n):
+        ts = i * 0.5
+        frames.append([_person(300, 250, 400, 600)] if ts < switch_at else [_person(1200, 250, 400, 600)])
+    samples = _samples(frames)
+    tracks = plan.associate_person_tracks(samples)
+    return samples, tracks
+
+
+class TestVoiceChoosesTheSubject:
+    def test_alternating_voices_switch_the_crop_between_their_tracks(self):
+        samples, tracks = _shot_reverse_shot()
+        diarization = _turns(("A", 0.0, 5.0), ("B", 5.0, 10.0))
+        # Head motion alone would pin the whole clip on the left figure.
+        analysis = _analysis(tracks, samples, None, speech=0.7, motion={0: 0.062, 1: 0.01})
+        focus = plan.choose_focus(analysis, diarization=diarization)
+        assert focus["kind"] == "person"
+        assert focus["reason"] == "speaker turns bound 2 voices to their tracks"
+        # The left voice owns the first half, the right voice the second.
+        assert focus["boxes"][0][1][0] < 600
+        assert focus["boxes"][-1][1][0] > 1100
+
+    def test_one_voice_on_camera_outweighs_head_motion(self):
+        """The camera stays mostly on the talker; the listener fidgets."""
+        frames = []
+        for i in range(20):
+            ts = i * 0.5
+            frames.append([_person(300, 250, 400, 600)] if ts < 7.0 else [_person(1200, 250, 400, 600)])
+        samples = _samples(frames)
+        tracks = plan.associate_person_tracks(samples)
+        # Motion claims the right-hand figure; the voice says the left one talks.
+        analysis = _analysis(tracks, samples, None, speech=0.7, motion={0: 0.01, 1: 0.06})
+        diarization = _turns(("A", 0.0, 9.5))
+        focus = plan.choose_focus(analysis, diarization=diarization)
+        assert focus["reason"] == "dominant speaker by voice"
+        assert focus["track_id"] == 0
+        assert focus["boxes"][0][1][0] < 600
+
+    def test_two_always_visible_people_leave_the_read_to_motion(self):
+        """Presence is tied in a wide two-shot — no coin-flip bindings."""
+        samples = _two_person_frames(20)
+        tracks = plan.associate_person_tracks(samples)
+        analysis = _analysis(tracks, samples, None, speech=0.7, motion={0: 0.06, 1: 0.008})
+        diarization = _turns(("A", 0.0, 9.5))
+        focus = plan.choose_focus(analysis, diarization=diarization)
+        assert focus["reason"] == "dominant speaker by head motion"
+        assert focus["track_id"] == 0
+
+    def test_a_thing_the_clip_is_about_survives_the_voices(self):
+        person = _person(200, 300, 260, 380)
+        screen = _obj(62, "tv", 500, 150, 1300, 800)
+        samples = _samples([[person, screen] for _ in range(20)])
+        tracks = plan.associate_person_tracks(samples)
+        analysis = _analysis(tracks, samples, None, speech=0.7, motion={0: 0.001})
+        diarization = _turns(("A", 0.0, 9.5))
+        focus = plan.choose_focus(analysis, diarization=diarization)
+        assert focus["kind"] == "object"
+
+
+class TestDecideLayoutWithVoices:
+    def test_balanced_voices_force_the_split_despite_motion_dominance(self):
+        samples = _two_person_frames(20)
+        tracks = plan.associate_person_tracks(samples)
+        pair = plan.find_two_shot(tracks, samples, SRC_W, SRC_H)
+        diarization = _turns(("A", 0.0, 2.5), ("B", 2.5, 5.0), ("A", 5.0, 7.5), ("B", 7.5, 10.0))
+        analysis = _analysis(tracks, samples, pair, speech=0.6, motion={0: 0.09, 1: 0.005})
+        # Motion alone reads one gesturing talker; the voices say a conversation.
+        assert plan.decide_layout(analysis)[0] == "single_speaker"
+        assert plan.decide_layout(analysis, diarization=diarization)[0] == "split_screen"
+
+    def test_one_voice_carrying_the_clip_vetoes_a_motion_split(self):
+        samples = _two_person_frames(20)
+        tracks = plan.associate_person_tracks(samples)
+        pair = plan.find_two_shot(tracks, samples, SRC_W, SRC_H)
+        diarization = _turns(("A", 0.0, 9.5), ("B", 9.5, 10.0))
+        analysis = _analysis(tracks, samples, pair, speech=0.6, motion={0: 0.05, 1: 0.045})
+        assert plan.decide_layout(analysis)[0] == "split_screen"
+        mode, focus = plan.decide_layout(analysis, diarization=diarization)
+        assert mode == "single_speaker"
+        assert focus is not None
+
+    def test_alternating_voices_without_a_two_shot_follow_the_talker(self):
+        samples, tracks = _shot_reverse_shot()
+        diarization = _turns(("A", 0.0, 5.0), ("B", 5.0, 10.0))
+        analysis = _analysis(tracks, samples, None, speech=0.7, motion={})
+        mode, focus = plan.decide_layout(analysis, diarization=diarization)
+        assert mode == "single_speaker"
+        assert focus["boxes"][0][1][0] < 600
+        assert focus["boxes"][-1][1][0] > 1100
+
+
+class TestDiarizationReachesTheRenderSeams:
+    def test_detect_adaptive_layout_forwards_the_turns(self, monkeypatch):
+        from services import reframe_plan, smart_crop
+
+        captured = {}
+
+        def fake_resolve(video_path, sample_interval=0.5, diarization=None, attention=None):
+            captured["diarization"] = diarization
+            return "single_speaker", None
+
+        monkeypatch.setattr(reframe_plan, "resolve", fake_resolve)
+        turns = _turns(("A", 0.0, 1.0))
+        mode = smart_crop.detect_adaptive_layout("dummy.mp4", diarization=turns)
+        assert mode == "single_speaker"
+        assert captured["diarization"] == turns
+
+    def test_a_preset_single_speaker_uses_the_voice_focus(self, monkeypatch):
+        import services.focus_tracking as focus_tracking
+        from services import reframe_plan, vertical
+
+        analysis = {
+            "samples": [(0.0, [_person(1200, 250, 400, 600)])],
+            "tracks": [],
+            "n_samples": 1,
+            "src_w": SRC_W,
+            "src_h": SRC_H,
+            "two_shot": None,
+            "speech": 0.7,
+            "motion": {},
+            "focus": None,
+        }
+        monkeypatch.setattr(reframe_plan, "analyse_clip", lambda path, sample_interval=0.5: analysis)
+
+        captured = {}
+
+        def fake_choose_focus(analysis_arg, diarization=None, attention=None):
+            captured["diarization"] = diarization
+            return {"kind": "person", "boxes": [(0.0, (100, 100, 200, 300))], "reason": "dominant speaker by voice"}
+
+        monkeypatch.setattr(reframe_plan, "choose_focus", fake_choose_focus)
+        monkeypatch.setattr(vertical, "_probe_size", lambda path: (SRC_W, SRC_H))
+        seen = {}
+
+        def fake_face(samples, src_w, src_h, target_w, target_h, focus_boxes=None):
+            seen["focus_boxes"] = focus_boxes
+            return "crop=200:300:100:100"
+
+        monkeypatch.setattr(focus_tracking, "build_face_crop_filter", fake_face)
+        turns = _turns(("A", 0.0, 1.0))
+        frag = vertical.build_vertical_filter("dummy.mp4", mode="single_speaker", diarization=turns)
+        assert captured["diarization"] == turns
+        assert seen["focus_boxes"] == [(0.0, (100, 100, 200, 300))]
+        assert "crop=200:300:100:100" in frag
+
+
+# ---------------------------------------------------------------------------
+# scene attention moves the crop onto the thing being described
+# ---------------------------------------------------------------------------
+
+
+def _attention(target, start, end, boxes, importance=0.8, visibility=1.0):
+    return {"scenes": [{
+        "start": start, "end": end, "target": target, "boxes": boxes,
+        "importance": importance, "visibility": visibility, "source": "keyword",
+    }], "notes": []}
+
+
+class TestAttentionMovesTheCrop:
+    def _person_laptop_clip(self):
+        person = _person(200, 200, 400, 700)
+        laptop = _obj(63, "laptop", 900, 300, 500, 350)
+        frames = []
+        for i in range(30):  # 0 s .. 14.5 s
+            ts = i * 0.5
+            frames.append([person, laptop] if 10.0 <= ts <= 14.5 else [person])
+        samples = _samples(frames)
+        tracks = plan.associate_person_tracks(samples)
+        return samples, tracks, person["box"], laptop["box"]
+
+    def test_attention_moves_the_crop_onto_the_object_being_described(self):
+        samples, tracks, person_box, laptop_box = self._person_laptop_clip()
+        analysis = _analysis(tracks, samples, None, speech=0.7, motion={})
+        boxes = [(ts, laptop_box) for ts, _d in samples if 10.0 <= ts <= 14.5]
+        focus = plan.choose_focus(analysis, attention=_attention("laptop", 10.0, 15.0, boxes))
+
+        assert focus["kind"] == "person"  # still a follow-crop, only re-centred
+        at = {round(ts, 1): box for ts, box in focus["boxes"]}
+        assert at[12.0] == laptop_box
+        assert at[2.0] == person_box
+        assert "attention on 'laptop'" in focus["reason"]
+
+    def test_a_scene_that_is_not_important_enough_leaves_the_crop_alone(self):
+        samples, tracks, person_box, laptop_box = self._person_laptop_clip()
+        analysis = _analysis(tracks, samples, None, speech=0.7, motion={})
+        boxes = [(ts, laptop_box) for ts, _d in samples if 10.0 <= ts <= 14.5]
+        focus = plan.choose_focus(analysis, attention=_attention("laptop", 10.0, 15.0, boxes, importance=0.4))
+        assert focus["reason"] == "largest person"
+        assert all(box == person_box for _ts, box in focus["boxes"])
+
+    def test_a_scene_the_camera_rarely_shows_is_not_followed(self):
+        samples, tracks, person_box, laptop_box = self._person_laptop_clip()
+        analysis = _analysis(tracks, samples, None, speech=0.7, motion={})
+        boxes = [(ts, laptop_box) for ts, _d in samples if 10.0 <= ts <= 14.5]
+        focus = plan.choose_focus(analysis, attention=_attention("laptop", 10.0, 15.0, boxes, visibility=0.2))
+        assert all(box == person_box for _ts, box in focus["boxes"])
+
+    def test_attention_without_any_person_still_frames_the_object(self):
+        laptop = _obj(63, "laptop", 900, 300, 500, 350)
+        samples = _samples([[laptop] for _ in range(20)])
+        tracks = plan.associate_person_tracks(samples)
+        analysis = _analysis(tracks, samples, None, speech=0.7, motion={})
+        boxes = [(ts, laptop["box"]) for ts, _d in samples]
+        focus = plan.choose_focus(analysis, attention=_attention("laptop", 0.0, 10.0, boxes))
+        assert focus is not None
+        assert focus["kind"] == "object"
+        assert "attention on 'laptop'" in focus["reason"]
+
+    def test_an_attended_person_stays_in_the_follow_crop(self):
+        laptop = _obj(63, "laptop", 900, 300, 500, 350)
+        person = _person(200, 200, 400, 700)
+        samples = _samples([[person, laptop] if 10.0 <= i * 0.5 <= 14.5 else [person] for i in range(30)])
+        tracks = plan.associate_person_tracks(samples)
+        analysis = _analysis(tracks, samples, None, speech=0.7, motion={})
+        boxes = [(ts, laptop["box"]) for ts, _d in samples if 10.0 <= ts <= 14.5]
+        mode, focus = plan.decide_layout(analysis, attention=_attention("laptop", 10.0, 15.0, boxes))
+        assert mode == "single_speaker"
+        assert focus["kind"] == "person"
+
+    def test_attention_composes_with_the_voices(self):
+        left, right, laptop = (300, 250, 400, 600), (1200, 250, 400, 600), (700, 700, 400, 300)
+        frames = []
+        for i in range(20):
+            ts = i * 0.5
+            dets = [_person(*(left if ts < 5.0 else right))]
+            if 6.0 <= ts <= 8.5:
+                dets.append(_obj(63, "laptop", *laptop))
+            frames.append(dets)
+        samples = _samples(frames)
+        tracks = plan.associate_person_tracks(samples)
+        diarization = _turns(("A", 0.0, 5.0), ("B", 5.0, 10.0))
+        analysis = _analysis(tracks, samples, None, speech=0.7, motion={})
+        boxes = [(ts, laptop) for ts, _d in samples if 6.0 <= ts <= 8.5]
+
+        focus = plan.choose_focus(analysis, diarization=diarization,
+                                  attention=_attention("laptop", 6.0, 9.0, boxes))
+
+        at = {round(ts, 1): box for ts, box in focus["boxes"]}
+        assert at[0.0] == left
+        assert at[6.5] == laptop
+        assert at[9.5] == right
+        assert "speaker turns" in focus["reason"] and "attention on 'laptop'" in focus["reason"]
+
+
+class TestAttentionReachesTheRenderSeams:
+    def test_detect_adaptive_layout_forwards_the_attention(self, monkeypatch):
+        from services import reframe_plan, smart_crop
+
+        captured = {}
+
+        def fake_resolve(video_path, sample_interval=0.5, diarization=None, attention=None):
+            captured["attention"] = attention
+            return "single_speaker", None
+
+        monkeypatch.setattr(reframe_plan, "resolve", fake_resolve)
+        attention = _attention("laptop", 1.0, 2.0, [(1.0, (0, 0, 10, 10))])
+        smart_crop.detect_adaptive_layout("dummy.mp4", attention=attention)
+        assert captured["attention"] is attention
+
+    def test_build_vertical_filter_forwards_the_attention(self, monkeypatch):
+        import services.focus_tracking as focus_tracking
+        from services import reframe_plan, vertical
+
+        analysis = {
+            "samples": [(0.0, [_person(1200, 250, 400, 600)])],
+            "tracks": [], "n_samples": 1, "src_w": SRC_W, "src_h": SRC_H,
+            "two_shot": None, "speech": 0.7, "motion": {}, "focus": None,
+        }
+        monkeypatch.setattr(reframe_plan, "analyse_clip", lambda path, sample_interval=0.5: analysis)
+
+        captured = {}
+
+        def fake_choose_focus(analysis_arg, diarization=None, attention=None):
+            captured["attention"] = attention
+            return {"kind": "person", "boxes": [(0.0, (100, 100, 200, 300))], "reason": "largest person"}
+
+        monkeypatch.setattr(reframe_plan, "choose_focus", fake_choose_focus)
+        monkeypatch.setattr(vertical, "_probe_size", lambda path: (SRC_W, SRC_H))
+
+        def fake_face(samples, src_w, src_h, target_w, target_h, focus_boxes=None):
+            return "crop=200:300:100:100"
+
+        monkeypatch.setattr(focus_tracking, "build_face_crop_filter", fake_face)
+        attention = _attention("laptop", 0.0, 1.0, [(0.0, (100, 100, 200, 300))])
+        vertical.build_vertical_filter("dummy.mp4", mode="single_speaker", attention=attention)
+        assert captured["attention"] is attention
+
+
+# ---------------------------------------------------------------------------
 # the speech probe (real ffmpeg, cheap synthetic files)
 # ---------------------------------------------------------------------------
 

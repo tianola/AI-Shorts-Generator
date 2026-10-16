@@ -68,6 +68,26 @@ class Settings(BaseSettings):
     )
 
     # ====================
+    # SPEAKER DIARIZATION
+    # ====================
+    HF_KEY: Optional[str] = Field(
+        default=None,
+        description="HuggingFace access token for gated model downloads "
+                    "(pyannote speaker diarization). The model pages must also "
+                    "be accepted on huggingface.co with this account."
+    )
+    DIARIZATION_ENABLED: bool = Field(
+        default=True,
+        description="Run job-level speaker diarization after transcription. "
+                    "Soft-fails to single-speaker behaviour when the token or "
+                    "models are unavailable."
+    )
+    DIARIZATION_MODEL: str = Field(
+        default="pyannote/speaker-diarization-3.1",
+        description="pyannote pipeline checkpoint for speaker diarization"
+    )
+
+    # ====================
     # CLIP SELECTION
     # ====================
     NUM_CLIPS: int = Field(
@@ -150,6 +170,29 @@ class Settings(BaseSettings):
     SINGLE_PASS_RENDER: bool = Field(
         default=True,
         description="Render each clip in one unified ffmpeg pass (vertical + captions + title + SFX) instead of 5-6 sequential re-encodes"
+    )
+
+    # ====================
+    # SCENE / ATTENTION UNDERSTANDING
+    # ====================
+    SCENE_ATTENTION_ENABLED: bool = Field(
+        default=True,
+        description="Per-clip scene/attention understanding (which object the "
+                    "speech is about, what matters in each scene) that can "
+                    "steer the crop focus. The local tier always runs; the "
+                    "text-LLM tier soft-fails to it."
+    )
+    SCENE_ATTENTION_VLM: bool = Field(
+        default=False,
+        description="Send sampled keyframes to a vision model through OmniRoute "
+                    "for scene understanding. Off by default: it uploads video "
+                    "frames to the gateway."
+    )
+    SCENE_ATTENTION_VLM_MODEL: str = Field(
+        default="",
+        description="OmniRoute model id for the VLM tier (any image-capable "
+                    "model). Empty disables the VLM tier even when "
+                    "SCENE_ATTENTION_VLM is on."
     )
 
     # ====================

@@ -116,3 +116,133 @@ def test_source_metadata_is_returned(job_dir, monkeypatch):
     _segments, _segments_file, _words_file, title, channel = _run(job_dir, _job())
 
     assert (title, channel) == ("My video", "Some channel")
+
+
+# ---------------------------------------------------------------------------
+# stage_diarize: who speaks when, soft-failing into the old behaviour
+# ---------------------------------------------------------------------------
+
+def _run_diarize(job_dir):
+    return asyncio.run(worker.stage_diarize(
+        1, job_dir, str(job_dir / "source.mp4"), lambda stage, percent: None))
+
+
+class TestStageDiarize:
+    def test_turns_are_written_and_a_resume_never_re_runs_the_model(self, job_dir, monkeypatch):
+        import services.diarization as diar
+        calls = []
+
+        def fake_try_diarize(path):
+            calls.append(path)
+            return [{"speaker": "SPEAKER_00", "start": 0.0, "end": 1.2}]
+
+        monkeypatch.setattr(diar, "try_diarize", fake_try_diarize)
+
+        turns = _run_diarize(job_dir)
+
+        assert turns == [{"speaker": "SPEAKER_00", "start": 0.0, "end": 1.2}]
+        assert len(calls) == 1
+        data = json.loads((job_dir / "diarization.json").read_text(encoding="utf-8"))
+        assert data["turns"] == turns
+
+        def explode(path):
+            raise AssertionError("a resumed job must not re-run diarization")
+
+        monkeypatch.setattr(diar, "try_diarize", explode)
+        assert _run_diarize(job_dir) == turns
+
+    def test_disabled_diarization_is_skipped_entirely(self, job_dir, monkeypatch):
+        import services.diarization as diar
+
+        def explode(path):
+            raise AssertionError("DIARIZATION_ENABLED=false must not run pyannote")
+
+        monkeypatch.setattr(diar, "try_diarize", explode)
+        monkeypatch.setattr(worker.settings, "DIARIZATION_ENABLED", False)
+
+        assert _run_diarize(job_dir) == []
+        assert not (job_dir / "diarization.json").exists()
+
+    def test_an_unavailable_diarizer_is_a_warning_not_a_failure(self, job_dir, monkeypatch):
+        import services.diarization as diar
+        monkeypatch.setattr(diar, "try_diarize", lambda path: None)
+
+        assert _run_diarize(job_dir) == []
+        assert not (job_dir / "diarization.json").exists()
+
+    def test_a_broken_diarizer_never_kills_the_job(self, job_dir, monkeypatch):
+        import services.diarization as diar
+
+        def explode(path):
+            raise RuntimeError("torch exploded")
+
+        monkeypatch.setattr(diar, "try_diarize", explode)
+        assert _run_diarize(job_dir) == []
+
+
+# ---------------------------------------------------------------------------
+# per-clip diarization slice
+# ---------------------------------------------------------------------------
+
+class TestClipDiarizationSlice:
+    def test_turns_are_sliced_and_re_zeroed_to_clip_time(self, job_dir):
+        (job_dir / "diarization.json").write_text(json.dumps({"turns": [
+            {"speaker": "A", "start": 0.5, "end": 2.0},
+            {"speaker": "B", "start": 11.0, "end": 13.5},
+            {"speaker": "A", "start": 20.0, "end": 22.0},
+        ]}), encoding="utf-8")
+
+        assert worker.load_clip_diarization(job_dir, 10.0, 15.0) == [
+            {"speaker": "B", "start": 1.0, "end": 3.5},
+        ]
+
+    def test_missing_or_broken_diarization_degrades_to_empty(self, job_dir):
+        assert worker.load_clip_diarization(job_dir, 0.0, 10.0) == []
+        (job_dir / "diarization.json").write_text("{not json", encoding="utf-8")
+        assert worker.load_clip_diarization(job_dir, 0.0, 10.0) == []
+
+
+# ---------------------------------------------------------------------------
+# scene attention: what the clip is about, soft-failing into no new signal
+# ---------------------------------------------------------------------------
+
+def _run_attention(job_dir, monkeypatch, builder, enabled=True):
+    import services.reframe_plan as reframe_plan
+    import services.scene_attention as scene_attention
+    from config import settings
+
+    monkeypatch.setattr(settings, "SCENE_ATTENTION_ENABLED", enabled)
+    monkeypatch.setattr(reframe_plan, "analyse_clip",
+                        lambda path, sample_interval=0.5: {"samples": [], "tracks": []})
+    monkeypatch.setattr(scene_attention, "build_attention", builder)
+    return asyncio.run(worker.stage_scene_attention(
+        1, job_dir, str(job_dir / "short.mp4"), str(job_dir / "words.json"), "hello world"))
+
+
+class TestStageSceneAttention:
+    def test_attention_is_written_to_the_clip_dir_for_debugging(self, job_dir, monkeypatch):
+        scenes = [{"start": 1.0, "end": 3.0, "target": "laptop", "importance": 0.8,
+                   "visibility": 1.0, "source": "keyword", "boxes": [[1.0, [900, 300, 500, 350]]]}]
+
+        async def builder(analysis, words_file, transcript):
+            return {"scenes": scenes, "notes": ["keyword tier: 1 scene"]}
+
+        attention = _run_attention(job_dir, monkeypatch, builder)
+
+        assert attention["scenes"] == scenes
+        written = json.loads((job_dir / "attention.json").read_text(encoding="utf-8"))
+        assert written["scenes"][0]["target"] == "laptop"
+
+    def test_disabled_attention_never_touches_a_model_or_writes_a_file(self, job_dir, monkeypatch):
+        async def builder(analysis, words_file, transcript):
+            raise AssertionError("SCENE_ATTENTION_ENABLED=false must not build attention")
+
+        assert _run_attention(job_dir, monkeypatch, builder, enabled=False) is None
+        assert not (job_dir / "attention.json").exists()
+
+    def test_a_broken_attention_builder_is_only_a_log_line(self, job_dir, monkeypatch):
+        async def builder(analysis, words_file, transcript):
+            raise RuntimeError("gateway exploded")
+
+        assert _run_attention(job_dir, monkeypatch, builder) is None
+        assert not (job_dir / "attention.json").exists()

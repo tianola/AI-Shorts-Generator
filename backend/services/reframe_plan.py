@@ -8,7 +8,11 @@ questions an editor implicitly asks:
 
   * do exactly two people stay in shot, at comparable size, most of the clip?
   * is anyone actually speaking, and is one of them the one doing it?
+  * who does the diarization say is talking — a balanced conversation, or one
+    voice carrying the clip? (when speaker turns are available)
   * or is the real subject a thing on screen (a screen, a ball, a product)?
+  * and while the narration is describing that thing, should the crop move onto
+    it for those seconds? (when a scene read is available)
 
 Only the first two together justify stacking two people; everything else
 follows one subject, and the crop follows the one that is talking rather than
@@ -39,6 +43,13 @@ SPEECH_RATIO_MIN = 0.10          # a conversation is mostly talking
 VOICE_FLOOR_RMS = 0.02           # ≈ -34 dBFS: below this nobody is audible
 MOTION_DOMINANCE_RATIO = 1.7     # head motion of the talker over the listener
 MIN_HEAD_MOTION = 0.004          # below this both are just JPEG/cut noise
+MIN_SPEAKER_SHARE = 0.30         # both voices of a conversation carry this much talk time
+MIN_BINDING_PRESENCE = 0.50      # a voice's own picture is on screen most of its turns
+BINDING_DOMINANCE = 1.3          # ...and clearly ahead of the runner-up track
+ATTENTION_MIN_IMPORTANCE = 0.6   # the narration must be clearly about the thing
+ATTENTION_MIN_VISIBILITY = 0.34  # ...and the camera must show it this often in that window
+ATTENTION_MIN_IMPORTANCE = 0.6   # narration must be clearly about the thing to move the crop
+ATTENTION_MIN_VISIBILITY = 0.34  # ...and the camera must show it this often in that window
 
 _CACHE: "Dict[str, Dict[str, Any]]" = {}
 _CACHE_ORDER: List[str] = []
@@ -391,8 +402,136 @@ def analyse_clip(video_path: str, sample_interval: float = 0.5) -> Dict[str, Any
     return analysis
 
 
-def choose_focus(analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The single subject a follow-crop should hold onto."""
+def _talk_shares(diarization: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Fraction of on-mic talk time each voice holds."""
+    totals: Dict[str, float] = {}
+    for turn in diarization:
+        speaker = turn.get("speaker")
+        if speaker is None:
+            continue
+        totals[speaker] = totals.get(speaker, 0.0) + max(
+            0.0, float(turn.get("end", 0.0)) - float(turn.get("start", 0.0))
+        )
+    grand = sum(totals.values())
+    if grand <= 0:
+        return {}
+    return {speaker: value / grand for speaker, value in totals.items()}
+
+
+def _balanced_conversation(diarization: List[Dict[str, Any]]) -> bool:
+    """Exactly two voices that each carry a real share of the clip.
+
+    Two talkers, not 'any two voices anywhere': a 30 s guest answer with a 2 s
+    'mm-hm' is an interview, not a conversation, and stacking it would bury
+    the person the clip is actually about.
+    """
+    shares = _talk_shares(diarization)
+    return len([s for s, share in shares.items() if share >= MIN_SPEAKER_SHARE]) == 2
+
+
+def _speaker_track_binding(diarization: List[Dict[str, Any]], tracks: List[Dict[str, Any]], samples: List[Tuple[float, list]]) -> Dict[str, int]:
+    """Which on-screen track belongs to each voice, when that is decidable.
+
+    Evidence, not identification: every sampled frame inside a voice's turns is
+    a vote for each track visible in it. A voice binds to the track that owns
+    most of its talk time — but only when that track clearly leads, because two
+    always-visible people tie exactly and a coin-flip binding would crop the
+    wrong face for the whole clip.
+    """
+    if not diarization or not tracks or not samples:
+        return {}
+    seen_at = {tr["id"]: {ts for ts, _box in tr["timeline"]} for tr in tracks}
+    totals: Dict[str, int] = {}
+    counts: Dict[str, Dict[int, int]] = {}
+    for ts, _dets in samples:
+        speaker: Optional[str] = None
+        for turn in diarization:
+            if float(turn.get("start", 0.0)) <= ts <= float(turn.get("end", 0.0)):
+                speaker = turn.get("speaker")
+                break
+        if speaker is None:
+            continue
+        totals[speaker] = totals.get(speaker, 0) + 1
+        for track_id, seen in seen_at.items():
+            if ts in seen:
+                bucket = counts.setdefault(speaker, {})
+                bucket[track_id] = bucket.get(track_id, 0) + 1
+    binding: Dict[str, int] = {}
+    for speaker, bucket in counts.items():
+        ranked = sorted(bucket.items(), key=lambda item: item[1], reverse=True)
+        best_id, best = ranked[0]
+        runner_up = ranked[1][1] if len(ranked) > 1 else 0
+        total = max(1, totals.get(speaker, 0))
+        if best / total >= MIN_BINDING_PRESENCE and best >= BINDING_DOMINANCE * runner_up:
+            binding[speaker] = best_id
+    return binding
+
+
+def _speaker_switch_boxes(diarization: List[Dict[str, Any]], bound: Dict[str, Dict[str, Any]]) -> List[Tuple[float, tuple]]:
+    """One timeline that cuts to whoever is speaking, from the bound tracks.
+
+    A turn whose voice has no bound track contributes nothing — better to hold
+    the last proven face than to guess at a face we never tied to a voice.
+    """
+    boxes: List[Tuple[float, tuple]] = []
+    for turn in diarization:
+        track = bound.get(turn.get("speaker"))
+        if track is None:
+            continue
+        start = float(turn.get("start", 0.0))
+        end = float(turn.get("end", 0.0))
+        for ts, box in track["timeline"]:
+            if start <= ts <= end:
+                boxes.append((ts, box))
+    boxes.sort(key=lambda item: item[0])
+    deduped: List[Tuple[float, tuple]] = []
+    for ts, box in boxes:
+        if deduped and abs(deduped[-1][0] - ts) < 1e-6:
+            deduped[-1] = (ts, box)
+        else:
+            deduped.append((ts, box))
+    return deduped
+
+
+def _voice_focus(analysis: Dict[str, Any], diarization: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The subject the voices choose, when they can prove one."""
+    tracks = analysis.get("tracks") or []
+    samples = analysis.get("samples") or []
+    if not diarization or not tracks or not samples:
+        return None
+    binding = _speaker_track_binding(diarization, tracks, samples)
+    if not binding:
+        return None
+    by_id = {tr["id"]: tr for tr in tracks}
+    bound = {speaker: by_id[track_id] for speaker, track_id in binding.items() if track_id in by_id}
+    if not bound:
+        return None
+    shares = _talk_shares(diarization)
+    talkers = [speaker for speaker, share in shares.items() if share >= MIN_SPEAKER_SHARE]
+    if len(talkers) == 2 and all(speaker in bound for speaker in talkers) \
+            and len({bound[speaker]["id"] for speaker in talkers}) == 2:
+        boxes = _speaker_switch_boxes(diarization, bound)
+        if boxes:
+            return {
+                "kind": "person",
+                "boxes": boxes,
+                "reason": "speaker turns bound 2 voices to their tracks",
+            }
+    if shares:
+        top = max(shares, key=shares.get)
+        if top in bound:
+            track = bound[top]
+            return {
+                "kind": "person",
+                "track_id": track["id"],
+                "boxes": [(ts, box) for ts, box in track["timeline"]],
+                "reason": "dominant speaker by voice",
+            }
+    return None
+
+
+def _base_focus(analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The motion/object read of the clip, without the voices."""
     samples = analysis.get("samples") or []
     tracks = analysis.get("tracks") or []
     src_w = analysis.get("src_w", 1920)
@@ -436,13 +575,95 @@ def choose_focus(analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def decide_layout(analysis: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any]]]:
-    """(mode, focus) for one clip: a two-shot only when two people carry it."""
+def _attention_focus(attention: Optional[Dict[str, Any]], focus: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Put the thing the narration is describing where the crop is looking.
+
+    The scenes arriving here were already chosen for meaning — a spoken word, a
+    model's reading of the transcript — but their boxes are still the detector's,
+    and they replace the box only at the timestamps they cover. Everywhere else
+    the crop keeps following the person it was following, which is why an object
+    scene can live inside a 'person' focus. A scene that was not gated for
+    importance, or whose target the camera barely showed, is skipped; attention
+    with nothing to say leaves the focus exactly as it was.
+    """
+    scenes = (attention or {}).get("scenes") or []
+    chosen = []
+    for scene in scenes:
+        try:
+            importance = float(scene.get("importance", 0.0))
+            visibility = float(scene.get("visibility", 1.0))
+        except (TypeError, ValueError):
+            continue
+        boxes = scene.get("boxes") or []
+        if not boxes or importance < ATTENTION_MIN_IMPORTANCE or visibility < ATTENTION_MIN_VISIBILITY:
+            continue
+        chosen.append(scene)
+    if not chosen:
+        return focus
+
+    merged: Dict[float, Any] = {}
+    for ts, box in (focus or {}).get("boxes") or []:
+        merged[round(float(ts), 4)] = box
+    for scene in chosen:
+        for ts, box in scene.get("boxes") or []:
+            merged[round(float(ts), 4)] = box
+
+    first = min(chosen, key=lambda scene: float(scene.get("start", 0.0)))
+    label = (f"attention on '{first.get('target') or 'object'}' "
+             f"{float(first.get('start', 0.0)):.1f}-{float(first.get('end', 0.0)):.1f}s")
+    merged_focus: Dict[str, Any] = {
+        "kind": (focus or {}).get("kind") or "object",
+        "boxes": sorted(merged.items()),
+        "reason": f"{focus['reason']}; {label}" if focus and focus.get("reason") else label,
+    }
+    if focus and focus.get("track_id") is not None:
+        merged_focus["track_id"] = focus["track_id"]
+    return merged_focus
+
+
+def choose_focus(analysis: Dict[str, Any], diarization: Optional[List[Dict[str, Any]]] = None,
+                 attention: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """The single subject a follow-crop should hold onto.
+
+    With ``diarization`` (speaker turns from :mod:`services.diarization`) the
+    voices pick the subject whenever they can be bound to on-screen tracks; a
+    clip whose real subject is a thing on screen keeps that read. With
+    ``attention`` (the clip's scenes from :mod:`services.scene_attention`) the
+    crop is moved onto the object being described while the description lasts.
+    Without either, the decision is exactly what it was before.
+    """
+    base = _base_focus(analysis)
+    focus = base
+    if diarization and not (base and base.get("kind") == "object"):
+        voice = _voice_focus(analysis, diarization)
+        if voice is not None:
+            focus = voice
+    if attention:
+        focus = _attention_focus(attention, focus)
+    return focus
+
+
+def decide_layout(analysis: Dict[str, Any], diarization: Optional[List[Dict[str, Any]]] = None,
+                  attention: Optional[Dict[str, Any]] = None) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """(mode, focus) for one clip: a two-shot only when two people carry it.
+
+    ``diarization`` is the clip's speaker turns; when present they outrank the
+    head-motion read inside a two-shot — a balanced pair of voices stacks the
+    frame, a single voice keeps it on that person. ``attention`` is the clip's
+    scene read, and moves the follow-crop onto the object being described while
+    the description lasts.
+    """
     two_shot = analysis.get("two_shot")
     speech = analysis.get("speech")
     motion = analysis.get("motion") or {}
+    turns = diarization or []
 
     if two_shot and speech is not None and speech >= SPEECH_RATIO_MIN:
+        if turns:
+            if _balanced_conversation(turns):
+                return "split_screen", None
+            # One voice carries this clip: follow the talker, do not stack the listener.
+            return "single_speaker", choose_focus(analysis, diarization=diarization, attention=attention)
         left, right = two_shot
         left_motion = motion.get(left["id"], 0.0)
         right_motion = motion.get(right["id"], 0.0)
@@ -450,9 +671,9 @@ def decide_layout(analysis: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any
         both_carry_it = louder <= MOTION_DOMINANCE_RATIO * max(quieter, MIN_HEAD_MOTION)
         if both_carry_it:
             return "split_screen", None
-        return "single_speaker", choose_focus(analysis)
+        return "single_speaker", choose_focus(analysis, attention=attention)
 
-    focus = analysis.get("focus")
+    focus = choose_focus(analysis, diarization=diarization, attention=attention)
     if focus is None:
         return "fit_blur", None
     if focus.get("kind") == "object":
@@ -460,9 +681,12 @@ def decide_layout(analysis: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any
     return "single_speaker", focus
 
 
-def resolve(video_path: str, sample_interval: float = 0.5) -> Tuple[str, Optional[Dict[str, Any]]]:
+def resolve(video_path: str, sample_interval: float = 0.5,
+            diarization: Optional[List[Dict[str, Any]]] = None,
+            attention: Optional[Dict[str, Any]] = None) -> Tuple[str, Optional[Dict[str, Any]]]:
     """Mode plus the subject to follow — the entry point the render stages use."""
-    return decide_layout(analyse_clip(video_path, sample_interval=sample_interval))
+    return decide_layout(analyse_clip(video_path, sample_interval=sample_interval),
+                         diarization=diarization, attention=attention)
 
 
 def describe(video_path: str, sample_interval: float = 0.5) -> str:

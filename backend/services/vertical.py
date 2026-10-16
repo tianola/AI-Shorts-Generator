@@ -220,6 +220,8 @@ def build_vertical_filter(
     mode: Optional[str] = None,
     target_width: int = 1080,
     target_height: int = 1920,
+    diarization: Optional[list] = None,
+    attention: Optional[dict] = None,
 ) -> str:
     """
     Build a filter_complex fragment `[0:v] ... [vsingle]` that converts the
@@ -234,16 +236,18 @@ def build_vertical_filter(
 
     'auto' resolves through :mod:`services.reframe_plan`, which also names the
     subject to follow: the person carrying the clip, or the object the clip is
-    about. The analysis is memoised per file, so the layout question and the
-    crop question stop paying for the same YOLO sampling pass twice.
+    about. ``diarization`` (speaker turns) lets the voice pick the subject when
+    it can be tied to a track, and ``attention`` (the clip's scenes) moves the
+    crop onto the object being described; both are optional and change nothing
+    when absent.
     """
     from services import reframe_plan
 
     analysis = reframe_plan.analyse_clip(input_video)
     if mode is None or mode in ("auto", "adaptive", ""):
-        mode, focus = reframe_plan.decide_layout(analysis)
+        mode, focus = reframe_plan.decide_layout(analysis, diarization=diarization, attention=attention)
     else:
-        focus = analysis.get("focus")
+        focus = reframe_plan.choose_focus(analysis, diarization=diarization, attention=attention)
 
     from services.focus_tracking import (
         build_split_screen_filter,

@@ -9,17 +9,20 @@ from config import settings
 from utils.logger import job_info, job_error
 
 
-def detect_adaptive_layout(video_path: str, sample_interval: float = 0.5) -> str:
+def detect_adaptive_layout(video_path: str, sample_interval: float = 0.5, diarization=None, attention=None) -> str:
     """Pick the layout a human editor would pick for this clip.
 
     Delegates to :mod:`services.reframe_plan`, which requires exactly two
     persistent, comparably sized people before it stacks the frame — the old
     rule here asked whether two boxes existed anywhere in the clip and said
-    yes to a presenter with a passer-by, or a three-person shot.
+    yes to a presenter with a passer-by, or a three-person shot. ``diarization``
+    (the clip's speaker turns) lets the voices outrank the motion read, and
+    ``attention`` (its scene read) moves the crop onto what is being described.
     """
     try:
         from services import reframe_plan
-        mode, _focus = reframe_plan.resolve(video_path, sample_interval=sample_interval)
+        mode, _focus = reframe_plan.resolve(video_path, sample_interval=sample_interval,
+                                            diarization=diarization, attention=attention)
         return mode
     except Exception as e:
         job_error(0, f"Adaptive layout detection error: {e}")
