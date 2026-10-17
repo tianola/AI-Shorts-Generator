@@ -481,6 +481,10 @@ async def stage_scene_attention(job_id: int, clip_dir, short_path: str, clip_wor
     whole stage is skipped when SCENE_ATTENTION_ENABLED is false, and any failure
     — a dead gateway, an unreadable transcript — degrades to None with a log line,
     leaving the crop on the person heuristics it already used.
+
+    When the regular scene attention returns 0 scenes (YOLO detected no objects),
+    falls back to VLM-based scene understanding which can identify buildings,
+    construction, fields, etc. that COCO classes miss.
     """
     if not getattr(settings, "SCENE_ATTENTION_ENABLED", True):
         return None
@@ -497,6 +501,27 @@ async def stage_scene_attention(job_id: int, clip_dir, short_path: str, clip_wor
     for note in attention.get("notes") or []:
         job_info(job_id, f"Scene attention: {note}")
     scenes = attention.get("scenes") or []
+
+    # VLM FALLBACK: When regular scene attention found 0 scenes (no YOLO objects),
+    # try VLM-based understanding which can identify buildings, vehicles, etc.
+    if not scenes:
+        job_info(job_id, "Scene attention found 0 scenes, trying VLM fallback...")
+        try:
+            from services import reframe_plan
+            from services.vlm_scene_attention import build_vlm_attention
+            analysis = reframe_plan.analyse_clip(short_path)
+            vlm_attention = await build_vlm_attention(
+                analysis, clip_words_file, clip_transcript or "", video_path=short_path
+            )
+            if vlm_attention and vlm_attention.get("scenes"):
+                job_info(job_id, f"VLM fallback found {len(vlm_attention['scenes'])} scenes")
+                for note in vlm_attention.get("notes") or []:
+                    job_info(job_id, f"VLM scene attention: {note}")
+                attention = vlm_attention
+                scenes = attention.get("scenes") or []
+        except Exception as e:
+            job_warning(job_id, f"VLM scene attention fallback failed ({e}); using person heuristics")
+
     if scenes:
         job_info(job_id, "Scene attention focuses: " + "; ".join(
             f"{scene.get('target')} {float(scene.get('start') or 0.0):.1f}-{float(scene.get('end') or 0.0):.1f}s"
