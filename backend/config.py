@@ -68,6 +68,38 @@ class Settings(BaseSettings):
     )
 
     # ====================
+    # FALLBACK LLM PROVIDERS
+    # ====================
+    TOGETHER_API_KEY: Optional[str] = Field(
+        default=None,
+        description="Together AI API key (free tier: $25/mo, Llama 3.1 405B, Qwen)"
+    )
+    TOGETHER_BASE_URL: str = Field(
+        default="https://api.together.xyz/v1",
+        description="Together AI OpenAI-compatible base URL"
+    )
+    TOGETHER_MODEL: str = Field(
+        default="meta-llama/Llama-3.1-405B-Instruct-Turbo",
+        description="Together AI model for clip selection fallback"
+    )
+    GOOGLE_AI_STUDIO_KEY: Optional[str] = Field(
+        default=None,
+        description="Google AI Studio (Gemini) API key"
+    )
+    GOOGLE_AI_STUDIO_MODEL: str = Field(
+        default="gemini-flash-latest",
+        description="Google AI Studio model for vision tasks"
+    )
+    HF_ROUTER_BASE_URL: str = Field(
+        default="https://router.huggingface.co/v1",
+        description="HuggingFace Inference Router base URL (OpenAI-compatible)"
+    )
+    HF_ROUTER_MODEL: str = Field(
+        default="Qwen/Qwen3-VL-4B-Instruct:featherless-ai",
+        description="HuggingFace Router model for VLM tasks (Qwen3-VL via Featherless AI)"
+    )
+
+    # ====================
     # SPEAKER DIARIZATION
     # ====================
     HF_KEY: Optional[str] = Field(

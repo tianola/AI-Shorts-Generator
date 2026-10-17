@@ -527,7 +527,29 @@ async def stage_score_audio_energy(job_id: int, video_path: str, segments: list,
     return segments
 
 
-async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_title: Optional[str], update_progress: Callable[[str, int], None]) -> list:
+async def stage_temporal_localization(job_id: int, video_path: str, segments: list, job_dir: Path, update_progress: Callable[[str, int], None]) -> list:
+    """Build a visual event timeline for the full video.
+
+    Runs YOLO sampling + scene-change detection to find interesting moments
+    (object appearances, person entries, scene cuts).  The timeline feeds
+    into clip selection so the LLM knows *what happens* visually, not just
+    *what is said*.  Soft-fails: returns [] if sampling crashes.
+    """
+    job_info(job_id, "Step 4a/8: Temporal event localization (YOLO + scene detection)...")
+    update_progress("Analyzing visual events across video...", 51)
+    events_file = os.path.join(str(job_dir), "temporal_events.json")
+    try:
+        from services.temporal_localization import localise_video, save_events
+        events = localise_video(str(video_path), segments)
+        save_events(events, events_file)
+        job_info(job_id, f"Temporal localization: {len(events)} events found")
+    except Exception as e:
+        job_warning(job_id, f"Temporal localization failed ({e}), continuing without visual events")
+        events = []
+    return events
+
+
+async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_title: Optional[str], update_progress: Callable[[str, int], None], temporal_events: Optional[list] = None) -> list:
     """Pick the clips to render and, for a diagnostic job, vary their hooks.
     Returns the clip dicts the render loop consumes.
     """
@@ -535,7 +557,7 @@ async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_t
     update_progress("Analyzing virality & selecting top clips...", 52)
     
     num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else settings.NUM_CLIPS
-    clips = await select_clips(segments_file, num_target_clips, video_title=source_title)
+    clips = await select_clips(segments_file, num_target_clips, video_title=source_title, temporal_events=temporal_events)
     job_info(job_id, f"Selected {len(clips)} clips")
     update_progress(f"Selected {len(clips)} clips", 56)
     
@@ -1364,10 +1386,15 @@ async def process_job_async(job_id: int):
         segments = await stage_score_audio_energy(job_id, video_path, segments,
                                                   segments_file, update_progress)
         # =====================
+        # 4a. TEMPORAL EVENT LOCALIZATION (visual timeline for clip selection)
+        # =====================
+        temporal_events = await stage_temporal_localization(job_id, video_path, segments,
+                                                            job_dir, update_progress)
+        # =====================
         # 4b. SELECT CLIPS
         # =====================
         clips = await stage_select_clips(job_id, job, segments_file, source_title,
-                                         update_progress)
+                                         update_progress, temporal_events=temporal_events)
 
         # =====================
         # 5. PROCESS EACH CLIP

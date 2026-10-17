@@ -86,7 +86,7 @@ def _composite_score(clip: dict) -> float:
     return round(min(1.0, composite), 4)
 
 
-async def select_clips(segments_file: str, num_clips: int = 3, video_title: str = "") -> list:
+async def select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None) -> list:
     """
     Select the best clips from a video using AI.
 
@@ -94,6 +94,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
         segments_file: Path to segments.json
         num_clips: Number of clips to select
         video_title: Optional source video title for contextual hook framing
+        temporal_events: Optional visual event timeline from temporal_localization
 
     Returns:
         List of selected clips
@@ -109,6 +110,19 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
     story_plan = await analyze_story_segments(segments, video_title=video_title)
 
     title_context = f"\n    - Source Video Title / Main Theme: \"{video_title}\"" if video_title else ""
+
+    visual_events_block = ""
+    if temporal_events:
+        from services.temporal_localization import format_events_for_prompt
+        visual_events_block = format_events_for_prompt(temporal_events)
+
+    visual_events_section = f"""
+    {visual_events_block}
+
+    Use the visual events to identify moments where something interesting HAPPENS on screen
+    (new objects appear, people enter, scene changes), not just where the transcript is engaging.
+    Clips that combine compelling speech WITH visual events score higher.
+""" if visual_events_block else ""
 
     prompt = f"""
     You are a world-class TikTok/Shorts viral video producer (OpusClip AI Director).
@@ -139,7 +153,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
 
     Transcript:
     {transcript_text}
-
+    {visual_events_section}
     Return ONLY valid JSON matching this schema:
     {{
         "clips": [
