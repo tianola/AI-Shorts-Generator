@@ -301,7 +301,7 @@ def build_vertical_filter(
                     focus_boxes=(focus or {}).get("boxes"),
                 )
                 if frag:
-                    return f"[0:v]{frag},scale={target_width}:{target_height}:force_original_aspect_ratio=decrease[vsingle]"
+                    return f"[0:v]{frag},scale={target_width}:{target_height}:force_original_aspect_ratio=increase,crop={target_width}:{target_height}[vsingle]"
         except Exception as e:
             logger.warning(f"face-tracked reframing unavailable, falling back to static crop: {e}")
         # fall through to static
