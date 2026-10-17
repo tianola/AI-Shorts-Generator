@@ -1058,8 +1058,9 @@ def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None) -
     if not pending:
         return 0
     slot = next_publish_slot(db, now=now)
-    for clip in pending:
-        clip.publish_due_at = slot
+    gap = max(0, int(settings.UPLOAD_MIN_GAP_SECONDS))
+    for offset, clip in enumerate(pending):
+        clip.publish_due_at = slot + timedelta(seconds=offset * gap)
     db.commit()
     return len(pending)
 
@@ -1130,14 +1131,18 @@ def _record_publish_failure(db, clip, now: datetime, message: str) -> None:
 def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[Callable] = None) -> int:
     """Upload the single oldest clip whose time has come. Returns 1 when one went out.
 
-    One clip per call, so the poll loop paces itself: after a publish the next slot
-    is an hour away and every later pass finds nothing due.
+    One clip per call, and the channel's own gap is checked first: five clips parked
+    at the same minute still leave one per hour, because the queue would otherwise
+    find the second one overdue three seconds later and fire it — the burst this
+    whole path exists to prevent. A row with `publish_due_at` set is the request;
+    the job's `auto_upload` flag decided whether to park it, and is not re-read here.
     """
     now = now or datetime.utcnow()
+    if now < next_publish_slot(db, now=now):
+        return 0
     row = db.query(Clip, Job).join(Job, Clip.job_id == Job.id).filter(
         Clip.publish_due_at.isnot(None),
         Clip.publish_due_at <= now,
-        Job.auto_upload.is_(True),
         or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
     ).order_by(Clip.publish_due_at.asc()).first()
     if not row:

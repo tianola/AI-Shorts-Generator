@@ -117,6 +117,26 @@ def test_a_clip_already_waiting_keeps_its_place(db):
     assert clip.publish_due_at == first
 
 
+def test_parking_a_whole_job_staggers_its_clips_one_per_hour(db):
+    """The schedule is readable in the database, not only implied by the guard.
+
+    Five clips rendered from one job get 0 h, 1 h, 2 h … so a person inspecting the
+    queue can see when each one is expected to leave.
+    """
+    job = Job(youtube_url="https://youtu.be/x", status="completed", auto_upload=True)
+    db.add(job)
+    db.flush()
+    now = datetime(2026, 10, 17, 12, 0)
+    for index in range(3):
+        db.add(Clip(job_id=job.id, index=index, start=0.0, end=9.0, title=f"C{index}",
+                     file_path="jobs/1/clip_0/final_video.mp4"))
+    db.commit()
+
+    assert worker.enqueue_clips_for_publish(db, job.id, now=now) == 3
+    dues = sorted(clip.publish_due_at for clip in db.query(Clip).filter_by(job_id=job.id))
+    assert dues == [now, now + timedelta(hours=1), now + timedelta(hours=2)]
+
+
 # ------------------------------------------------------- the gap, read from disk
 
 def test_the_first_clip_of_an_idle_channel_is_due_immediately(db):
@@ -185,13 +205,39 @@ def test_a_clip_without_a_due_time_is_not_touched(db):
     assert recorder.calls == []
 
 
-def test_a_clip_of_a_job_that_did_not_ask_for_upload_is_skipped(db):
-    clip = _clip(db, auto_upload=False, due=datetime.utcnow() - timedelta(minutes=1))
+def test_a_queued_clip_publishes_even_if_its_job_row_no_longer_asks(db):
+    """The queue row is the request, not the job flag.
+
+    `publish_due_at` is only ever written by an explicit enqueue - the render path
+    for a job with auto_upload on, the completion sweep, or an operator parking a
+    clip by hand. Turning that column into the source of truth is what lets the
+    five refused clips of job 91 rejoin the queue without rewriting the job's own
+    auto_upload semantics, which would also change what restarting it does.
+    """
+    clip = _clip(db, auto_upload=False, due=datetime.utcnow() - timedelta(seconds=1))
     recorder = _Recorder()
-    assert worker.publish_queued_clips(db, now=datetime.utcnow(), uploader=recorder) == 0
-    assert recorder.calls == []
+    assert worker.publish_queued_clips(db, now=datetime.utcnow(), uploader=recorder) == 1
+    assert len(recorder.calls) == 1
     db.refresh(clip)
-    assert clip.uploaded is False
+    assert clip.uploaded is True
+
+
+def test_five_clips_queued_together_still_leave_one_per_hour(db):
+    """The gap belongs to the channel, not to the moment a clip was enqueued.
+
+    A sweep parks five clips with the same due time. Without a channel-level gate
+    the next poll, three seconds later, would find the second one overdue and fire
+    it - which is exactly the burst the queue exists to stop.
+    """
+    now = datetime.utcnow()
+    for index in range(5):
+        _clip(db, index=index, due=now - timedelta(seconds=1))
+    recorder = _Recorder()
+
+    assert worker.publish_queued_clips(db, now=now, uploader=recorder) == 1
+    assert worker.publish_queued_clips(db, now=now + timedelta(minutes=5), uploader=recorder) == 0
+    assert worker.publish_queued_clips(db, now=now + timedelta(minutes=61), uploader=recorder) == 1
+    assert len(recorder.calls) == 2
 
 
 def test_two_workers_cannot_upload_the_same_clip(db):
