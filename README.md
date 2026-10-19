@@ -144,7 +144,7 @@ Then enable it in `backend/.env`:
 ```env
 LOCAL_VLM_ENABLED=true
 LOCAL_VLM_URL=http://localhost:11434
-LOCAL_VLM_MODEL=qwen2.5-vl:3b
+LOCAL_VLM_MODEL=qwen2.5vl:3b
 ```
 
 When enabled, the local tier runs **before** the remote tiers (it answers on this

@@ -3,7 +3,7 @@
 #   powershell -ExecutionPolicy Bypass -File setup_local_vlm.ps1
 # After this, scene attention uses it when LOCAL_VLM_ENABLED=true in backend/.env.
 $ErrorActionPreference = "Stop"
-$Model = if ($env:LOCAL_VLM_MODEL) { $env:LOCAL_VLM_MODEL } else { "qwen2.5-vl:3b" }
+$Model = if ($env:LOCAL_VLM_MODEL) { $env:LOCAL_VLM_MODEL } else { "qwen2.5vl:3b" }
 
 Write-Host "== 1/3 install Ollama (needs admin) =="
 if (Get-Command ollama -ErrorAction SilentlyContinue) {

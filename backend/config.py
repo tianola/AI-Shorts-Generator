@@ -239,7 +239,7 @@ class Settings(BaseSettings):
                     "router's OLLAMA_URL is the Docker host)."
     )
     LOCAL_VLM_MODEL: str = Field(
-        default="qwen2.5-vl:3b",
+        default="qwen2.5vl:3b",
         description="Ollama vision model id (image-capable). Small enough to run "
                     "on CPU here; a name it cannot pull is a soft-fail to the "
                     "next tier."
