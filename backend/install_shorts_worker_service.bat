@@ -37,7 +37,13 @@ rem worker.py runs forever; NSSM brings it back on ANY exit (crash or reboot).
 "%NSSM%" set %SERVICE% DisplayName "AI Shorts Generator Worker" >> "%LOG%" 2>&1
 "%NSSM%" set %SERVICE% Description "Polls the jobs DB, renders clips, drains the publish queue. Runs unattended; no idle-restart." >> "%LOG%" 2>&1
 rem cwd is already AppDirectory, but pin PYTHONPATH so `import config` resolves even if NSSM cwd handling changes.
-"%NSSM%" set %SERVICE% AppEnvironmentExtra "PYTHONPATH=%APP_DIR%" >> "%LOG%" 2>&1
+rem LocalSystem services do NOT inherit this user's PATH, so ffmpeg/ffprobe (a
+rem winget per-user install) must be added to the service's own PATH explicitly —
+rem otherwise the worker logs "ffmpeg is not on PATH" and refuses every job.
+set "FFMPEG_DIR="
+for /f "delims=" %%I in ('where ffmpeg 2^>nul') do if not defined FFMPEG_DIR for %%J in ("%%I") do set "FFMPEG_DIR=%%~dpJ"
+if defined FFMPEG_DIR (echo FFMPEG_DIR=%FFMPEG_DIR% >> "%LOG%") else (echo WARNING: ffmpeg not found on installer PATH >> "%LOG%")
+"%NSSM%" set %SERVICE% AppEnvironmentExtra "PYTHONPATH=%APP_DIR%" "PATH=%FFMPEG_DIR%C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0" >> "%LOG%" 2>&1
 
 echo === Start worker service === >> "%LOG%"
 sc start %SERVICE% >> "%LOG%" 2>&1
