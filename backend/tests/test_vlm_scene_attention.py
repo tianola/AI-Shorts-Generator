@@ -76,6 +76,33 @@ def test_local_vlm_posts_the_frame_as_an_image(monkeypatch):
     assert result["confidence"] == 0.8
 
 
+def test_local_vlm_parses_a_plain_caption(monkeypatch):
+    """moondream-style models return prose, not JSON: a caption naming a building
+    or field must still become a usable scene (that is the whole point — COCO has
+    no class for them), with confidence scaled by how much the model actually saw."""
+    _FakeClient.response = {"response":
+        "The image shows a large crowd of people gathered in a field, "
+        "standing in front of a building."}
+    monkeypatch.setattr(vlm.httpx, "AsyncClient", _FakeClient)
+
+    result = asyncio.run(vlm._local_vlm(_frame(), ""))
+
+    assert result["source"] == "local_ollama"
+    assert result["subject"] in {"building", "field", "nature"}
+    assert "building" in result["caption"]
+    assert result["confidence"] >= 0.5
+
+
+def test_local_vlm_does_not_request_json_format(monkeypatch):
+    """format=json collapses a caption model to garbage; the local tier must not ask for it."""
+    _FakeClient.response = {"response": "a field"}
+    monkeypatch.setattr(vlm.httpx, "AsyncClient", _FakeClient)
+
+    asyncio.run(vlm._local_vlm(_frame(), ""))
+
+    assert "format" not in _FakeClient.last["payload"]
+
+
 def test_local_vlm_is_preferred_when_enabled(monkeypatch):
     """With the local tier on, understand_scene_vlm uses it before the remote tiers."""
     async def _local_ok(frame, transcript):

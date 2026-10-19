@@ -10,7 +10,7 @@ This replaces the old scene_attention.py which relied only on YOLO COCO classes
 """
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import base64
 import cv2
 import httpx
@@ -172,21 +172,21 @@ async def _local_vlm(frame: np.ndarray, transcript_context: str) -> Dict[str, An
         raise ValueError("could not encode frame for Ollama")
     img_b64 = base64.b64encode(buffer).decode()
 
-    prompt = (
-        "You are labeling one frame of a vertical short video so a crop can "
-        "decide what to look at. Identify the main visible subject, the concrete "
-        "things on screen (buildings, construction, vehicles, landscape, props — "
-        "not just people), and what is happening. "
-        f"Spoken context: {transcript_context[:300]}\n"
-        'Reply with JSON only: {"subject": "...", "objects": ["..."], '
-        '"action": "...", "confidence": 0.0-1.0}'
-    )
+    # A plain description prompt: the CPU-friendly tier here is moondream, which
+    # returns prose and is finicky — the phrasing "What is shown in the image?"
+    # is the one verified to give full captions on real frames; longer asks make
+    # it truncate or answer empty. format=json must NOT be set (it collapses a
+    # caption model to a couple of tokens). An instruction-following model that
+    # answers in JSON is still handled (see the try below).
+    prompt = "What is shown in the image?"
+    if transcript_context:
+        prompt = f"Spoken context: {transcript_context[:150]}\n\n{prompt}"
+
     payload = {
         "model": settings.LOCAL_VLM_MODEL,
         "prompt": prompt,
         "images": [img_b64],
         "stream": False,
-        "format": "json",
         "options": {"temperature": 0.2},
     }
 
@@ -195,13 +195,49 @@ async def _local_vlm(frame: np.ndarray, transcript_context: str) -> Dict[str, An
         response.raise_for_status()
         body = response.json()
 
-    answer = _extract_json_obj(body.get("response", ""))
-    answer.setdefault("subject", "person")
-    answer.setdefault("objects", [])
-    answer.setdefault("action", "unknown")
-    answer.setdefault("confidence", 0.5)
-    answer["source"] = "local_ollama"
-    return answer
+    answer = (body.get("response") or "").strip()
+    if not answer:
+        raise ValueError("Ollama returned an empty answer")
+    try:
+        scene = _extract_json_obj(answer)
+    except (ValueError, json.JSONDecodeError):
+        scene = _caption_to_scene(answer)
+    scene.setdefault("subject", "person")
+    scene.setdefault("objects", [])
+    scene.setdefault("action", "unknown")
+    scene.setdefault("confidence", 0.5)
+    scene["caption"] = answer
+    scene["source"] = "local_ollama"
+    return scene
+
+
+# Scene types a caption can name that the COCO detector cannot — mapped to a
+# short label the reframe/hook layers can act on, checked most-specific first.
+_SCENE_KEYWORDS: List[Tuple[str, Tuple[str, ...]]] = [
+    ("construction", ("construction", "crane", "scaffold", "excavat", "demolition", "renovat", "hard hat")),
+    ("building", ("building", "house", "skyscraper", "tower", "warehouse", "roof", "facade", "storefront", "room", "interior", "kitchen")),
+    ("nature", ("field", "forest", "tree", "mountain", "lake", "river", "beach", "ocean", "sky", "garden", "grass")),
+    ("vehicle", ("car", "truck", "bus", "van", "motorcycle", "bike", "boat", "train")),
+    ("crowd", ("crowd", "people gathered", "group of people", "audience")),
+    ("food", ("food", "cook", "meal", "plate", "ingredient", "carrot", "grater", "prepares")),
+    ("animal", ("dog", "cat", "horses", "cow", "bird")),
+    ("person", ("person", "people", "man", "woman", "child", "boy", "girl")),
+]
+
+
+def _caption_to_scene(caption: str) -> Dict[str, Any]:
+    """Turn a free-text frame caption into a scene dict.
+
+    Confidence rises with how much the model actually described (a real caption is
+    far more trustworthy than the transcript heuristics); a near-empty reply is
+    dropped below the 0.3 gate so the caller falls through to the hybrid tier.
+    """
+    lower = caption.lower()
+    subject = next((name for name, keys in _SCENE_KEYWORDS if any(k in lower for k in keys)), "scene")
+    objects = [name for name, keys in _SCENE_KEYWORDS if any(k in lower for k in keys) and name != subject]
+    words = len(caption.split())
+    confidence = 0.0 if words < 3 else min(0.85, 0.5 + words / 40)
+    return {"subject": subject, "objects": objects, "action": "shown", "confidence": round(confidence, 3)}
 
 
 def _extract_json_obj(text: str) -> Dict[str, Any]:

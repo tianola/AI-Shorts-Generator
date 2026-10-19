@@ -144,14 +144,19 @@ Then enable it in `backend/.env`:
 ```env
 LOCAL_VLM_ENABLED=true
 LOCAL_VLM_URL=http://localhost:11434
-LOCAL_VLM_MODEL=qwen2.5vl:3b
+LOCAL_VLM_MODEL=moondream
 ```
+
+`moondream` is the default because it is the vision model that actually runs on
+this CUDA-less box (~1.7 GB, CPU inference in a few seconds). A richer model such
+as `qwen2.5vl:3b` follows instructions better but crashes the Ollama runner on a
+CPU-only build, so it is not the default. The local tier accepts a plain prose
+caption (not JSON) and turns it into a scene, so it works with caption models.
 
 When enabled, the local tier runs **before** the remote tiers (it answers on this
 machine without their timeouts). A missing server or model is a soft-fail: the
 chain falls through to Gemini → OmniRoute → hybrid, so enabling it can never
-hard-fail a clip. It needs the vision model resident — ~6–8 GB RAM on CPU, which
-this machine has headroom for.
+hard-fail a clip. moondream stays resident at roughly 2 GB RAM on CPU.
 
 ---
 

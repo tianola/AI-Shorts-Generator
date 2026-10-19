@@ -1,8 +1,4 @@
 """Tests for temporal event localization."""
-import json
-import os
-import pytest
-from unittest.mock import patch, MagicMock
 
 from services.temporal_localization import (
     _track_objects,
