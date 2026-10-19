@@ -47,7 +47,7 @@ def client():
 
 def _select_clips(monkeypatch, job, clips):
     """Run the real selection stage with the selector's judgement stubbed out."""
-    async def fake_select(segments_file, num_target_clips, video_title=None):
+    async def fake_select(segments_file, num_target_clips, video_title=None, temporal_events=None):
         return [dict(clip) for clip in clips]
 
     monkeypatch.setattr(worker, "select_clips", fake_select)

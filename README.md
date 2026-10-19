@@ -13,6 +13,7 @@
 ## ✨ Key Features
 
 - 👤 **Dynamic Focus Tracking (YOLOv8):** Uses AI to track faces and objects. Intelligently performs split-screen camera changes ("one up, one down" panning) between multiple speakers.
+- 🧠 **Scene Attention (what the clip is *about*):** A three-tier understanding of each clip decides where the crop should look — a local **keyword** tier (a spoken word names an on-screen object), an **LLM text** tier (the transcript implies a subject), and an optional **VLM vision** tier (a frame is described by a vision model). When YOLO's 80 COCO classes find nothing focus-worthy — buildings, construction, cities, fields, which COCO cannot name — a **VLM scene-understanding fallback** steps in: Google Gemini Vision → OmniRoute vision → a pure-transcript **hybrid** tier that always produces scenes without any external API. This is what keeps real-world content (MrBeast-style builds, travel, demos) from collapsing to a static centre crop.
 - 🎨 **Cinematic Motion Titles:** Generates clean, professional text overlays with soft drop-shadows, fading/sliding animations, and custom aesthetic accents without generic gray background boxes.
 - ✂️ **Smart AI Clip Selection:** Finds and extracts the most viral moments from long transcripts.
 - 🎙️ **Audio & Caption Sync:** Auto-transcribes using local **Whisper**, generating accurate word-level dynamic captions (ASS).
@@ -84,6 +85,46 @@ From the root project directory, run:
    $env:PYTHONPATH='.'
    python worker.py
    ```
+
+### Running as a Windows service (NSSM)
+
+`backend/install_shorts_service.bat` registers a `ShortsBackend` NSSM service
+that runs `run_service.py` — the FastAPI API on `:5001`, with an idle-restart
+that exits after `SHORTS_IDLE_RESTART_SECONDS` (default 600) of no HTTP traffic
+so NSSM reloads fresh code. **The service hosts the API only.** The worker that
+claims and renders jobs (`python worker.py`) is a *separate* process: the API
+never starts it, so if the worker dies, jobs sit at `created` and nothing
+renders until it is relaunched. Run the worker as its own service or keep a
+terminal on it. The install script needs an elevated prompt and expects the
+venv at `backend\.venv` (a junction to the root `.venv` works).
+
+---
+
+## 🧠 Scene attention configuration
+
+Scene attention decides *what the clip is about* so the crop can look at it
+instead of defaulting to a static centre frame. It is layered, and every layer
+degrades gracefully to the one below it:
+
+| Tier | What it does | Cost | Env |
+| --- | --- | --- | --- |
+| **keyword** | a spoken word names an on-screen YOLO object | local, always on | `SCENE_ATTENTION_ENABLED=true` (default) |
+| **text LLM** | the transcript implies a subject | one gateway call / clip | same flag |
+| **VLM vision** | a sampled keyframe is described by a vision model | uploads frames | `SCENE_ATTENTION_VLM=true` + `SCENE_ATTENTION_VLM_MODEL=<image-capable id>` |
+| **VLM fallback** | when YOLO's COCO classes find nothing (buildings, construction, fields): Gemini Vision → OmniRoute vision → pure-transcript **hybrid** | hybrid is free, no API | `GOOGLE_AI_STUDIO_KEY` / `GOOGLE_AI_STUDIO_MODEL` for the Gemini tier |
+
+The hybrid fallback always produces scenes from the transcript alone, so a clip
+never collapses to a static crop just because COCO has no class for "city" or
+"construction site". Set `SCENE_ATTENTION_ENABLED=false` to turn the whole stage
+off and keep the person heuristics.
+
+```env
+# optional vision tiers (keys configured in environment, never committed)
+GOOGLE_AI_STUDIO_KEY=
+GOOGLE_AI_STUDIO_MODEL=gemini-flash-latest
+SCENE_ATTENTION_VLM=false                 # off by default: uploads frames
+SCENE_ATTENTION_VLM_MODEL=
+```
 
 ---
 

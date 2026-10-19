@@ -40,13 +40,16 @@ def test_create_job_stores_style_prompt(client, db):
 
 def test_new_job_does_not_auto_publish(client, db):
     """Publishing must stay opt-in: a job created without explicit flags must
-    never be uploaded automatically, and must default to unlisted visibility."""
+    never be uploaded automatically, and must inherit the configured default
+    visibility (shipped as 'unlisted'; an operator may change it in .env)."""
+    from config import settings
+
     response = client.post("/api/jobs", params={"youtube_url": "https://youtube.com/test"})
     assert response.status_code == 200
 
     job = db.query(Job).filter(Job.id == response.json()["job_id"]).one()
     assert job.auto_upload is False
-    assert job.upload_privacy == "unlisted"
+    assert job.upload_privacy == settings.AUTO_UPLOAD_PRIVACY
 
 
 def test_create_job_rejects_invalid_privacy(client):
