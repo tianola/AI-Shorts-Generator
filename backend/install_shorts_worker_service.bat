@@ -20,6 +20,17 @@ echo === Stop/remove old worker service === >> "%LOG%"
 sc stop %SERVICE% >nul 2>&1
 "%NSSM%" stop %SERVICE% >nul 2>&1
 "%NSSM%" remove %SERVICE% confirm >nul 2>&1
+rem A service marked for deletion cannot be recreated until its process is fully
+rem gone; installing too fast fails with "The specified service has been marked
+rem for deletion". Wait for the name to clear (up to ~20s) before installing.
+set /a WAITED=0
+:waitdel
+sc query %SERVICE% >nul 2>&1 || goto :ready
+set /a WAITED+=1
+if %WAITED% geq 20 (echo WARN: old service still present after 20s >> "%LOG%" & goto :ready)
+timeout /t 1 /nobreak >nul
+goto :waitdel
+:ready
 
 echo === Install worker service === >> "%LOG%"
 "%NSSM%" install %SERVICE% "%PYEXE%" "worker.py" >> "%LOG%" 2>&1
