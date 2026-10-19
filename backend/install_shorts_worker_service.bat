@@ -54,7 +54,10 @@ rem otherwise the worker logs "ffmpeg is not on PATH" and refuses every job.
 set "FFMPEG_DIR="
 for /f "delims=" %%I in ('where ffmpeg 2^>nul') do if not defined FFMPEG_DIR for %%J in ("%%I") do set "FFMPEG_DIR=%%~dpJ"
 if defined FFMPEG_DIR (echo FFMPEG_DIR=%FFMPEG_DIR% >> "%LOG%") else (echo WARNING: ffmpeg not found on installer PATH >> "%LOG%")
-"%NSSM%" set %SERVICE% AppEnvironmentExtra "PYTHONPATH=%APP_DIR%" "PATH=%FFMPEG_DIR%C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0" >> "%LOG%" 2>&1
+rem FFMPEG_DIR ends with a backslash; the ';' makes it its own PATH entry ahead of
+rem the system dirs. Without that separator the two join into one bogus entry and
+rem shutil.which still cannot find ffmpeg.
+"%NSSM%" set %SERVICE% AppEnvironmentExtra "PYTHONPATH=%APP_DIR%" "PATH=%FFMPEG_DIR%;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0" >> "%LOG%" 2>&1
 
 echo === Start worker service === >> "%LOG%"
 sc start %SERVICE% >> "%LOG%" 2>&1
