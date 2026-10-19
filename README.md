@@ -126,6 +126,33 @@ SCENE_ATTENTION_VLM=false                 # off by default: uploads frames
 SCENE_ATTENTION_VLM_MODEL=
 ```
 
+### Local VLM (no account, no API cost)
+
+The remote tiers can both be unavailable (credits, or the gateway does not serve
+a vision model). A **local Ollama vision model** is the account-free tier that
+names buildings, construction, cities, and fields on screen. Set it up once on an
+elevated prompt:
+
+```powershell
+# backend/ ; installs Ollama (winget, needs admin), pulls a small CPU-friendly
+# vision model, and smoke-tests /api/generate
+powershell -ExecutionPolicy Bypass -File setup_local_vlm.ps1
+```
+
+Then enable it in `backend/.env`:
+
+```env
+LOCAL_VLM_ENABLED=true
+LOCAL_VLM_URL=http://localhost:11434
+LOCAL_VLM_MODEL=qwen2.5-vl:3b
+```
+
+When enabled, the local tier runs **before** the remote tiers (it answers on this
+machine without their timeouts). A missing server or model is a soft-fail: the
+chain falls through to Gemini → OmniRoute → hybrid, so enabling it can never
+hard-fail a clip. It needs the vision model resident — ~6–8 GB RAM on CPU, which
+this machine has headroom for.
+
 ---
 
 ## 📹 Generating a Short

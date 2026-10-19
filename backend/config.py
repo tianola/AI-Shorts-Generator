@@ -226,6 +226,24 @@ class Settings(BaseSettings):
                     "model). Empty disables the VLM tier even when "
                     "SCENE_ATTENTION_VLM is on."
     )
+    LOCAL_VLM_ENABLED: bool = Field(
+        default=False,
+        description="Add a LOCAL Ollama vision tier to scene understanding and "
+                    "prefer it over the remote Gemini/OmniRoute tiers. Runs on "
+                    "this machine (CPU) with no account or API cost; off until a "
+                    "model is pulled and it is proven on real frames."
+    )
+    LOCAL_VLM_URL: str = Field(
+        default="http://localhost:11434",
+        description="Ollama base URL for the local vision tier (native; the text "
+                    "router's OLLAMA_URL is the Docker host)."
+    )
+    LOCAL_VLM_MODEL: str = Field(
+        default="qwen2.5-vl:3b",
+        description="Ollama vision model id (image-capable). Small enough to run "
+                    "on CPU here; a name it cannot pull is a soft-fail to the "
+                    "next tier."
+    )
 
     # ====================
     # BRANDING

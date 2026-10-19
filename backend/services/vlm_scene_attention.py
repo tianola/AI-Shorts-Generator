@@ -10,9 +10,10 @@ This replaces the old scene_attention.py which relied only on YOLO COCO classes
 """
 import json
 import os
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
+import base64
 import cv2
+import httpx
 import numpy as np
 from PIL import Image
 
@@ -40,8 +41,16 @@ async def understand_scene_vlm(
     if frame is None:
         return {"subject": "unknown", "objects": [], "action": "unknown", "confidence": 0.0}
 
-    # Try providers in order
-    providers = [
+    from config import settings
+
+    # Providers in preference order. When the local Ollama vision tier is enabled
+    # it runs FIRST: it answers on this machine with no account and none of the
+    # remote timeouts, so a live clip does not burn seconds per frame on Gemini
+    # (credits) and OmniRoute (model not served) that are currently dead.
+    providers = []
+    if getattr(settings, "LOCAL_VLM_ENABLED", False):
+        providers.append(("local_ollama", _local_vlm))
+    providers += [
         ("google_gemini", _google_gemini_vision),
         ("omniroute_vision", _omniroute_vision),
     ]
@@ -66,7 +75,6 @@ def _extract_frame(video_path: str, timestamp: float) -> Optional[np.ndarray]:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return None
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
     ret, frame = cap.read()
     cap.release()
@@ -145,6 +153,70 @@ async def _omniroute_vision(frame: np.ndarray, transcript_context: str) -> Dict[
 
     result = json.loads(result_text)
     return result
+
+
+async def _local_vlm(frame: np.ndarray, transcript_context: str) -> Dict[str, Any]:
+    """Local Ollama vision tier — the no-account fallback that names what COCO misses.
+
+    Posts the sampled frame to the running Ollama server's /api/generate (the same
+    shape the text router uses) with the image base64-encoded in ``images``. It
+    needs a vision-capable model pulled (LOCAL_VLM_MODEL); a missing server or
+    model raises and the caller moves to the next tier, so enabling it can never
+    hard-fail a clip.
+    """
+    from config import settings
+
+    # JPEG → base64 (Ollama takes raw base64, no data: prefix).
+    ok, buffer = cv2.imencode(".jpg", frame)
+    if not ok:
+        raise ValueError("could not encode frame for Ollama")
+    img_b64 = base64.b64encode(buffer).decode()
+
+    prompt = (
+        "You are labeling one frame of a vertical short video so a crop can "
+        "decide what to look at. Identify the main visible subject, the concrete "
+        "things on screen (buildings, construction, vehicles, landscape, props — "
+        "not just people), and what is happening. "
+        f"Spoken context: {transcript_context[:300]}\n"
+        'Reply with JSON only: {"subject": "...", "objects": ["..."], '
+        '"action": "...", "confidence": 0.0-1.0}'
+    )
+    payload = {
+        "model": settings.LOCAL_VLM_MODEL,
+        "prompt": prompt,
+        "images": [img_b64],
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.2},
+    }
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(f"{settings.LOCAL_VLM_URL.rstrip('/')}/api/generate", json=payload)
+        response.raise_for_status()
+        body = response.json()
+
+    answer = _extract_json_obj(body.get("response", ""))
+    answer.setdefault("subject", "person")
+    answer.setdefault("objects", [])
+    answer.setdefault("action", "unknown")
+    answer.setdefault("confidence", 0.5)
+    answer["source"] = "local_ollama"
+    return answer
+
+
+def _extract_json_obj(text: str) -> Dict[str, Any]:
+    """Parse a JSON object out of a model reply that may wrap it in prose/fences."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("Ollama returned an empty answer")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        return json.loads(text[start:end + 1])
+    raise ValueError(f"Ollama answer was not JSON: {text[:120]}")
 
 
 def _hybrid_understanding(video_path: str, timestamp: float, transcript_context: str) -> Dict[str, Any]:
