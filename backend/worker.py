@@ -49,6 +49,59 @@ _REDIS_CHECKED = False
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 
+# --- stall watchdog state ---------------------------------------------------
+# The main poll loop runs process_job() synchronously; if a stage blocks forever
+# (a wedged network call, a lock, a subprocess that never returns) the loop never
+# returns to poll, and the lease heartbeat keeps the job looking alive - so the
+# queue freezes silently (the job-99 failure). _MAIN_TICK is bumped on every real
+# progress signal and _CURRENT_JOB names the in-flight job; the watchdog thread
+# reads both and, when a job has produced no signal past the timeout, fails that
+# job and exits the process so NSSM relaunches a clean worker for the rest.
+_MAIN_TICK = [0.0]
+_CURRENT_JOB = [None]
+
+
+def _touch_main_tick() -> None:
+    _MAIN_TICK[0] = time.time()
+
+
+def _should_stall_exit(current_job_id, last_tick: float, now: float,
+                       timeout_seconds: float) -> bool:
+    """True when a job is in flight and no progress tick is within the timeout.
+
+    Idle polling (no current job) is healthy and never counts as a stall.
+    """
+    if current_job_id is None:
+        return False
+    return (now - last_tick) > timeout_seconds
+
+
+def _stall_watchdog(stop: threading.Event) -> None:
+    """Fail + exit when the main thread is wedged on one job past the timeout."""
+    mins = int(settings.WORKER_STALL_TIMEOUT_MINUTES)
+    timeout_seconds = max(60, mins * 60)
+    while not stop.wait(30):
+        jid = _CURRENT_JOB[0]
+        if not _should_stall_exit(jid, _MAIN_TICK[0], time.time(), timeout_seconds):
+            continue
+        logger.error(
+            f"Watchdog: job {jid} made no progress for >{mins}m "
+            f"(main thread wedged); failing it and exiting so the service restarts")
+        try:
+            db = SessionLocal()
+            db.execute(
+                text("UPDATE jobs SET status='failed', "
+                     "error_message=COALESCE(error_message,'')||:reason "
+                     "WHERE id=:jid AND status='processing'"),
+                {"reason": f" [stalled >{mins}m, watchdog]", "jid": jid})
+            db.commit()
+            db.close()
+        except Exception as e:
+            logger.error(f"Watchdog: could not fail job {jid} ({e}); exiting anyway")
+        # Hard exit: the stuck main thread cannot be joined, and NSSM's
+        # AppExit=Restart turns the process death into a fresh worker.
+        os._exit(1)
+
 
 def claim_job(db, job_id: int) -> bool:
     """Compare-and-swap a queued job onto this worker.
@@ -1315,6 +1368,9 @@ def make_progress_writer(db: Session, job: Job, job_id: int) -> Callable[[str, i
 
     def update_progress(stage: str, percent: int):
         now = time.time()
+        # Any stage boundary is proof the main thread is alive: the watchdog reads
+        # this to tell a healthy long stage from a wedge.
+        _touch_main_tick()
         # Throttle: write when the value changed, otherwise at most every 0.5s.
         if percent != _last_prog_pct[0] or stage != _last_prog_stage[0] or (now - _last_prog_time[0]) >= 0.5:
             _last_prog_time[0] = now
@@ -1373,6 +1429,10 @@ async def process_job_async(job_id: int):
     lease_stop = threading.Event()
 
     threading.Thread(target=_lease_heartbeat, args=(lease_stop, job_id), daemon=True).start()
+
+    # Tell the watchdog this job is now in flight, and start its liveness clock.
+    _CURRENT_JOB[0] = job_id
+    _touch_main_tick()
 
     update_progress = make_progress_writer(db, job, job_id)
 
@@ -1474,6 +1534,8 @@ async def process_job_async(job_id: int):
 
     finally:
         lease_stop.set()
+        # No job in flight again: the watchdog must not judge idle time as a stall.
+        _CURRENT_JOB[0] = None
         db.close()
 
 def process_job(job_id: int):
@@ -1510,6 +1572,10 @@ def process_jobs():
     # of it costs nothing.
     init_database()
     missing = log_media_tools()
+
+    # Backstop against a wedged main thread: if process_job ever blocks with no
+    # progress past the timeout, fail the job and exit so NSSM restarts us.
+    threading.Thread(target=_stall_watchdog, args=(threading.Event(),), daemon=True).start()
 
     last_reclaim = 0.0
 

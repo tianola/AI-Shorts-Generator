@@ -352,6 +352,16 @@ class Settings(BaseSettings):
         description="Minutes after which a job still marked 'processing' with no "
                     "heartbeat is assumed abandoned and returned to the queue."
     )
+    WORKER_STALL_TIMEOUT_MINUTES: int = Field(
+        default=30,
+        ge=5,
+        le=720,
+        description="Minutes a job may run with no progress signal (no stage "
+                    "boundary / update_progress) before the watchdog declares the "
+                    "main thread wedged: it fails that job and exits so the NSSM "
+                    "service restarts a clean worker. Set above the slowest single "
+                    "stage on this machine (temporal localization on a long source)."
+    )
     WORKER_MAX_JOBS: int = Field(
         default=2,
         ge=1,
