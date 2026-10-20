@@ -504,6 +504,13 @@ class Settings(BaseSettings):
         default="ejs:github",
         description="yt-dlp remote components for JS challenge solving (ejs:github or ejs:npm)"
     )
+    YT_NODE_PATH: str = Field(
+        default="",
+        description="Absolute path to a node binary for yt-dlp's EJS n-solver. "
+                    "Empty = auto-detect (PATH, then the standard Windows install). "
+                    "Only needed because yt-dlp enables deno by default and this "
+                    "box has node, not deno."
+    )
 
     FONTS_DIR: str = Field(
         default_factory=lambda: (
