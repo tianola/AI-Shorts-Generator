@@ -69,8 +69,17 @@ def _wrap_title(title: str, max_chars: int = 22, max_lines: int = 2) -> list:
     if current:
         lines.append(" ".join(current))
     if len(lines) > max_lines:
+        dropped = " ".join(lines[max_lines:]).strip()
         lines = lines[:max_lines]
-        if len(lines[-1]) > max_chars - 1:
+        # Words past the line budget used to vanish silently, so the published
+        # frame read "SPACED PRACTICE / BEATS A 5-HOUR" for a title ending in
+        # "CRAM". Show the cut instead.
+        if dropped:
+            budget = max_chars - 4
+            if len(lines[-1]) > budget:
+                lines[-1] = lines[-1][:budget].rstrip()
+            lines[-1] = (lines[-1] + " ...").strip()
+        elif len(lines[-1]) > max_chars - 1:
             lines[-1] = lines[-1][: max_chars - 1].rstrip() + "..."
     if not lines:
         lines = ["VIRAL MOMENT"]
@@ -117,8 +126,9 @@ def render_title_frame(
         font = ImageFont.load_default()
 
     # 18 chars/line instead of 22: the wrap is what decided how large the
-    # headline could get, and at 22 every title shrank itself to fit.
-    lines = _wrap_title(title, max_chars=18, max_lines=2)
+    # headline could get, and at 22 every title shrank itself to fit. Three
+    # lines so a 60-character title lands whole instead of losing its last word.
+    lines = _wrap_title(title, max_chars=18, max_lines=3)
     max_text_w = int(W * 0.88)
     while fs > 28 * scale:
         try:
