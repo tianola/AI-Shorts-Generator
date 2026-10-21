@@ -58,35 +58,51 @@ WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 # reads both and, when a job has produced no signal past the timeout, fails that
 # job and exits the process so NSSM relaunches a clean worker for the rest.
 _MAIN_TICK = [0.0]
+_MAIN_PROC = [0.0]
 _CURRENT_JOB = [None]
 
 
 def _touch_main_tick() -> None:
     _MAIN_TICK[0] = time.time()
+    _MAIN_PROC[0] = time.process_time()
 
 
 def _should_stall_exit(current_job_id, last_tick: float, now: float,
-                       timeout_seconds: float) -> bool:
-    """True when a job is in flight and no progress tick is within the timeout.
+                       timeout_seconds: float, cpu_seconds: float = 0.0,
+                       min_cpu_seconds: float = 120.0) -> bool:
+    """True when a job is in flight, has no progress tick within the timeout,
+    AND the process burned negligible CPU over that same window.
 
     Idle polling (no current job) is healthy and never counts as a stall.
+
+    The CPU test is what keeps a legitimately-slow compute stage alive: pyannote
+    diarization on an hour of audio, or YOLO temporal localization, run for far
+    longer than the timeout emitting only a single start tick, yet keep crunching
+    CPU. A genuine wedge (the job-99 failure) is a blocked main thread that
+    produces neither ticks nor CPU - that is the only case we kill on.
     """
     if current_job_id is None:
         return False
-    return (now - last_tick) > timeout_seconds
+    if (now - last_tick) <= timeout_seconds:
+        return False
+    return cpu_seconds < min_cpu_seconds
 
 
 def _stall_watchdog(stop: threading.Event) -> None:
     """Fail + exit when the main thread is wedged on one job past the timeout."""
     mins = int(settings.WORKER_STALL_TIMEOUT_MINUTES)
     timeout_seconds = max(60, mins * 60)
+    min_cpu_seconds = max(1.0, float(settings.WORKER_STALL_MIN_CPU_SECONDS))
     while not stop.wait(30):
         jid = _CURRENT_JOB[0]
-        if not _should_stall_exit(jid, _MAIN_TICK[0], time.time(), timeout_seconds):
+        cpu_since_tick = time.process_time() - _MAIN_PROC[0]
+        if not _should_stall_exit(jid, _MAIN_TICK[0], time.time(),
+                                  timeout_seconds, cpu_since_tick, min_cpu_seconds):
             continue
         logger.error(
-            f"Watchdog: job {jid} made no progress for >{mins}m "
-            f"(main thread wedged); failing it and exiting so the service restarts")
+            f"Watchdog: job {jid} made no progress and used <{min_cpu_seconds:.0f}s "
+            f"CPU for >{mins}m (main thread wedged); failing it and exiting so the "
+            f"service restarts")
         try:
             db = SessionLocal()
             db.execute(

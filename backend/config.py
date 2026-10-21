@@ -356,11 +356,21 @@ class Settings(BaseSettings):
         default=30,
         ge=5,
         le=720,
-        description="Minutes a job may run with no progress signal (no stage "
-                    "boundary / update_progress) before the watchdog declares the "
-                    "main thread wedged: it fails that job and exits so the NSSM "
-                    "service restarts a clean worker. Set above the slowest single "
-                    "stage on this machine (temporal localization on a long source)."
+        description="Minutes a job may run with no progress signal AND no process "
+                    "CPU (see WORKER_STALL_MIN_CPU_SECONDS) before the watchdog "
+                    "declares the main thread wedged: it fails that job and exits so "
+                    "the NSSM service restarts a clean worker. A long but busy stage "
+                    "(e.g. diarization on an hour of audio) is spared because it "
+                    "keeps burning CPU."
+    )
+    WORKER_STALL_MIN_CPU_SECONDS: int = Field(
+        default=120,
+        ge=1,
+        le=3600,
+        description="Process CPU seconds that must have accrued since the last "
+                    "progress tick for the watchdog to consider the worker alive. "
+                    "Below this over the full stall window means the main thread is "
+                    "blocked (a real wedge), not crunching a slow compute stage."
     )
     WORKER_MAX_JOBS: int = Field(
         default=2,
