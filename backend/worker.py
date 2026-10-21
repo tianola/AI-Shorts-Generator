@@ -499,12 +499,18 @@ async def stage_transcribe(job_id: int, job: Job, job_dir: Path, audio_path: str
     return segments, segments_file, words_file, source_title, source_channel
 
 
-async def stage_diarize(job_id: int, job_dir: Path, video_path: str, update_progress: Callable[[str, int], None]) -> list:
-    """Who speaks when across the source, written to diarization.json.
+async def stage_diarize(job_id: int, job_dir: Path, video_path: str, clips: list,
+                        update_progress: Callable[[str, int], None]) -> list:
+    """Who speaks when across the selected clip windows, written to diarization.json.
 
-    Soft by design: a missing HF token, a gated model, or an undecodable
-    source leaves the job with no speaker turns and a logged warning — every
-    later stage reads 'no diarization' as the old behavior, not as an error.
+    Diarization is consumed only per clip (``load_clip_diarization`` slices turns
+    to each clip's window), so it runs AFTER selection and over just those windows
+    rather than the whole source — the difference between minutes and ~40+ minutes
+    on a long video.
+
+    Soft by design: a missing HF token, a gated model, or an undecodable source
+    leaves the job with no speaker turns and a logged warning — every later stage
+    reads 'no diarization' as the old behavior, not as an error.
     """
     diarization_file = os.path.join(str(job_dir), "diarization.json")
     if os.path.exists(diarization_file):
@@ -517,16 +523,25 @@ async def stage_diarize(job_id: int, job_dir: Path, video_path: str, update_prog
             job_warning(job_id, f"Could not read existing diarization.json ({e}); re-running diarization")
 
     if not settings.DIARIZATION_ENABLED:
-        job_info(job_id, "Step 3b/8: Speaker diarization disabled (DIARIZATION_ENABLED=false), skipping")
+        job_info(job_id, "Speaker diarization disabled (DIARIZATION_ENABLED=false), skipping")
         return []
 
-    job_info(job_id, "Step 3b/8: Speaker diarization (pyannote, CPU)...")
-    update_progress("Identifying speakers...", 51)
+    windows = [{"start": float(c["start"]), "end": float(c["end"])}
+               for c in (clips or []) if c.get("start") is not None and c.get("end") is not None]
+    if not windows:
+        job_info(job_id, "Speaker diarization skipped: no clip windows to analyze")
+        return []
+
+    total = sum(w["end"] - w["start"] for w in windows)
+    job_info(job_id, f"Speaker diarization over {len(windows)} clip windows "
+                     f"(~{total:.0f}s of audio, pyannote, CPU)...")
+    update_progress("Identifying speakers (per clip)...", 58)
     try:
-        from services.diarization import try_diarize
-        turns = try_diarize(video_path)
+        from services.diarization import try_diarize_windows
+        turns = try_diarize_windows(video_path, windows,
+                                    margin=settings.DIARIZATION_CLIP_MARGIN_SECONDS)
     except Exception as e:
-        # try_diarize is soft-fail by contract; the stage must be too.
+        # try_diarize_windows is soft-fail by contract; the stage must be too.
         turns = None
         job_warning(job_id, f"Diarization stage error ({e}); continuing without speaker turns")
     if turns is None:
@@ -537,7 +552,7 @@ async def stage_diarize(job_id: int, job_dir: Path, video_path: str, update_prog
             json.dump({"model": settings.DIARIZATION_MODEL, "turns": turns}, f, ensure_ascii=False, indent=2)
     except Exception as e:
         job_warning(job_id, f"Diarization computed but could not be written to disk: {e}")
-    job_info(job_id, f"Diarization: {len(turns)} speaker turns")
+    job_info(job_id, f"Diarization: {len(turns)} speaker turns across clip windows")
     return turns
 
 
@@ -1478,10 +1493,6 @@ async def process_job_async(job_id: int):
         segments, segments_file, words_file, source_title, source_channel = \
             await stage_transcribe(job_id, job, job_dir, audio_path, update_progress)
         # =====================
-        # 3b. SPEAKER DIARIZATION (who talks when, for the reframe decisions)
-        # =====================
-        await stage_diarize(job_id, job_dir, video_path, update_progress)
-        # =====================
         # 4. AUDIO ENERGY PRE-PASS (before clip selection)
         # =====================
         segments = await stage_score_audio_energy(job_id, video_path, segments,
@@ -1496,6 +1507,13 @@ async def process_job_async(job_id: int):
         # =====================
         clips = await stage_select_clips(job_id, job, segments_file, source_title,
                                          update_progress, temporal_events=temporal_events)
+
+        # =====================
+        # 4c. SPEAKER DIARIZATION — only over the selected clip windows
+        # =====================
+        # Runs after selection because its only consumer is the per-clip reframe
+        # (load_clip_diarization). Analysing the whole source wasted 40+ min/hour-long video.
+        await stage_diarize(job_id, job_dir, video_path, clips, update_progress)
 
         # =====================
         # 5. PROCESS EACH CLIP

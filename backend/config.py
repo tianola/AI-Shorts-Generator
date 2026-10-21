@@ -118,6 +118,15 @@ class Settings(BaseSettings):
         default="pyannote/speaker-diarization-3.1",
         description="pyannote pipeline checkpoint for speaker diarization"
     )
+    DIARIZATION_CLIP_MARGIN_SECONDS: float = Field(
+        default=3.0,
+        ge=0.0,
+        le=60.0,
+        description="Seconds of padding added before/after each selected clip "
+                    "window when diarizing. Diarization runs only over the clip "
+                    "windows (not the whole source) to keep long videos fast; the "
+                    "margin captures speakers who start talking just before a cut."
+    )
 
     # ====================
     # CLIP SELECTION
