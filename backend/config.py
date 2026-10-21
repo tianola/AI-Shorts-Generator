@@ -268,6 +268,12 @@ class Settings(BaseSettings):
     # ====================
     # BRANDING
     # ====================
+    WATERMARK_ENABLED: bool = Field(
+        default=False,
+        description="Draw the @handle pill + source-credit badge on every clip. "
+                    "Off by default: a burned-in watermark is a Shorts distribution "
+                    "penalty and a 'reused content' tell."
+    )
     WATERMARK_HANDLE: str = Field(
         default="@thomastheo",
         description="Watermark handle shown on every clip (e.g. @thomastheo)"

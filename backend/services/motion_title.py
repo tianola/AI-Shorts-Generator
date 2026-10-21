@@ -211,113 +211,114 @@ def render_title_frame(
     # -----------------------------------------------------------------------
     # PRO CENTERED WATERMARK & BRANDING PILL (settings.WATERMARK_HANDLE + Logo Avatar)
     # -----------------------------------------------------------------------
-    try:
-        wm_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        wdraw = ImageDraw.Draw(wm_layer)
-
-        # Look for logo file
-        logo_cand_paths = [
-            os.path.join(settings.STORAGE_ROOT, "assets", "logo.png"),
-            os.path.join(os.path.dirname(__file__), "..", "static", "logo.png"),
-            "E:/01-AI-PROJECTS/ai-shorts-generator/storage/assets/logo.png"
-        ]
-        found_logo_path = None
-        for cand in logo_cand_paths:
-            if os.path.isfile(cand):
-                found_logo_path = cand
-                break
-
-        pill_font_size = int(14 * scale)
-        sub_font_size = int(12 * scale)
+    if settings.WATERMARK_ENABLED:
         try:
-            pill_font = ImageFont.truetype(font_path, pill_font_size)
-            sub_font = ImageFont.truetype(font_path, sub_font_size)
-        except Exception:
-            pill_font = ImageFont.load_default()
-            sub_font = ImageFont.load_default()
+            wm_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            wdraw = ImageDraw.Draw(wm_layer)
 
-        wm_text = watermark_handle or settings.WATERMARK_HANDLE
-        avatar_size = int(24 * scale)
-        pad_x = int(10 * scale)
+            # Look for logo file
+            logo_cand_paths = [
+                os.path.join(settings.STORAGE_ROOT, "assets", "logo.png"),
+                os.path.join(os.path.dirname(__file__), "..", "static", "logo.png"),
+                "E:/01-AI-PROJECTS/ai-shorts-generator/storage/assets/logo.png"
+            ]
+            found_logo_path = None
+            for cand in logo_cand_paths:
+                if os.path.isfile(cand):
+                    found_logo_path = cand
+                    break
 
-        # Right edge, vertically centred: the top strip belongs to the headline.
-        # Capped narrower than the old top-centre pill because at mid-height it
-        # overlaps the action instead of the empty sky.
-        max_cap_w = int(W * 0.60)
-        text_budget = max_cap_w - (2 * pad_x + avatar_size + int(8 * scale))
+            pill_font_size = int(14 * scale)
+            sub_font_size = int(12 * scale)
+            try:
+                pill_font = ImageFont.truetype(font_path, pill_font_size)
+                sub_font = ImageFont.truetype(font_path, sub_font_size)
+            except Exception:
+                pill_font = ImageFont.load_default()
+                sub_font = ImageFont.load_default()
 
-        # Truncate to the shared budget so the text can never spill past the
-        # capsule edge the way it did when only the handle was measured.
-        h_box = wdraw.textbbox((0, 0), wm_text, font=pill_font)
-        h_w = h_box[2] - h_box[0]
-        while h_w > text_budget and len(wm_text) > 5:
-            wm_text = wm_text[:-1] + "..."
+            wm_text = watermark_handle or settings.WATERMARK_HANDLE
+            avatar_size = int(24 * scale)
+            pad_x = int(10 * scale)
+
+            # Right edge, vertically centred: the top strip belongs to the headline.
+            # Capped narrower than the old top-centre pill because at mid-height it
+            # overlaps the action instead of the empty sky.
+            max_cap_w = int(W * 0.60)
+            text_budget = max_cap_w - (2 * pad_x + avatar_size + int(8 * scale))
+
+            # Truncate to the shared budget so the text can never spill past the
+            # capsule edge the way it did when only the handle was measured.
             h_box = wdraw.textbbox((0, 0), wm_text, font=pill_font)
             h_w = h_box[2] - h_box[0]
-        h_h = h_box[3] - h_box[1]
+            while h_w > text_budget and len(wm_text) > 5:
+                wm_text = wm_text[:-1] + "..."
+                h_box = wdraw.textbbox((0, 0), wm_text, font=pill_font)
+                h_w = h_box[2] - h_box[0]
+            h_h = h_box[3] - h_box[1]
 
-        s_text = ""
-        s_w = 0
-        if source_channel and str(source_channel).strip():
-            clean_src = str(source_channel).strip()
-            if not clean_src.startswith("@"):
-                clean_src = f"@{clean_src}"
-            s_text = f" • Original: {clean_src[:20]}"
-            s_box = wdraw.textbbox((0, 0), s_text, font=sub_font)
-            s_w = s_box[2] - s_box[0]
-            # The handle is the branding; the source credit gives way first.
-            while s_w > text_budget - h_w and len(s_text) > 12:
-                s_text = s_text[:-4] + "..."
+            s_text = ""
+            s_w = 0
+            if source_channel and str(source_channel).strip():
+                clean_src = str(source_channel).strip()
+                if not clean_src.startswith("@"):
+                    clean_src = f"@{clean_src}"
+                s_text = f" • Original: {clean_src[:20]}"
                 s_box = wdraw.textbbox((0, 0), s_text, font=sub_font)
                 s_w = s_box[2] - s_box[0]
+                # The handle is the branding; the source credit gives way first.
+                while s_w > text_budget - h_w and len(s_text) > 12:
+                    s_text = s_text[:-4] + "..."
+                    s_box = wdraw.textbbox((0, 0), s_text, font=sub_font)
+                    s_w = s_box[2] - s_box[0]
 
-        capsule_w = pad_x + avatar_size + int(8 * scale) + h_w + s_w + pad_x
-        capsule_h = avatar_size + int(10 * scale)
+            capsule_w = pad_x + avatar_size + int(8 * scale) + h_w + s_w + pad_x
+            capsule_h = avatar_size + int(10 * scale)
 
-        bx = W - capsule_w - int(28 * scale)
-        by = int(H * 0.5) - capsule_h // 2
+            bx = W - capsule_w - int(28 * scale)
+            by = int(H * 0.5) - capsule_h // 2
 
-        # Capsule Drop Shadow
-        sd_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        sdraw = ImageDraw.Draw(sd_layer)
-        sdraw.rounded_rectangle(
-            [bx, by + int(3 * scale), bx + capsule_w, by + capsule_h + int(3 * scale)],
-            radius=capsule_h // 2,
-            fill=(0, 0, 0, 175)
-        )
-        sd_layer = sd_layer.filter(ImageFilter.GaussianBlur(radius=int(5 * scale)))
-        img.alpha_composite(sd_layer)
+            # Capsule Drop Shadow
+            sd_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            sdraw = ImageDraw.Draw(sd_layer)
+            sdraw.rounded_rectangle(
+                [bx, by + int(3 * scale), bx + capsule_w, by + capsule_h + int(3 * scale)],
+                radius=capsule_h // 2,
+                fill=(0, 0, 0, 175)
+            )
+            sd_layer = sd_layer.filter(ImageFilter.GaussianBlur(radius=int(5 * scale)))
+            img.alpha_composite(sd_layer)
 
-        # Subtle dark glass capsule with delicate translucent border
-        wdraw.rounded_rectangle(
-            [bx, by, bx + capsule_w, by + capsule_h],
-            radius=capsule_h // 2,
-            fill=(14, 14, 20, 215),
-            outline=(255, 255, 255, 55),
-            width=max(1, int(1.2 * scale))
-        )
+            # Subtle dark glass capsule with delicate translucent border
+            wdraw.rounded_rectangle(
+                [bx, by, bx + capsule_w, by + capsule_h],
+                radius=capsule_h // 2,
+                fill=(14, 14, 20, 215),
+                outline=(255, 255, 255, 55),
+                width=max(1, int(1.2 * scale))
+            )
 
-        # Paste circular logo avatar
-        if found_logo_path:
-            logo_img = Image.open(found_logo_path).convert("RGBA")
-            logo_img = logo_img.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
-            mask = Image.new("L", (avatar_size, avatar_size), 0)
-            md = ImageDraw.Draw(mask)
-            md.ellipse((0, 0, avatar_size, avatar_size), fill=255)
-            wm_layer.paste(logo_img, (bx + pad_x, by + (capsule_h - avatar_size) // 2), mask)
+            # Paste circular logo avatar
+            if found_logo_path:
+                logo_img = Image.open(found_logo_path).convert("RGBA")
+                logo_img = logo_img.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
+                mask = Image.new("L", (avatar_size, avatar_size), 0)
+                md = ImageDraw.Draw(mask)
+                md.ellipse((0, 0, avatar_size, avatar_size), fill=255)
+                wm_layer.paste(logo_img, (bx + pad_x, by + (capsule_h - avatar_size) // 2), mask)
 
-        # Handle text
-        tx = bx + pad_x + avatar_size + int(8 * scale)
-        ty = by + (capsule_h - h_h) // 2 - int(2 * scale)
-        wdraw.text((tx, ty), wm_text, font=pill_font, fill=(255, 255, 255, 245))
+            # Handle text
+            tx = bx + pad_x + avatar_size + int(8 * scale)
+            ty = by + (capsule_h - h_h) // 2 - int(2 * scale)
+            wdraw.text((tx, ty), wm_text, font=pill_font, fill=(255, 255, 255, 245))
 
-        # Source text
-        if s_text:
-            wdraw.text((tx + h_w, ty + int(1 * scale)), s_text, font=sub_font, fill=(203, 213, 225, 200))
+            # Source text
+            if s_text:
+                wdraw.text((tx + h_w, ty + int(1 * scale)), s_text, font=sub_font, fill=(203, 213, 225, 200))
 
-        img.alpha_composite(wm_layer)
-    except Exception as e:
-        logger.warning(f"Could not render watermark badge: {e}")
+            img.alpha_composite(wm_layer)
+        except Exception as e:
+            logger.warning(f"Could not render watermark badge: {e}")
 
     img = img.resize(size, Image.Resampling.LANCZOS)
     return np.asarray(img)
