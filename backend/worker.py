@@ -905,14 +905,15 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             clip.get("hook", "")
         )
 
-        # Compute Active Expression & Multi-modal Virality Analysis
-        try:
-            from services.virality_detector import compute_composite_virality
-            v_stats = compute_composite_virality(clip.get("virality_score", 0.8), clip_transcript, vertical_path)
-            metadata["virality_breakdown"] = v_stats
-            job_info(job_id, f"Clip Virality Score: {v_stats['virality_score_100']}/100 (Visual: {v_stats['visual_intensity']})")
-        except Exception:
-            v_stats = {"virality_score_100": 85.0, "virality_score": 0.85}
+        # Compute Active Expression & Multi-modal Virality Analysis.
+        # resolve_virality_stats never raises: if the visual/keyword pass fails
+        # it falls back to the selector's own score (flagged, logged) instead of
+        # the old hardcoded 85.0 that sat above the real band and hid the error.
+        from services.virality_detector import resolve_virality_stats
+        v_stats = resolve_virality_stats(clip.get("virality_score"), clip_transcript, vertical_path)
+        metadata["virality_breakdown"] = v_stats
+        job_info(job_id, f"Clip Virality Score: {v_stats['virality_score_100']}/100 "
+                         f"(Visual: {v_stats.get('visual_intensity', 'n/a')})")
 
         # Generate Platform-Specific Copy (TikTok, Instagram Reels, YouTube Shorts)
         from services.copy_generator import generate_platform_copies
@@ -1059,7 +1060,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                 hook=clip.get("hook"),
                 # The A/B arm, so a later view-count sync can attribute the result.
                 hook_style=clip.get("hook_style"),
-                score=v_stats.get("virality_score_100", 85.0),
+                score=v_stats["virality_score_100"],
                 hook_score=clip.get("hook_score"),
                 coherence_score=clip.get("coherence_score"),
                 connection_score=clip.get("connection_score"),
