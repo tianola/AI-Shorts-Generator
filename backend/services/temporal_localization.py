@@ -13,7 +13,7 @@ tier is fully local.
 import json
 import os
 import subprocess
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -182,10 +182,41 @@ def _align_with_transcript(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _video_duration(video_path: str) -> float:
+    """Duration of ``video_path`` in seconds via ffprobe; 0.0 if unreadable."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(out.stdout.strip())
+    except Exception as e:
+        logger.warning(f"Could not read video duration for {video_path} ({e}); "
+                       "temporal sampling keeps the base interval")
+        return 0.0
+
+
+def _effective_sample_interval(duration_s: float, base_interval: float,
+                               max_samples: Optional[int]) -> float:
+    """Sample spacing so a long source never exceeds ``max_samples`` YOLO calls.
+
+    The YOLO sweep dominates temporal-localization cost and scales linearly with
+    source length (~1740 inferences on a 58-min video at 2s). For long sources we
+    widen the interval to hold the sample count near ``max_samples``; short
+    sources keep the finer ``base_interval``. Scene-cut events stay dense because
+    they come from ``detect_scene_changes``, not this sweep.
+    """
+    if not duration_s or duration_s <= 0 or not max_samples or max_samples <= 0:
+        return base_interval
+    return max(base_interval, duration_s / max_samples)
+
+
 def localise_video(
     video_path: str,
     segments: List[Dict[str, Any]],
     sample_interval: float = 2.0,
+    max_samples: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Build a full-video temporal event timeline.
 
@@ -196,17 +227,25 @@ def localise_video(
     Args:
         video_path: Path to the full source video
         segments: Transcript segments (from segments.json)
-        sample_interval: Seconds between YOLO samples (2.0 = every 2s)
+        sample_interval: Base seconds between YOLO samples (2.0 = every 2s)
+        max_samples: Cap on YOLO samples for long sources; widening the interval
+            preserves the cap. ``None`` reads ``TEMPORAL_MAX_SAMPLES`` from config.
 
     Returns:
         Sorted list of event dicts with ``t``, ``type``, ``importance``.
     """
     from services.focus_tracking import sample_frames
 
-    logger.info(f"Temporal localization: sampling {video_path} every {sample_interval}s")
+    if max_samples is None:
+        from config import settings
+        max_samples = int(getattr(settings, "TEMPORAL_MAX_SAMPLES", 240))
+    duration_s = _video_duration(video_path)
+    eff_interval = _effective_sample_interval(duration_s, sample_interval, max_samples)
+    logger.info(f"Temporal localization: sampling {video_path} every {eff_interval:.2f}s "
+                f"(source {duration_s:.0f}s, base {sample_interval}s, cap {max_samples} samples)")
 
     try:
-        samples = sample_frames(video_path, sample_interval=sample_interval)
+        samples = sample_frames(video_path, sample_interval=eff_interval)
     except Exception as e:
         logger.error(f"YOLO sampling failed: {e}")
         samples = []

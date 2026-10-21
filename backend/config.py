@@ -216,6 +216,16 @@ class Settings(BaseSettings):
     # ====================
     # SCENE / ATTENTION UNDERSTANDING
     # ====================
+    TEMPORAL_MAX_SAMPLES: int = Field(
+        default=240,
+        ge=20,
+        le=20000,
+        description="Cap on YOLO frames sampled by temporal localization. Short "
+                    "sources keep the fine 2s interval; long sources widen it to "
+                    "hold this many samples, since the per-frame YOLO sweep (not "
+                    "scene detection) dominates cost on hour-long inputs. Raise "
+                    "for finer event coverage, lower for faster long-source runs."
+    )
     SCENE_ATTENTION_ENABLED: bool = Field(
         default=True,
         description="Per-clip scene/attention understanding (which object the "
