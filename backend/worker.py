@@ -1225,6 +1225,16 @@ def _clip_video_path(clip) -> Optional[str]:
     return str(candidate) if candidate.exists() else None
 
 
+def _clip_thumbnail_path(clip) -> Optional[str]:
+    """The designed thumbnail the render step already wrote for this clip."""
+    if not getattr(clip, "thumbnail_path", None):
+        return None
+    if os.path.exists(clip.thumbnail_path):
+        return clip.thumbnail_path
+    candidate = Path(settings.STORAGE_ROOT) / clip.thumbnail_path
+    return str(candidate) if candidate.exists() else None
+
+
 def _source_title_for_job(job_id: int) -> Optional[str]:
     meta_file = Path(settings.STORAGE_ROOT) / "jobs" / str(job_id) / "meta.json"
     try:
@@ -1298,12 +1308,13 @@ def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[
     try:
         res = uploader(
             video_path=video_path,
-            title=clip.title or f"Viral Moment #{clip.index + 1}",
-            description=clip.description or "Watch this viral moment!",
-            hashtags=clip.hashtags or ["#Shorts", "#Viral", "#Trending"],
+            title=clip.title,
+            description=clip.description or "",
+            hashtags=clip.hashtags or ["#Shorts"],
             source_title=_source_title_for_job(job.id),
             privacy_status=getattr(job, "upload_privacy", None) or settings.AUTO_UPLOAD_PRIVACY,
             job_id=job.id,
+            thumbnail_path=_clip_thumbnail_path(clip),
         )
     except Exception as e:
         _record_publish_failure(db, clip, now, str(e))

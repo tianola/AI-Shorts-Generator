@@ -153,6 +153,16 @@ def save_client_secrets_json(secrets_json_content: str) -> bool:
     return True
 
 
+def resolve_stored_path(value: Optional[str]) -> Optional[str]:
+    """Absolute path for a clip asset stored in the database as job-relative."""
+    if not value:
+        return None
+    if os.path.exists(value):
+        return value
+    candidate = Path(settings.STORAGE_ROOT) / value
+    return str(candidate) if candidate.exists() else None
+
+
 def format_shorts_metadata(
     title: str,
     description: str,
@@ -160,12 +170,11 @@ def format_shorts_metadata(
     source_title: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Format metadata specifically optimized for YouTube Shorts algorithm:
+    Format metadata specifically optimized for YouTube Shorts:
       - Title capped to 100 chars, with #Shorts suffix if not present
-      - Viral Hook & SEO description with structured tags and CTA
-      - Comprehensive tag cloud
+      - The clip's own niche tags, nothing else
     """
-    clean_title = (title or "Viral Moment").strip()
+    clean_title = (title or "").strip()
     if not clean_title.lower().endswith("#shorts") and "#shorts" not in clean_title.lower():
         if len(clean_title) <= 90:
             clean_title = f"{clean_title} #Shorts"
@@ -179,27 +188,28 @@ def format_shorts_metadata(
             if clean_h and clean_h.lower() not in [t.lower() for t in tags]:
                 tags.append(clean_h)
 
-    # Core viral tags for high Shorts reach
-    for default_tag in ["Shorts", "YouTubeShorts", "Viral", "Trending", "FYP", "ForYou", "Storytime", "Explore"]:
-        if default_tag.lower() not in [t.lower() for t in tags]:
-            tags.append(default_tag)
+    # The old list (Viral, Trending, FYP, ForYou, Storytime, Explore) was
+    # appended to every upload regardless of the clip, which is precisely the
+    # generic tag cloud a niche channel is trying to stop sending.
+    if not tags:
+        tags.append("Shorts")
 
-    hashtags_str = " ".join([f"#{t}" for t in tags[:8]])
-    
+    hashtags_str = " ".join([f"#{t}" for t in tags[:5]])
+
     desc_lines = []
     desc_lines.append(f"🔥 {clean_title.replace(' #Shorts', '')}")
     if description and description.strip():
         desc_lines.append(f"\n{description.strip()}")
     if source_title and source_title.strip():
         desc_lines.append(f"\n🎬 Original Story: {source_title.strip()}")
-    
+
     desc_lines.append("\n👉 Like, Share & Subscribe for more daily viral clips!\n")
     desc_lines.append(hashtags_str)
 
     return {
         "title": clean_title[:100],
         "description": "\n".join(desc_lines),
-        "tags": tags[:20]
+        "tags": tags[:15]
     }
 
 
@@ -212,13 +222,24 @@ def upload_clip_to_youtube(
     privacy_status: str = "unlisted",
     category_id: str = "24",  # 24: Entertainment, 22: People & Blogs
     progress_callback = None,
-    job_id: int = 0
+    job_id: int = 0,
+    thumbnail_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Upload video file to YouTube as a Short using Resumable Upload protocol.
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file to upload does not exist: {video_path}")
+
+    # A placeholder title is a publishable defect, not a cosmetic one: it reads
+    # as spam in the feed and cannot be searched. Hold the clip instead of
+    # shipping it, so the queue keeps it and a human can regenerate the metadata.
+    from services.metadata import is_placeholder_title
+    if is_placeholder_title(title):
+        raise ValueError(
+            f"Refusing to publish a placeholder title ({title!r}) for job {job_id}. "
+            "Regenerate the clip metadata, then publish."
+        )
 
     # Pre-upload dimension validation with warning (non-blocking)
     try:
@@ -299,6 +320,23 @@ def upload_clip_to_youtube(
 
     job_info(0, f"YouTube Shorts upload SUCCESS: {shorts_url}")
 
+    # The clip ships with a designed thumbnail (clips.thumbnail_path). Until now
+    # nothing ever sent it, so YouTube picked a random frame for every short.
+    # A rejected thumbnail must not undo a publish that already happened.
+    thumbnail_status = "skipped"
+    if thumbnail_path and os.path.exists(thumbnail_path):
+        try:
+            from googleapiclient.http import MediaFileUpload as _ThumbMedia
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=_ThumbMedia(thumbnail_path, mimetype="image/jpeg")
+            )
+            thumbnail_status = "set"
+            job_info(0, f"Thumbnail applied for {video_id}: {thumbnail_path}")
+        except Exception as thumb_err:
+            thumbnail_status = "failed"
+            job_warning(job_id, f"Upload succeeded but the thumbnail failed for {video_id}: {thumb_err}")
+
     # Every real publish resets the pacing clock, whichever path made it: the
     # worker's per-clip upload, a batch sweep, or a one-click from the UI.
     from utils.upload_pacing import note_upload
@@ -310,7 +348,8 @@ def upload_clip_to_youtube(
         "shorts_url": shorts_url,
         "watch_url": watch_url,
         "title": meta["title"],
-        "privacy_status": privacy_status
+        "privacy_status": privacy_status,
+        "thumbnail_status": thumbnail_status
     }
 
 
@@ -407,9 +446,9 @@ def upload_all_clips_for_job(
         if clip_progress_callback:
             clip_progress_callback(idx + 1, total_clips, clip.title or f"Clip #{clip.index + 1}")
 
-        title = clip.title or f"Viral Moment #{clip.index + 1}"
-        description = clip.description or "Watch this viral moment!"
-        hashtags = clip.hashtags or ["#Shorts", "#Viral", "#Trending"]
+        title = clip.title
+        description = clip.description or ""
+        hashtags = clip.hashtags or ["#Shorts"]
 
         if pace:
             from utils.upload_pacing import wait_for_slot
@@ -432,7 +471,8 @@ def upload_all_clips_for_job(
                 source_title=source_title,
                 privacy_status=privacy_status,
                 category_id=category_id,
-                job_id=job_id
+                job_id=job_id,
+                thumbnail_path=resolve_stored_path(getattr(clip, "thumbnail_path", None))
             )
 
             clip.uploaded = True

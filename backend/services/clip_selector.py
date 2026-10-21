@@ -6,6 +6,7 @@ import json
 from loguru import logger
 from config import settings
 from services.llm_router import call_llm_json
+from services.metadata import derive_title_from_text
 from services.story_analysis import analyze_story_segments
 from services.tone_detector import is_transcript_somber, classify_content_tone
 
@@ -283,7 +284,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
 
             start = max(0.0, seg["start"] - 0.5)
             end = min(total_duration, start + clip_length)
-            title = " ".join(text.split()[:4]).upper() or f"VIRAL MOMENT {i + 1}"
+            title = derive_title_from_text(text)
 
             tone_info = classify_content_tone(text, story_type=story_plan.get("story_type", ""))
             
@@ -339,14 +340,30 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
         clip_length = min(settings.MAX_CLIP_SECONDS, max(settings.MIN_CLIP_SECONDS, total_duration / max(1, num_clips)))
         fallback_clips = []
         for i in range(num_clips):
-            start = round(max(0.0, i * (total_duration / max(1, num_clips))))  # fixed: no trailing comma
+            start = round(max(0.0, i * (total_duration / max(1, num_clips))))
             end = min(total_duration, start + clip_length)
+            window_text = " ".join(
+                (seg.get("text") or "").strip()
+                for seg in segments
+                if min(seg["end"], end) - max(seg["start"], start) >= 1.0
+            ).strip()
+            # A placeholder title used to be published verbatim ("VIRAL MOMENT 2"
+            # on the channel). The spoken opening is the only honest description
+            # left when the selector is gone, so take it from there - and emit no
+            # clip at all for a window with nothing said in it.
+            title = derive_title_from_text(window_text)
+            if not title:
+                continue
+            words = len(window_text.split())
             fallback_clips.append({
                 "start": float(start),
                 "end": float(end),
-                "title": f"VIRAL MOMENT {i + 1}",
-                "hook": "",
-                "virality_score": 0.85 - (i * 0.05),
+                "title": title,
+                "hook": title,
+                # Deliberately below any scored clip: an unanalysed window is not
+                # a 0.85 candidate, and the old fake descending 0.85 outrank was
+                # how placeholder clips got picked first.
+                "virality_score": round(0.45 + min(0.25, words / 60.0), 2),
                 "story_type": "reaction",
                 "layout": "single_speaker",
                 "caption_style": "mrbeast",

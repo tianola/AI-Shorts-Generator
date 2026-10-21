@@ -179,7 +179,8 @@ async def upload_clip_to_youtube_endpoint(
     db: Session = Depends(get_database)
 ):
     """Upload a generated clip directly to YouTube Shorts."""
-    from services.youtube_upload import upload_clip_to_youtube, get_youtube_auth_status
+    from services.youtube_upload import (
+        upload_clip_to_youtube, get_youtube_auth_status, resolve_stored_path)
 
     auth_status = get_youtube_auth_status()
     if not auth_status["authenticated"]:
@@ -212,10 +213,12 @@ async def upload_clip_to_youtube_endpoint(
     if not video_path or not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail=f"Video file for clip {clip_id} not found on disk")
 
-    # Prepare metadata
-    title = req.title or clip.title or "Viral Moment"
-    description = req.description or clip.description or "Watch this amazing clip!"
-    hashtags = req.hashtags if req.hashtags is not None else (clip.hashtags or ["#Shorts", "#Viral"])
+    # Prepare metadata. A placeholder title is refused by the uploader rather
+    # than published, so an operator sees the real problem instead of a short
+    # named "Viral Moment 2" on the channel.
+    title = req.title or clip.title
+    description = req.description or clip.description or ""
+    hashtags = req.hashtags if req.hashtags is not None else (clip.hashtags or ["#Shorts"])
     privacy = resolve_upload_privacy(req.privacy_status)
 
     try:
@@ -225,7 +228,8 @@ async def upload_clip_to_youtube_endpoint(
             description=description,
             hashtags=hashtags,
             privacy_status=privacy,
-            job_id=clip.job_id if clip.job_id else 0
+            job_id=clip.job_id if clip.job_id else 0,
+            thumbnail_path=resolve_stored_path(clip.thumbnail_path)
         )
 
         clip.uploaded = True

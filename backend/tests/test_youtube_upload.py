@@ -8,13 +8,15 @@ from services.youtube_upload import (
 client = TestClient(app)
 
 def test_format_shorts_metadata():
-    # Plain title
+    # Plain title. The tag list is the clip's own: the fixed filler cloud
+    # (Viral/Trending/FYP/ForYou/Storytime/Explore) used to be appended to every
+    # upload, which is the generic signal a niche channel has to stop sending.
     meta1 = format_shorts_metadata("Mindblowing Secret Revealed", "Check this out", ["#AI", "Tech"])
     assert "#Shorts" in meta1["title"]
     assert len(meta1["title"]) <= 100
     assert "#AI" in meta1["description"]
-    assert "AI" in meta1["tags"]
-    assert "Shorts" in meta1["tags"]
+    assert meta1["tags"] == ["AI", "Tech"]
+    assert not {"Viral", "Trending", "FYP", "ForYou", "Storytime", "Explore"} & set(meta1["tags"])
 
     # Long title truncation
     meta2 = format_shorts_metadata("A" * 150, "Desc", ["#Viral"])

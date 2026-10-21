@@ -80,7 +80,7 @@ class _Recorder:
         self.fail_with = fail_with
 
     def __call__(self, *, video_path, title, description, hashtags, source_title,
-                 privacy_status, job_id):
+                 privacy_status, job_id, thumbnail_path=None):
         self.calls.append(title)
         if self.fail_with:
             raise self.fail_with
