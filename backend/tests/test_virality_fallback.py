@@ -8,7 +8,6 @@ and the failure left no trace in the log. resolve_virality_stats is the
 observable, honest wrapper: passthrough on success, selector-derived fallback
 on failure, always logged.
 """
-import pytest
 
 from services import virality_detector
 

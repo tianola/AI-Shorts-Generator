@@ -33,9 +33,9 @@ class Job(Base):
     # Content safety: smart blur of unsafe objects
     smart_blur_enabled = Column(Boolean, nullable=True, default=False)
     target_clips = Column(Integer, nullable=True, default=10)
-    # Publishing is opt-in. The previous default of True meant a job created by
-    # an API client that never mentioned auto_upload (n8n, curl, scripts) was
-    # pushed straight to public YouTube/TikTok feeds.
+    # The API fills this from settings.DEFAULT_AUTO_UPLOAD, so the operator's
+    # .env decides. The column itself still defaults to False: a Job row built
+    # directly (a script, a test) is local until somebody asks for publishing.
     auto_upload = Column(Boolean, nullable=True, default=False)
     # "public" | "unlisted" | "private"; NULL falls back to AUTO_UPLOAD_PRIVACY
     upload_privacy = Column(String, nullable=True, default=None)

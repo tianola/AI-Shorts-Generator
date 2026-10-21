@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from api.common import clip_payload, resolve_upload_privacy
+from api.common import clip_payload, resolve_auto_upload, resolve_upload_privacy
 from config import settings
 from database.models import Clip, Job, JobProgress
 from database.session import get_database
@@ -151,7 +151,7 @@ async def create_job(
     caption_style: Optional[str] = "mrbeast",
     layout_mode: Optional[str] = "auto",
     target_clips: Optional[int] = 10,
-    auto_upload: Optional[bool] = False,
+    auto_upload: Optional[bool] = None,
     llm_translate: Optional[bool] = False,
     upload_privacy: Optional[str] = None,
     db: Session = Depends(get_database)
@@ -167,7 +167,7 @@ async def create_job(
         default_caption_style=caption_style,
         default_layout_mode=layout_mode,
         target_clips=target_clips or 10,
-        auto_upload=bool(auto_upload),
+        auto_upload=resolve_auto_upload(auto_upload),
         llm_translate=bool(llm_translate),
         upload_privacy=resolve_upload_privacy(upload_privacy),
         status="created"
@@ -192,7 +192,7 @@ async def zero_view_diagnostic_endpoint(
     caption_style: Optional[str] = Form("mrbeast"),
     layout_mode: Optional[str] = Form("auto"),
     target_clips: Optional[int] = Form(10),
-    auto_upload: Optional[bool] = Form(False),
+    auto_upload: Optional[bool] = Form(None),
     llm_translate: Optional[bool] = Form(False),
     upload_privacy: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
@@ -214,7 +214,7 @@ async def zero_view_diagnostic_endpoint(
         default_caption_style=caption_style,
         default_layout_mode=layout_mode,
         target_clips=num_clips,
-        auto_upload=bool(auto_upload),
+        auto_upload=resolve_auto_upload(auto_upload),
         llm_translate=bool(llm_translate),
         upload_privacy=resolve_upload_privacy(upload_privacy),
         status="created"
@@ -252,7 +252,7 @@ async def create_job_from_upload(
     caption_style: Optional[str] = Form("mrbeast"),
     layout_mode: Optional[str] = Form("auto"),
     target_clips: Optional[int] = Form(10),
-    auto_upload: Optional[bool] = Form(False),
+    auto_upload: Optional[bool] = Form(None),
     llm_translate: Optional[bool] = Form(False),
     upload_privacy: Optional[str] = Form(None),
     db: Session = Depends(get_database)
@@ -273,7 +273,7 @@ async def create_job_from_upload(
         default_caption_style=caption_style,
         default_layout_mode=layout_mode,
         target_clips=target_clips or 10,
-        auto_upload=bool(auto_upload),
+        auto_upload=resolve_auto_upload(auto_upload),
         llm_translate=bool(llm_translate),
         upload_privacy=resolve_upload_privacy(upload_privacy),
         status="created"

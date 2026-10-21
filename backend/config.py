@@ -296,6 +296,14 @@ class Settings(BaseSettings):
         default="unlisted",
         description="Visibility for automatic uploads: 'public', 'unlisted' or 'private'"
     )
+    DEFAULT_AUTO_UPLOAD: bool = Field(
+        default=True,
+        description="Whether a job created without an explicit auto_upload flag "
+                    "queues its finished clips for publishing. The queue paces "
+                    "them UPLOAD_MIN_GAP_SECONDS apart, so this only decides "
+                    "whether the queue is used at all. A request can still say "
+                    "auto_upload=false to keep a job local."
+    )
     UPLOAD_MIN_GAP_SECONDS: int = Field(
         default=3600,
         ge=0,

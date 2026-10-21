@@ -76,8 +76,9 @@ must be through the root `.venv`, which is the install the tests and the running
 
 **`POST /api/jobs/{id}/restart` is not a dry run.** It wipes the job directory, re-downloads,
 re-renders **and re-publishes** every clip if the job row carries `auto_upload = 1` — the flag
-is stored per job, set when the job is created, and `upload_privacy NULL` falls back to
-`AUTO_UPLOAD_PRIVACY` (default **unlisted**). It no longer uploads on the spot: each rendered
+is stored per job, resolved at creation from `DEFAULT_AUTO_UPLOAD` (default **true**: a job
+publishes unless the request says `auto_upload=false`), and `upload_privacy NULL` falls back to
+`AUTO_UPLOAD_PRIVACY` (default **unlisted**; this machine's `backend/.env` sets **public**). It no longer uploads on the spot: each rendered
 clip is parked in `clips.publish_due_at` and the worker releases one YouTube publish per
 `UPLOAD_MIN_GAP_SECONDS` (default **3600**, plus up to `UPLOAD_GAP_JITTER_SECONDS=600`), so the
 shorts still reach the channel, one an hour, and a worker restart cannot make the next one
