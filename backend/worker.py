@@ -40,7 +40,7 @@ from services.word_cropper import crop_words
 from services.captions import create_captions
 from services.dimension_checker import check_dimensions, log_dimension_warning
 from services.render import burn_captions
-from services.metadata import generate_metadata
+from services.metadata import derive_title_from_text, generate_metadata
 from services.thumbnail import generate_thumbnail
 from services.sfx import add_automatic_sfx
 
@@ -829,6 +829,20 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             except Exception as e:
                 job_warning(job_id, f"Visual popup preparation failed ({e}); continuing without popup")
 
+        # ---- Headline first, then the render ----
+        # Single-pass mode composites the title PNG *inside* the encode, so the
+        # text passed there is what the viewer reads forever. Generating the
+        # metadata after the render left job 105 with the selector's draft
+        # burned into every frame while the database held the real title.
+        job_info(job_id, "Generating metadata...")
+        clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
+        metadata = await generate_metadata(
+            clip_transcript,
+            clip.get("title", ""),
+            clip.get("hook", "")
+        )
+        final_title = metadata.get("title") or clip.get("title") or ""
+
         # ---- Render: single-pass unified OR sequential fallback ----
         _used_single_pass = False
         if getattr(settings, "SINGLE_PASS_RENDER", False):
@@ -839,7 +853,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
 
                 vertical_frag = build_vertical_filter(short_path, mode=resolved_layout,
                                                       diarization=clip_turns or None, attention=clip_attention)
-                sfx_list = pick_sfx_for_clip(clip.get("title", "") or "", clip_transcript, job.style_prompt or "")
+                sfx_list = pick_sfx_for_clip(final_title or "", clip_transcript, job.style_prompt or "")
                 sfx_files = []
                 sfx_ts = []
                 for name in sfx_list:
@@ -847,7 +861,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                     if p:
                         sfx_files.append(p)
                         sfx_ts.append(0.3 if len(sfx_files) == 1 else max(1.5, (clip_end - clip_start) / 2.0))
-                _title = clip.get("title") or "Viral Moment"
+                _title = final_title or derive_title_from_text(clip_transcript)
                 # short_path is already cut from clip_start to clip_end, so relative duration is 0..duration
                 clip_dur = max(0.1, clip_end - clip_start)
                 _rsp(
@@ -895,16 +909,10 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             vertical_path = final_path
 
         # =====================
-        # 5f. GENERATE METADATA
+        # 5f. METADATA ENRICHMENT
+        # (title/description/hashtags were generated before the render, so the
+        #  burned-in headline and the published one are the same text)
         # =====================
-        job_info(job_id, "Generating metadata...")
-        clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
-        metadata = await generate_metadata(
-            clip_transcript,
-            clip.get("title", ""),
-            clip.get("hook", "")
-        )
-
         # Compute Active Expression & Multi-modal Virality Analysis.
         # resolve_virality_stats never raises: if the visual/keyword pass fails
         # it falls back to the selector's own score (flagged, logged) instead of
@@ -919,7 +927,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         from services.copy_generator import generate_platform_copies
         platform_copy = await generate_platform_copies(
             clip_transcript,
-            metadata.get("title") or clip.get("title", "Viral Moment")
+            final_title
         )
         metadata["platform_copy"] = platform_copy
 
@@ -931,7 +939,8 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         job_info(job_id, f"Metadata generated: {metadata_path}")
 
         # Add top TikTok title overlay ONCE at the end of clip processing
-        final_title = metadata.get("title") or clip.get("title") or "Viral Moment"
+        # (final_title was resolved before the render, together with the headline
+        # that single-pass mode already composited)
         title_overlay_path = os.path.join(str(clip_dir), "final_with_title.mp4")
         # In single-pass mode, the title PNG was already composited in the
         # single ffmpeg pass — skip the separate motion-title re-encode.
