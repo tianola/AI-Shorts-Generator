@@ -1,4 +1,5 @@
 import json
+import re
 import httpx
 from typing import Optional, Type, TypeVar
 from pydantic import BaseModel
@@ -26,6 +27,50 @@ def _extract_json_text(text: str) -> str:
 	if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
 		return text[start_idx:end_idx + 1]
 	return text
+
+
+_DECODER = json.JSONDecoder()
+_FIRST_ARRAY = re.compile(r'"([^"]+)"\s*:\s*\[')
+
+
+def salvage_incomplete_json(text: str) -> dict:
+	"""Parse JSON the model never finished emitting.
+
+	A reply cut at the output token limit still contains every array element that
+	closed before the cut - and _extract_json_text strips the envelope down to
+	`{"clips": [ ... }`, which json.loads rejects at EOF. Recovering the complete
+	elements keeps the analysis; discarding the whole reply throws it away and the
+	caller silently degrades to its no-AI fallback.
+
+	Returns {} only when there is no array to recover from.
+	"""
+	text = _extract_json_text(text)
+	start = text.find("{")
+	if start == -1:
+		return {}
+	try:
+		return json.loads(text[start:])
+	except ValueError:
+		pass
+
+	array = _FIRST_ARRAY.search(text)
+	if not array:
+		return {}
+
+	pos = array.end()
+	items = []
+	while pos < len(text):
+		while pos < len(text) and text[pos] in " \t\r\n,":
+			pos += 1
+		if pos >= len(text) or text[pos] == "]":
+			break
+		try:
+			item, pos = _DECODER.raw_decode(text, pos)
+		except ValueError:
+			break
+		items.append(item)
+
+	return {array.group(1): items}
 
 
 async def call_llm_structured(
@@ -122,8 +167,19 @@ async def call_llm_json(
 					if json_text:
 						logger.info(f"Successfully called OmniRoute model '{target_model}'")
 						return json_text
+				# A 200 with nothing usable is not a transport error, but it used to
+				# drop through silently and let the Ollama fallback's own message look
+				# like the cause. Name what actually came back.
+				logger.warning(
+					f"OmniRoute returned no usable JSON from '{target_model}' "
+					f"(content={repr(content)[:120]}), attempting Ollama fallback..."
+				)
 			except Exception as e:
-				logger.warning(f"OmniRoute request failed ({e}), attempting Ollama fallback...")
+				# Some httpx failures stringify to "" and left the log reading
+				# "OmniRoute request failed ()", which names no cause at all.
+				logger.warning(
+					f"OmniRoute request failed ({type(e).__name__}: {e}), attempting Ollama fallback..."
+				)
 
 	# Fallback / Direct Ollama API
 	ollama_model = model if provider == "ollama" else settings.OLLAMA_MODEL

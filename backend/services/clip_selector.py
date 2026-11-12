@@ -8,7 +8,7 @@ import re
 import string
 from loguru import logger
 from config import settings
-from services.llm_router import call_llm_json
+from services.llm_router import call_llm_json, salvage_incomplete_json
 from services.metadata import derive_title_from_text
 from services.story_analysis import analyze_story_segments
 from services.tone_detector import is_transcript_somber, classify_content_tone
@@ -28,6 +28,11 @@ POWER_WORDS = [
     # Numbers (specificity = trust)
     "$", "%", "million", "billion", "number one", "#1",
 ]
+
+# Measured 2026-11-12: a clip in the selection reply costs ~285 output tokens
+# (6869 chars / 7 clips at a 2000-token cap). A flat budget therefore truncates
+# any ask above 7 clips; scale it with num_clips and keep a floor for small runs.
+CLIP_OUTPUT_TOKENS = 350
 
 # High-arousal emotion words (drive sharing per Journal of Consumer Psychology 2024)
 HIGH_AROUSAL_EMOTIONS = [
@@ -291,6 +296,23 @@ def _composite_score(clip: dict) -> float:
     return round(min(1.0, composite), 4)
 
 
+def _normalise_llm_score(value) -> float:
+    """Map the model's own virality self-rating onto 0-1.
+
+    The prompt asks for a float and names no range, so the model answers on the
+    scale it likes - measured 0-10 on job 110's source (9.4, 8.9, 9.6). At the v2
+    composite's 25% weight, a raw 9.6 is 2.4 on its own, so min(1.0, composite)
+    pinned every AI clip to 1.0 and the ranking collapsed to emission order.
+    """
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.75
+    if score > 1.0:
+        score /= 10.0
+    return round(max(0.0, min(1.0, score)), 4)
+
+
 def _composite_score_v2(clip: dict) -> float:
     """Research-backed weighted virality score (v2).
 
@@ -404,7 +426,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 "end": float,
                 "title": "string",
                 "hook": "string",
-                "virality_score": float,
+                "virality_score": float between 0.0 and 1.0,
                 "hook_score": float,
                 "coherence_score": float,
                 "connection_score": float,
@@ -435,10 +457,11 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             system="You are an expert viral Shorts director. Extract top-performing clips.",
             model=settings.OLLAMA_MODEL if settings.AI_PROVIDER == "ollama" else settings.OMNIROUTE_MODEL,
             temperature=0.35,
+            max_tokens=max(2000, num_clips * CLIP_OUTPUT_TOKENS),
         )
 
         response_text = response_text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(response_text)
+        data = salvage_incomplete_json(response_text)
         clips = data.get("clips", [])
 
         valid_clips = []
@@ -454,6 +477,8 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             # the new one trims it to MAX_CLIP_SECONDS so completion rate stays high.
             if (float(clip["end"]) - float(clip["start"])) > settings.MAX_CLIP_SECONDS:
                 clip["end"] = float(clip["start"]) + settings.MAX_CLIP_SECONDS
+
+            clip["virality_score"] = _normalise_llm_score(clip.get("virality_score"))
 
             clip.setdefault("story_type", story_plan.get("story_type", "reaction"))
             clip.setdefault("layout", "single_speaker")
@@ -510,10 +535,10 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             # Visual event density: count temporal events in clip window
             visual_event_count = 0
             if temporal_events:
-                for evt in temporal_events:
-                    evt_start = evt.get("start", evt.get("timestamp", 0))
-                    if clip_start <= evt_start <= clip_end:
-                        visual_event_count += 1
+                from services.temporal_localization import events_for_clip_window
+                visual_event_count = len(
+                    events_for_clip_window(temporal_events, clip_start, clip_end)
+                )
             clip["visual_event_density"] = _visual_event_density_score(
                 visual_event_count, clip_end - clip_start
             )
@@ -546,6 +571,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
 
         valid_clips.sort(key=lambda x: x.get("virality_score", 0.0), reverse=True)
         if len(valid_clips) >= num_clips:
+            logger.info(f"Clip selection path=ai: {num_clips} of {len(valid_clips)} scored AI windows")
             return valid_clips[:num_clips]
 
         # Fill with heuristic moments if LLM returned fewer clips than requested
@@ -619,17 +645,27 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 "popup_cues": [],
             })
 
-        seen = set()
-        merged = []
-        for clip in valid_clips + heuristic_clips:
-            key = round(float(clip["start"]), 1), round(float(clip["end"]), 1)
-            if key in seen:
+        # The AI windows are the answer; heuristics only fill the shortfall. Sorting
+        # both lists together used to evict them: a heuristic candidate is generated
+        # for every transcript segment, and its score is not comparable to the LLM's,
+        # so 120 fillers outranked 7 real picks and left the top-10 slice with none.
+        selected = list(valid_clips[:num_clips])
+        taken = [(float(c["start"]), float(c["end"])) for c in selected]
+        heuristic_clips.sort(key=lambda x: x.get("virality_score", 0.0), reverse=True)
+        for clip in heuristic_clips:
+            if len(selected) >= num_clips:
+                break
+            start, end = float(clip["start"]), float(clip["end"])
+            if any(start < prev_end and prev_start < end for prev_start, prev_end in taken):
                 continue
-            seen.add(key)
-            merged.append(clip)
+            selected.append(clip)
+            taken.append((start, end))
 
-        merged.sort(key=lambda x: x.get("virality_score", 0.0), reverse=True)
-        return merged[:num_clips]
+        logger.info(
+            f"Clip selection path=ai+heuristic: {len(valid_clips)} scored AI windows kept, "
+            f"{len(selected) - len(valid_clips)} filled from transcript heuristics"
+        )
+        return selected
 
     except Exception as e:
         logger.error(f"Clip selection failed: {e}")

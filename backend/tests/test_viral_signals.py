@@ -200,3 +200,100 @@ async def test_end_to_end_clip_selection_uses_new_signals(pin_clip_range, monkey
         assert "emotional_intensity" in result[0]
     finally:
         os.unlink(segments_file.name)
+
+
+@pytest.mark.asyncio
+async def test_a_ten_point_self_rating_does_not_saturate_the_composite(pin_clip_range, monkeypatch):
+    """Measured 2026-11-12 on job 110's source: the model answers virality_score on a
+    0-10 scale (9.4, 8.9, 9.6). At 25% weight one clip's self-rating alone exceeds 1.0,
+    so min(1.0, composite) pinned all seven AI clips to exactly 1.0 and the ranking
+    became the model's emission order. Scale it to 0-1 where it is read."""
+    from services import clip_selector
+
+    segments = [
+        {"start": 0.0, "end": 30.0, "text": "This is the secret they never told you", "audio_energy": 0.8},
+        {"start": 30.0, "end": 60.0, "text": "word " * 40, "audio_energy": 0.3},
+    ]
+    segments_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    json.dump(segments, segments_file)
+    segments_file.close()
+
+    try:
+        llm_clips = {
+            "clips": [
+                # exciting on a 0-10 scale, boring on the same scale
+                {"start": 0.0, "end": 29.0, "title": "HIDDEN TRUTH", "hook": "nobody knows", "virality_score": 9.6},
+                {"start": 31.0, "end": 60.0, "title": "MEH", "hook": "and then", "virality_score": 2.0},
+            ]
+        }
+
+        async def fake_llm(*a, **kw):
+            return json.dumps(llm_clips)
+
+        async def fake_story(*a, **kw):
+            return {"story_type": "reveal", "cta": "Follow for more."}
+
+        monkeypatch.setattr(clip_selector, "call_llm_json", fake_llm)
+        monkeypatch.setattr(clip_selector, "analyze_story_segments", fake_story)
+
+        result = await clip_selector.select_clips(segments_file.name, num_clips=2)
+
+        assert result[0]["llm_score_raw"] == pytest.approx(0.96), \
+            f"a 9.6 self-rating must be stored as 0.96, got {result[0]['llm_score_raw']}"
+        scores = [c["virality_score"] for c in result]
+        assert max(scores) < 1.0, f"the composite saturated at {scores}; nothing is being ranked"
+        assert scores[0] > scores[1], f"the 9.6 clip must outrank the 2.0 clip; got {scores}"
+        assert 0.0 <= result[0]["hook_score"] <= 1.0, "inherited legacy fields must stay 0-1"
+    finally:
+        os.unlink(segments_file.name)
+
+
+@pytest.mark.asyncio
+async def test_detected_visual_events_reach_the_density_signal(pin_clip_range, monkeypatch):
+    """temporal_localization emits {"t": ...} (its own events_for_clip_window and
+    format_events_for_prompt read that key), but the selector counted events with
+    evt.get("start", evt.get("timestamp", 0)). The key never exists, so every clip
+    scored visual_event_density 0.0 and 344 measured events contributed nothing to the
+    8% visual weight."""
+    from services import clip_selector
+
+    segments = [{"start": float(i * 30.0), "end": float((i + 1) * 30.0), "text": "word " * 40}
+                for i in range(3)]
+    segments_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    json.dump(segments, segments_file)
+    segments_file.close()
+
+    # Only t=70 falls inside the clip window below. The window deliberately does not
+    # start at 0: the broken read returns 0 for every event, and a 0-started window
+    # would then count all four by accident instead of exposing the bug.
+    events = [{"t": 5.0, "type": "scene_change", "importance": 0.5},
+              {"t": 12.0, "type": "object_appear", "name": "car", "importance": 0.6},
+              {"t": 20.0, "type": "person_enters", "importance": 0.7},
+              {"t": 70.0, "type": "scene_change", "importance": 0.5}]
+
+    try:
+        llm_clips = {
+            "clips": [
+                {"start": 60.0, "end": 90.0, "title": "ONE THING HAPPENS", "hook": "wait", "virality_score": 0.8}
+            ]
+        }
+
+        async def fake_llm(*a, **kw):
+            return json.dumps(llm_clips)
+
+        async def fake_story(*a, **kw):
+            return {"story_type": "reveal", "cta": "Follow for more."}
+
+        monkeypatch.setattr(clip_selector, "call_llm_json", fake_llm)
+        monkeypatch.setattr(clip_selector, "analyze_story_segments", fake_story)
+
+        result = await clip_selector.select_clips(
+            segments_file.name, num_clips=1, temporal_events=events
+        )
+
+        # 1 event in a 30s window: density 0.033/s, under the 0.05 floor -> linear ramp
+        assert result[0]["visual_event_density"] == pytest.approx(0.333, abs=0.01), \
+            (f"the one event at t=70 falls in the 60-90s window and must score ~0.333, "
+             f"got {result[0]['visual_event_density']}")
+    finally:
+        os.unlink(segments_file.name)
