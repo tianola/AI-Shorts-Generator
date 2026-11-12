@@ -6,7 +6,23 @@ import subprocess
 import json
 import os
 from config import settings
+from services.audio_polish import (
+    ENCODE_TIMEOUT_S,
+    LOUDNORM_TARGET_I,
+    PROBE_TIMEOUT_S,
+    build_loudnorm_filter,
+    measure_loudness,
+)
 from utils.logger import job_info, job_error, job_warning
+
+# Every ffmpeg/ffprobe call in this module carries a timeout: a decoder wedged
+# on a damaged stream used to hold the whole job open forever, and the log said
+# nothing about why.
+
+
+def _timeout_error(label: str, exc: subprocess.TimeoutExpired) -> Exception:
+    """A killed process is a render failure like any other, not a hang."""
+    return Exception(f"{label} timed out after {exc.timeout}s and was killed")
 
 def get_video_size(video_path: str) -> tuple:
     """
@@ -34,7 +50,8 @@ def get_video_size(video_path: str) -> tuple:
             cmd,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            timeout=PROBE_TIMEOUT_S
         )
         data = json.loads(result.stdout)
 
@@ -82,6 +99,10 @@ def mux_tts(
         # Layer the hook voice-over on top of the ducked original audio.
         # amix duration=longest keeps the output as long as the video's own
         # audio, so the clip is never truncated to the TTS length.
+        #
+        # normalize=0 matters: amix's default rescales every input by 1/n, so
+        # the 0.35 duck below became an 0.175 one and the bed vanished under
+        # the voice-over. The duck is the mix level the caller asked for.
         cmd = [
             "ffmpeg",
             "-y",
@@ -90,7 +111,7 @@ def mux_tts(
             "-map", "0:v",
             "-filter_complex",
             "[1:a]adelay=600|600,volume=1.0[t];[0:a]volume=0.35[orig];"
-            "[t][orig]amix=inputs=2:duration=longest:dropout_transition=0[a]",
+            "[t][orig]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[a]",
             "-map", "[a]",
             "-c:v", "copy",
             "-c:a", "aac",
@@ -116,7 +137,7 @@ def mux_tts(
         ]
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=ENCODE_TIMEOUT_S)
         job_info(0, f"Muxed TTS into video: {output_path}")
         return output_path
     except subprocess.CalledProcessError as e:
@@ -127,6 +148,9 @@ def mux_tts(
             error_msg = str(err) if err else str(e)
         job_error(0, f"TTS mux failed: {error_msg}")
         raise Exception(f"TTS mux failed: {error_msg}")
+    except subprocess.TimeoutExpired as e:
+        job_error(0, f"TTS mux timed out: {output_path}")
+        raise _timeout_error("TTS mux", e) from e
 
 
 def _has_audio_stream(video_path: str) -> bool:
@@ -140,7 +164,8 @@ def _has_audio_stream(video_path: str) -> bool:
         video_path
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=PROBE_TIMEOUT_S)
         if result.returncode != 0:
             # Unknown — guessing "no audio" would strip the voice from the
             # finished short, which is far worse than an empty audio map.
@@ -160,7 +185,8 @@ def _probe_duration(video_path: str) -> float:
         video_path
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=PROBE_TIMEOUT_S)
         return float(result.stdout.strip())
     except Exception:
         return 0.0
@@ -245,7 +271,8 @@ def add_title_overlay(
     ]
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True,
+                       timeout=ENCODE_TIMEOUT_S)
         job_info(0, f"Title overlay added: {output_path}")
         return output_path
     except subprocess.CalledProcessError as e:
@@ -256,6 +283,9 @@ def add_title_overlay(
             error_msg = str(err) if err else str(e)
         job_error(0, f"Title overlay failed: {error_msg}")
         raise Exception(f"Title overlay failed: {error_msg}")
+    except subprocess.TimeoutExpired as e:
+        job_error(0, f"Title overlay timed out: {output_path}")
+        raise _timeout_error("Title overlay", e) from e
     finally:
         # Clean up temp title file
         try:
@@ -308,7 +338,8 @@ def burn_captions(
             check=True,
             capture_output=True,
             text=True,
-            creationflags=creationflags
+            creationflags=creationflags,
+            timeout=ENCODE_TIMEOUT_S
         )
         job_info(0, f"Captions burned in: {output_path}")
         return output_path
@@ -320,6 +351,9 @@ def burn_captions(
             error_msg = str(err) if err else str(e)
         job_error(0, f"Caption burn-in failed: {error_msg}")
         raise Exception(f"Caption burn-in failed: {error_msg}")
+    except subprocess.TimeoutExpired as e:
+        job_error(0, f"Caption burn-in timed out: {output_path}")
+        raise _timeout_error("Caption burn-in", e) from e
 
 # ---------------------------------------------------------------------------
 # Single-pass unified render pipeline (Task D)
@@ -342,6 +376,7 @@ def build_single_pass_filter(
     popup_duration: float = 2.0,
     popup_position: str = "upper_third",
     popups: list = None,
+    loudnorm_chain: str = "",
 ) -> tuple:
     """
     Construct an all-in-one FFmpeg filter_complex that combines all visual
@@ -361,6 +396,10 @@ def build_single_pass_filter(
         popup_duration: Duration (in seconds) the popup stays visible (default 2.0).
         popup_position: Popup placement ('upper_third' or 'upper_right').
         popups: Optional list of popup dicts (each with png, start, duration, position).
+        loudnorm_chain: Pass-2 loudnorm chain from
+            :func:`services.audio_polish.build_loudnorm_filter`. Applied LAST on
+            the audio graph — after the SFX mix — so what gets measured is what
+            the viewer hears. Empty string renders un-normalised.
 
     Returns:
         (extra_inputs, filter_complex, vmap, amap)
@@ -483,30 +522,41 @@ def build_single_pass_filter(
 
     # ---- Stage 4: SFX audio mixing (100% voice preserved) ----
     aout = None
-    if sfx_files and has_audio:
-        sfx_files = list(sfx_files)
-        sfx_timestamps = list(sfx_timestamps or [])
-        fc_parts.append("[0:a]volume=1.0[orig]")
-        labels = []
-        for i, sfx_path in enumerate(sfx_files):
-            sfx_idx = next_idx
-            next_idx += 1
-            extra_inputs.append({"path": sfx_path, "kind": "sfx"})
-            delay_ms = int(float(sfx_timestamps[i]) * 1000) if i < len(sfx_timestamps) else 300
-            label = "sfx" + str(i)
+    if has_audio:
+        # `tail` is where the audio graph currently ends; stage 5 reads from it.
+        tail = "[0:a]"
+        if sfx_files:
+            sfx_files = list(sfx_files)
+            sfx_timestamps = list(sfx_timestamps or [])
+            fc_parts.append("[0:a]volume=1.0[orig]")
+            labels = []
+            for i, sfx_path in enumerate(sfx_files):
+                sfx_idx = next_idx
+                next_idx += 1
+                extra_inputs.append({"path": sfx_path, "kind": "sfx"})
+                delay_ms = int(float(sfx_timestamps[i]) * 1000) if i < len(sfx_timestamps) else 300
+                label = "sfx" + str(i)
+                fc_parts.append(
+                    "[" + str(sfx_idx) + ":a]adelay=" + str(delay_ms) + "|" + str(delay_ms)
+                    + ",volume=0.25[" + label + "]"
+                )
+                labels.append("[" + label + "]")
+            mix_in = "[orig]" + "".join(labels)
+            # normalize=0: amix's default scales every input by 1/n, which is an
+            # automatic duck of the voice each time an effect is mixed in.
+            tail = "[apre]" if loudnorm_chain else "[aout]"
             fc_parts.append(
-                "[" + str(sfx_idx) + ":a]adelay=" + str(delay_ms) + "|" + str(delay_ms)
-                + ",volume=0.25[" + label + "]"
+                mix_in + "amix=inputs=" + str(1 + len(labels))
+                + ":duration=first:dropout_transition=0:normalize=0" + tail
             )
-            labels.append("[" + label + "]")
-        mix_in = "[orig]" + "".join(labels)
-        fc_parts.append(
-            mix_in + "amix=inputs=" + str(1 + len(labels))
-            + ":duration=first:dropout_transition=0:normalize=0[aout]"
-        )
-        aout = "[aout]"
-    elif has_audio:
-        aout = "0:a?"
+
+        # ---- Stage 5: loudness normalisation (last thing the audio sees) ----
+        # After the mix, not before: measured on the dialogue alone and applied
+        # to the finished track, the delivered level still rides on how much
+        # effect audio a clip happened to get.
+        if loudnorm_chain:
+            fc_parts.append(tail + loudnorm_chain + "[aout]")
+        aout = "[aout]" if (loudnorm_chain or tail == "[aout]") else "0:a?"
 
     # ---- Finalize video output ----
     fc_parts.append(cur_v + "format=yuv420p[vout]")
@@ -528,13 +578,17 @@ def _run_ffmpeg_and_verify(
         creationflags = 0x08000000 # subprocess.CREATE_NO_WINDOW
         
     try:
-        subprocess.run(cmd, capture_output=True, text=True, check=True, creationflags=creationflags)
+        subprocess.run(cmd, capture_output=True, text=True, check=True,
+                       creationflags=creationflags, timeout=ENCODE_TIMEOUT_S)
     except subprocess.CalledProcessError as e:
         err = e.stderr
         if isinstance(err, (bytes, bytearray)):
             err = err.decode(errors="ignore")
         job_error(0, label + " failed: " + str(err))
         raise Exception(label + " failed: " + str(err))
+    except subprocess.TimeoutExpired as e:
+        job_error(0, label + " timed out after " + str(e.timeout) + "s: " + output_path)
+        raise _timeout_error(label, e) from e
     if not os.path.exists(output_path) or os.path.getsize(output_path) <= 0:
         raise Exception(label + " produced no output file: " + output_path)
     if min_duration > 0:
@@ -592,6 +646,20 @@ def render_single_pass(
 
     has_audio = _has_audio_stream(input_video)
 
+    # Loudness pass 1, on exactly the window about to be rendered. Without it
+    # consecutive clips cut from one source land anywhere from -23 to -17 LUFS
+    # and every short plays at a different volume.
+    loudnorm_chain = ""
+    if has_audio:
+        measured = measure_loudness(input_video, start=start, duration=max(end - start, 0.0) or None)
+        loudnorm_chain = build_loudnorm_filter(measured)
+        if loudnorm_chain:
+            job_info(0, f"Loudness normalising {measured['input_i']} LUFS -> "
+                        f"{LOUDNORM_TARGET_I} LUFS target")
+        else:
+            job_warning(0, "Loudness measurement unavailable for "
+                           + str(input_video) + "; rendering un-normalised")
+
     # Filter out SFX files that don't exist on disk
     if sfx_files:
         kept_sfx = []
@@ -618,6 +686,7 @@ def render_single_pass(
             popup_duration=popup_duration,
             popup_position=popup_position,
             popups=popups,
+            loudnorm_chain=loudnorm_chain,
         )
 
     # Build ffmpeg command: 0 = main video, then extra inputs

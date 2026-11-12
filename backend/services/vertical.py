@@ -8,7 +8,9 @@ import numpy as np
 import subprocess
 from typing import List, Tuple, Optional
 from config import settings
+from services.audio_polish import ENCODE_TIMEOUT_S  # every ffmpeg call is bounded
 from utils.logger import job_warning, logger
+
 
 def _probe_size(video_path: str) -> Tuple[int, int]:
     """Return (width, height) of a video, releasing the capture on every path."""
@@ -365,9 +367,10 @@ def make_vertical(
     ]
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True,
+                       timeout=ENCODE_TIMEOUT_S)
         return output_video
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         err = e.stderr
         error_msg = err.decode(errors='ignore') if isinstance(err, (bytes, bytearray)) else str(e)
         raise Exception(f"Vertical conversion failed: {error_msg}")
@@ -394,9 +397,10 @@ def make_vertical_static(
         output_video
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True,
+                       timeout=ENCODE_TIMEOUT_S)
         return output_video
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         err = e.stderr
         error_msg = err.decode(errors='ignore') if isinstance(err, (bytes, bytearray)) else str(e)
         raise Exception(f"Static vertical conversion failed: {error_msg}")
@@ -432,9 +436,10 @@ def make_vertical_blurred_fit(
     ]
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True,
+                       timeout=ENCODE_TIMEOUT_S)
         return output_video
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         err = e.stderr
         error_msg = err.decode(errors='ignore') if isinstance(err, (bytes, bytearray)) else str(e)
         raise Exception(f"Blurred fit conversion failed: {error_msg}")
@@ -494,9 +499,10 @@ def make_vertical_split_screen(
     ]
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True,
+                       timeout=ENCODE_TIMEOUT_S)
         return output_video
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         err = e.stderr
         error_msg = err.decode(errors='ignore') if isinstance(err, (bytes, bytearray)) else str(e)
         raise Exception(f"Split-screen conversion failed: {error_msg}")

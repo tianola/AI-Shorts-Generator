@@ -5,6 +5,7 @@ import subprocess
 import cv2
 from services.vertical import make_vertical, make_vertical_static
 from services.focus_tracking import build_split_screen_filter, build_blurred_fit_filter
+from services.audio_polish import ENCODE_TIMEOUT_S  # every ffmpeg call is bounded
 from config import settings
 from utils.logger import job_info, job_error
 
@@ -79,7 +80,8 @@ def smart_crop_video(
                 creationflags = 0
                 if os.name == 'nt':
                     creationflags = 0x08000000 # subprocess.CREATE_NO_WINDOW
-                subprocess.run(cmd, check=True, capture_output=True, creationflags=creationflags)
+                subprocess.run(cmd, check=True, capture_output=True, creationflags=creationflags,
+                               timeout=ENCODE_TIMEOUT_S)
                 job_info(0, f"Split-screen vertical conversion: {output_file}")
                 return output_file
         except Exception as e:
@@ -96,7 +98,8 @@ def smart_crop_video(
                 "-crf", str(settings.FFMPEG_CRF), "-c:a", "copy",
                 "-movflags", "+faststart", output_file
             ]
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, check=True, capture_output=True,
+                           timeout=ENCODE_TIMEOUT_S)
             job_info(0, f"Blurred fit vertical conversion: {output_file}")
             return output_file
         except Exception as e:

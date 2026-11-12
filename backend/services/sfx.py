@@ -1,8 +1,18 @@
 """Automatic SFX layering for short-form clips with 100% voice preservation."""
 import os
+import shutil
 import subprocess
 import random
 from config import settings
+from services.audio_polish import (
+    ENCODE_TIMEOUT_S,
+    PROBE_TIMEOUT_S,
+    build_loudnorm_filter,
+    measure_loudness,
+)
+
+# An ffmpeg that never returns would keep the job open forever; every call here
+# is bounded so the pipeline fails loudly instead.
 
 
 # Curated royalty-free SFX categories mapped to clip vibes
@@ -84,6 +94,33 @@ def _find_sfx_file(sfx_name: str) -> str | None:
     return None
 
 
+def _normalise_audio_only(video_path: str, output_path: str) -> str:
+    """Last-stage loudness pass with nothing to mix.
+
+    Falls back to a plain copy when the clip has no usable audio, so the
+    function can never be the reason a render fails.
+    """
+    chain = build_loudnorm_filter(measure_loudness(video_path))
+    if not chain:
+        shutil.copy2(video_path, output_path)
+        return output_path
+
+    cmd = [
+        "ffmpeg", "-y", "-i", video_path,
+        "-map", "0:v", "-map", "0:a?",
+        "-af", chain,
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=ENCODE_TIMEOUT_S)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        shutil.copy2(video_path, output_path)
+    return output_path
+
+
 def mix_sfx_into_video(
     video_path: str,
     output_path: str,
@@ -105,9 +142,7 @@ def mix_sfx_into_video(
             sfx_files.append(p)
 
     if not sfx_files:
-        import shutil
-        shutil.copy2(video_path, output_path)
-        return output_path
+        return _normalise_audio_only(video_path, output_path)
 
     # Probe video duration
     probe_cmd = [
@@ -115,10 +150,15 @@ def mix_sfx_into_video(
         "-of", "default=noprint_wrappers=1:nokey=1", video_path
     ]
     try:
-        dur_res = subprocess.run(probe_cmd, capture_output=True, text=True)
+        dur_res = subprocess.run(probe_cmd, capture_output=True, text=True,
+                                 timeout=PROBE_TIMEOUT_S)
         video_dur = float(dur_res.stdout.strip()) if dur_res.stdout.strip() else 0
     except Exception:
         video_dur = 0
+
+    # Loudness pass 1 before anything is written: this is the last audio stage
+    # of the sequential pipeline, so the numbers here are the delivered clip's.
+    loudnorm_chain = build_loudnorm_filter(measure_loudness(video_path))
 
     # Calculate SFX timestamps: start, mid
     timestamps = [0.3, max(1.5, video_dur / 2.0)] if video_dur > 3.0 else [0.3]
@@ -136,9 +176,17 @@ def mix_sfx_into_video(
         sfx_labels.append(f"[sfx{i}]")
 
     all_inputs = "[orig]" + "".join(sfx_labels)
-    filter_parts.append(
-        f"{all_inputs}amix=inputs={1 + len(sfx_labels)}:duration=first:dropout_transition=0[aout]"
+    # normalize=0: amix's default scales every input by 1/n, which is a duck of
+    # the speech applied for free every time an effect is layered on.
+    mix_chain = (
+        f"{all_inputs}amix=inputs={1 + len(sfx_labels)}"
+        f":duration=first:dropout_transition=0:normalize=0"
     )
+    if loudnorm_chain:
+        mix_chain += "[apre];[apre]" + loudnorm_chain + "[aout]"
+    else:
+        mix_chain += "[aout]"
+    filter_parts.append(mix_chain)
     filter_complex = ";".join(filter_parts)
 
     cmd = ["ffmpeg", "-y", "-i", video_path]
@@ -157,10 +205,9 @@ def mix_sfx_into_video(
     ])
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=ENCODE_TIMEOUT_S)
         return output_path
-    except subprocess.CalledProcessError:
-        import shutil
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         shutil.copy2(video_path, output_path)
         return output_path
 
