@@ -25,7 +25,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Settings  # noqa: E402
+from config import Settings
 
 # Gateway-side routing aliases, not models. A value with one of these prefixes
 # means the pipeline does not know which upstream produced its clips.

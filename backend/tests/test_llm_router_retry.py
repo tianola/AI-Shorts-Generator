@@ -13,8 +13,8 @@ the latency. Retrying belongs to the transport, not to the content.
 import httpx
 import pytest
 
-import services.llm_router as llm_router
 from config import settings
+from services import llm_router
 
 
 class _Timeout(httpx.ReadTimeout):
