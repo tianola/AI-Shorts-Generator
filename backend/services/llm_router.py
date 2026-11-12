@@ -11,6 +11,12 @@ from config import settings
 
 T = TypeVar("T", bound=BaseModel)
 
+# Total OmniRoute tries before the Ollama fallback. More than one attempt is
+# worth it because a pooled `auto/*` route resolves to a different upstream per
+# call, so a timeout on one says nothing about the next; job 110 lost its whole
+# clip selection to a single ReadTimeout. Two is the smallest number that helps.
+TRANSPORT_ATTEMPTS = 2
+
 def _extract_json_text(text: str) -> str:
 	"""Helper to extract JSON text from raw LLM output."""
 	text = text.strip()
@@ -124,7 +130,7 @@ async def call_llm_json(
 	temperature: float = 0.4,
 	max_tokens: int = 2000,
 ) -> str:
-	"""Call the configured LLM backend (OmniRoute primary with auto/pro-reasoning model, Ollama fallback) and return raw JSON content."""
+	"""Call the configured LLM backend (OmniRoute primary, Ollama fallback) and return raw JSON content."""
 	provider = settings.AI_PROVIDER.lower()
 
 	if provider == "omniroute":
@@ -145,41 +151,49 @@ async def call_llm_json(
 				"response_format": {"type": "json_object"},
 			}
 
-			try:
-				async with httpx.AsyncClient(timeout=120.0) as client:
-					response = await client.post(
-						f"{base_url}/chat/completions",
-						headers={
-							"Authorization": f"Bearer {api_key}",
-							"Content-Type": "application/json",
-						},
-						json=payload,
-					)
+			for attempt in range(1, TRANSPORT_ATTEMPTS + 1):
+				try:
+					async with httpx.AsyncClient(timeout=120.0) as client:
+						response = await client.post(
+							f"{base_url}/chat/completions",
+							headers={
+								"Authorization": f"Bearer {api_key}",
+								"Content-Type": "application/json",
+							},
+							json=payload,
+						)
 					response.raise_for_status()
 					data = response.json()
 
-				choice = data.get("choices", [{}])[0]
-				message = choice.get("message", {})
-				content = message.get("content", "")
+					choice = data.get("choices", [{}])[0]
+					message = choice.get("message", {})
+					content = message.get("content", "")
 
-				if content and isinstance(content, str):
-					json_text = _extract_json_text(content)
-					if json_text:
-						logger.info(f"Successfully called OmniRoute model '{target_model}'")
-						return json_text
-				# A 200 with nothing usable is not a transport error, but it used to
-				# drop through silently and let the Ollama fallback's own message look
-				# like the cause. Name what actually came back.
-				logger.warning(
-					f"OmniRoute returned no usable JSON from '{target_model}' "
-					f"(content={repr(content)[:120]}), attempting Ollama fallback..."
-				)
-			except Exception as e:
-				# Some httpx failures stringify to "" and left the log reading
-				# "OmniRoute request failed ()", which names no cause at all.
-				logger.warning(
-					f"OmniRoute request failed ({type(e).__name__}: {e}), attempting Ollama fallback..."
-				)
+					if content and isinstance(content, str):
+						json_text = _extract_json_text(content)
+						if json_text:
+							logger.info(f"Successfully called OmniRoute model '{target_model}'")
+							return json_text
+					# A 200 with nothing usable is not a transport error, but it used to
+					# drop through silently and let the Ollama fallback's own message look
+					# like the cause. Name what actually came back, and do not retry: the
+					# same model answering in prose will answer in prose again.
+					logger.warning(
+						f"OmniRoute returned no usable JSON from '{target_model}' "
+						f"(content={repr(content)[:120]}), attempting Ollama fallback..."
+					)
+				except Exception as e:
+					# Some httpx failures stringify to "" and left the log reading
+					# "OmniRoute request failed ()", which names no cause at all.
+					if attempt < TRANSPORT_ATTEMPTS:
+						logger.warning(
+							f"OmniRoute attempt {attempt} for '{target_model}' failed "
+							f"({type(e).__name__}: {e}); retrying before the Ollama fallback..."
+						)
+						continue
+					logger.warning(
+						f"OmniRoute request failed ({type(e).__name__}: {e}), attempting Ollama fallback..."
+					)
 
 	# Fallback / Direct Ollama API
 	ollama_model = model if provider == "ollama" else settings.OLLAMA_MODEL

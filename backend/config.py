@@ -36,8 +36,10 @@ class Settings(BaseSettings):
         default=None,
         description="OmniRoute API key"
     )
+    # Not an `auto/*` combo: it re-resolves upstream per call, and one resolution
+    # answered clip selection with a thinking block instead of a string.
     OMNIROUTE_MODEL: str = Field(
-        default="auto/pro-reasoning",
+        default="agy/gemini-3-flash",
         description="OmniRoute model id for clip selection and metadata generation"
     )
     TRANSCRIPTION_PROVIDER: str = Field(
