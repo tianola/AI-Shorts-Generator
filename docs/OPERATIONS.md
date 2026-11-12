@@ -82,13 +82,22 @@ publishes unless the request says `auto_upload=false`), and `upload_privacy NULL
 clip is parked in `clips.publish_due_at` (when this machine uploads) and
 `clips.scheduled_publish_at` (when YouTube releases it), and the pass reads both
 clocks from the database. Uploads go out `UPLOAD_MIN_GAP_SECONDS` apart (default
-**900**, plus up to `UPLOAD_GAP_JITTER_SECONDS=600`); releases are handed to YouTube
-as `status.publishAt`, `PUBLISH_SCHEDULE_GAP_SECONDS` apart (default **3600**) and never
-sooner than `PUBLISH_SCHEDULE_LEAD_SECONDS` (default **900**) after the upload. So a
-scheduled clip is uploaded **private whatever the job's privacy says** and goes public on
-its own — the schedule holds while this PC is off, which is the point. Restarting the
-worker neither makes the next publish immediate nor cancels releases already handed over;
-those are only reversible from YouTube itself. TikTok still publishes in place. Visibility maps across platforms
+**3600**, plus up to `UPLOAD_GAP_JITTER_SECONDS=600`); releases are handed to YouTube
+as `status.publishAt`, `PUBLISH_SCHEDULE_GAP_SECONDS` apart (default **43200**, i.e.
+two Shorts a day) and never sooner than `PUBLISH_SCHEDULE_LEAD_SECONDS` (default
+**900**) after the upload. Each upload is dated `PUBLISH_UPLOAD_LEAD_SECONDS`
+(default **21600**, i.e. six hours) before its own release, so fifteen clips parked
+for a fortnight of releases do not spend the channel's whole rolling day of uploads
+on the first afternoon. A daily ceiling (`UPLOAD_DAILY_BUDGET`, default **8**) stops
+the queue short of the roughly ten uploads YouTube measures on this channel, and a
+same-source spread (`PUBLISH_SAME_SOURCE_MIN_GAP_SECONDS`, default **86400**) keeps
+one stream from dominating a week of the channel. Releases land inside
+`PUBLISH_RELEASE_WINDOW_UTC` (default **6-22**, i.e. 06:00-21:59 UTC) — the window
+is cosmetic to YouTube and not to the audience, and it is what makes the hours look
+human. So a scheduled clip is uploaded **private whatever the job's privacy says**
+and goes public on its own — the schedule holds while this PC is off, which is the
+point. Restarting the worker neither makes the next publish immediate nor cancels
+releases already handed over; those are only reversible from YouTube itself. TikTok still publishes in place. Visibility maps across platforms
 (`api/tiktok.py`): `unlisted` becomes TikTok `FOLLOWER_OF_CREATOR` — the `PUBLIC_TO_SELF` this
 section used to claim does not exist in TikTok's enum (corrected 2026-10-15). Either way, a
 restarted job creates real objects on both accounts and spends their daily upload quota. Check
