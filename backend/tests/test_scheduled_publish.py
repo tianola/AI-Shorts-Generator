@@ -244,6 +244,26 @@ def test_a_slot_that_already_passed_is_moved_before_the_handover(db):
     assert recorder.publish_ats == [clip.scheduled_publish_at]
 
 
+def test_a_clip_that_reaches_the_queue_without_a_slot_is_scheduled(db):
+    """The queue pass, not only the enqueue, is what has to refuse an instant post.
+
+    Nine clips are parked in the real database with a due time and no release
+    slot, and nothing will re-run the enqueue for a job that already finished -
+    so the enqueue-side backfill never sees them. Handed over with no publishAt
+    they go public the second their turn comes, at whichever visibility the job
+    asked for. Job 109's is "public".
+    """
+    clip = _clip(index=0, title="t", file_path="jobs/1/clip_0/final_video.mp4",
+                 publish_due_at=NOW - timedelta(hours=5))
+    _job(db, clips=[clip])
+    recorder = _ScheduleRecorder()
+
+    assert worker.publish_queued_clips(db, now=NOW, uploader=recorder) == 1
+    db.refresh(clip)
+    assert clip.scheduled_publish_at >= NOW + timedelta(minutes=15)
+    assert recorder.publish_ats == [clip.scheduled_publish_at]
+
+
 class _FailingUploader:
     def __call__(self, **kwargs):
         raise RuntimeError("nope")

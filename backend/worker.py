@@ -1365,9 +1365,14 @@ def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[
     # A release slot can expire while the queue is being refused uploads, and
     # YouTube reads a publishAt in the past as "publish now". Moving the row keeps
     # the promise the clip is actually shipped with, and places the next clip
-    # after it rather than on top of it.
+    # after it rather than on top of it. A clip with no slot at all - parked
+    # before this column existed, or by an operator's hand - gets one here,
+    # because the alternative is publishing it the instant its turn comes.
     lead_floor = now + timedelta(seconds=max(60, int(settings.PUBLISH_SCHEDULE_LEAD_SECONDS)))
-    if clip.scheduled_publish_at is not None and clip.scheduled_publish_at < lead_floor:
+    if clip.scheduled_publish_at is None:
+        clip.scheduled_publish_at = next_release_slot(db, now=now)
+        db.commit()
+    if clip.scheduled_publish_at < lead_floor:
         job_warning(job.id, f"Clip #{clip.index} release slot "
                             f"{clip.scheduled_publish_at:%Y-%m-%d %H:%M} UTC had already "
                             f"passed; moving it to {lead_floor:%Y-%m-%d %H:%M} UTC")
