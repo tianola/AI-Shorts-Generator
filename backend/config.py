@@ -309,7 +309,7 @@ class Settings(BaseSettings):
                     "auto_upload=false to keep a job local."
     )
     UPLOAD_MIN_GAP_SECONDS: int = Field(
-        default=900,
+        default=3600,
         ge=0,
         le=86400,
         description="Minimum spacing between uploads to the same platform. This is "
@@ -321,7 +321,7 @@ class Settings(BaseSettings):
                     "survives a worker restart. 0 disables pacing."
     )
     PUBLISH_SCHEDULE_GAP_SECONDS: int = Field(
-        default=3600,
+        default=43200,
         ge=60,
         le=86400,
         description="Spacing between the release times YouTube is given for "
@@ -346,11 +346,60 @@ class Settings(BaseSettings):
         description="Random extra delay added on top of UPLOAD_MIN_GAP_SECONDS, so "
                     "the cadence is not exactly repeatable."
     )
+    UPLOAD_DAILY_BUDGET: int = Field(
+        default=8,
+        ge=0,
+        le=100,
+        description="How many uploads to YouTube the queue will attempt inside a "
+                    "rolling 24 hours. This is the channel's own ceiling, not the "
+                    "project quota, and YouTube never publishes the number: measured "
+                    "here it is about ten, so the queue stops short of it instead of "
+                    "learning it from an uploadLimitExceeded. It is spent at upload, "
+                    "not at release, so a clip parked with publishAt costs a slot the "
+                    "moment its bytes land. 0 disables the guard."
+    )
+    PUBLISH_UPLOAD_LEAD_SECONDS: int = Field(
+        default=21600,
+        ge=60,
+        le=604800,
+        description="How far ahead of its release time a clip may be uploaded. "
+                    "Uploads are paced by the release clock, not by how fast the "
+                    "render finished: a clip becomes due this long before its slot, "
+                    "so the machine never spends upload budget on videos the channel "
+                    "has not reached yet, and an outage of this length still leaves "
+                    "the next release uploaded and scheduled."
+    )
+    PUBLISH_RELEASE_WINDOW_UTC: str = Field(
+        default="6-22",
+        description="Hours of the day (UTC) a release slot may land in, as "
+                    "'start-end'. YouTube does not punish an odd hour, a channel that "
+                    "publishes at 04:17 every day simply reads as a machine; slots "
+                    "outside the window move to its next open hour. Empty disables it."
+    )
+    PUBLISH_SAME_SOURCE_MIN_GAP_SECONDS: int = Field(
+        default=86400,
+        ge=0,
+        le=2592000,
+        description="Smallest spacing between two releases built from the same source "
+                    "video. Fifteen clips of one stream published over two days is the "
+                    "most recognisable repost-farm shape there is, and it concentrates "
+                    "a copyright claim on one day. Jobs from different sources still "
+                    "interleave on the shared cadence."
+    )
     PUBLISH_RETRY_MINUTES: int = Field(
         default=30,
         ge=1,
         description="How long a clip waits before an ordinary retry: a dead token, a "
                     "network fault, a missing file. The clip stays in the queue."
+    )
+    SHORTS_CTA: str = Field(
+        default="",
+        description="Closing line of a Short's description. Empty means the clip's own "
+                    "description ends it, which is what a person writes. The line this "
+                    "replaced was hardcoded on every video since the beginning "
+                    "('Like, Share & Subscribe for more daily viral clips!') - the same "
+                    "sentence on hundreds of uploads is a spam signature, and it lied "
+                    "about the cadence now that the channel releases twice a day."
     )
     PUBLISH_LIMIT_RETRY_HOURS: int = Field(
         default=6,

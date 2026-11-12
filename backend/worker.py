@@ -1186,7 +1186,83 @@ def next_publish_slot(db, now: Optional[datetime] = None) -> datetime:
     return max(now, last + timedelta(seconds=gap + random.uniform(0, jitter)))
 
 
-def next_release_slot(db, now: Optional[datetime] = None) -> datetime:
+def _release_window():
+    """The (start, end) UTC hours a release may land in, or None when unset.
+
+    End is exclusive, so "6-22" means 06:00 through 21:59.
+    """
+    raw = (getattr(settings, "PUBLISH_RELEASE_WINDOW_UTC", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        start, end = raw.split("-", 1)
+        start, end = int(start), int(end)
+    except ValueError:
+        logger.warning(f"PUBLISH_RELEASE_WINDOW_UTC={raw!r} is not 'start-end'; ignored")
+        return None
+    if not (0 <= start <= 23 and 0 <= end <= 24) or start == end:
+        logger.warning(f"PUBLISH_RELEASE_WINDOW_UTC={raw!r} is an empty window; ignored")
+        return None
+    return start, end
+
+
+def _snap_into_release_window(moment: datetime) -> datetime:
+    """Move a slot forward, never back, until it sits inside the release window.
+
+    A channel that publishes at 03:17, 15:17 and 03:17 again reads as a cron job to
+    the people who report spam, and to anyone comparing the timestamps. The window is
+    cosmetic to YouTube and not to its audience, so it is applied after the cadence
+    maths and can only delay a release, which is the safe direction.
+    """
+    bounds = _release_window()
+    if not bounds:
+        return moment
+    start, end = bounds
+    while True:
+        if start < end and start <= moment.hour < end:
+            return moment
+        if start > end and (moment.hour >= start or moment.hour < end):
+            return moment
+        if moment.hour < start:
+            return moment.replace(hour=start, minute=0, second=0, microsecond=0)
+        return (moment + timedelta(days=1)).replace(hour=start, minute=0,
+                                                    second=0, microsecond=0)
+
+
+def uploads_in_window(db, now: Optional[datetime] = None, hours: int = 24):
+    """Uploads YouTube accepted in the last `hours`, oldest first, as the channel counts them.
+
+    The budget is spent at upload, so this reads the successes, not the releases: a clip
+    sitting private with a publishAt tomorrow has already cost the channel one slot.
+    """
+    now = now or datetime.utcnow()
+    since = now - timedelta(hours=hours)
+    rows = db.query(Clip.published_at).filter(
+        Clip.youtube_video_id.isnot(None),
+        Clip.youtube_video_id != "",
+        Clip.published_at.isnot(None),
+        Clip.published_at > since,
+    ).order_by(Clip.published_at.asc()).all()
+    return [row[0] for row in rows]
+
+
+def next_budget_slot(db, now: Optional[datetime] = None):
+    """When the rolling upload budget has room again, or None while it already does.
+
+    YouTube's own number is unpublished, so this waits for the oldest success to age out
+    of the window rather than guessing a fixed retry delay.
+    """
+    budget = max(0, int(getattr(settings, "UPLOAD_DAILY_BUDGET", 0)))
+    if budget <= 0:
+        return None
+    recent = uploads_in_window(db, now=now)
+    if len(recent) < budget:
+        return None
+    return recent[0] + timedelta(hours=24)
+
+
+def next_release_slot(db, now: Optional[datetime] = None,
+                      source_url: Optional[str] = None) -> datetime:
     """The earliest instant YouTube may be given as the next clip's release.
 
     This is the channel's cadence — when the audience sees a video — and it is a
@@ -1195,29 +1271,51 @@ def next_release_slot(db, now: Optional[datetime] = None) -> datetime:
     the database, whether that clip is waiting for its slot or already released,
     so a restart continues the schedule and two jobs cannot be parked on the
     same minute. Nothing is ever released before PUBLISH_SCHEDULE_LEAD_SECONDS
-    after now, which is the window to inspect a clip first.
+    after now, which is the window to inspect a clip first, and no release lands
+    outside the daily window.
+
+    source_url adds the channel's other rule: clips cut from the same original
+    video hold each other at PUBLISH_SAME_SOURCE_MIN_GAP_SECONDS apart, so one
+    stream cannot turn a week of the channel into fifteen pieces of itself.
     """
     now = now or datetime.utcnow()
     gap = max(60, int(settings.PUBLISH_SCHEDULE_GAP_SECONDS))
     lead = max(60, int(settings.PUBLISH_SCHEDULE_LEAD_SECONDS))
-    floor = now + timedelta(seconds=lead)
+    candidate = now + timedelta(seconds=lead)
+
     last = db.query(func.max(Clip.scheduled_publish_at)).filter(
         Clip.scheduled_publish_at.isnot(None),
     ).scalar()
-    if not last:
-        return floor
-    return max(floor, last + timedelta(seconds=gap))
+    if last:
+        candidate = max(candidate, last + timedelta(seconds=gap))
+
+    if source_url:
+        same_source = db.query(func.max(Clip.scheduled_publish_at)).join(
+            Job, Clip.job_id == Job.id).filter(
+            Clip.scheduled_publish_at.isnot(None),
+            Job.youtube_url == source_url,
+        ).scalar()
+        source_gap = max(0, int(getattr(settings, "PUBLISH_SAME_SOURCE_MIN_GAP_SECONDS", 0)))
+        if same_source and source_gap:
+            candidate = max(candidate, same_source + timedelta(seconds=source_gap))
+
+    return _snap_into_release_window(candidate)
 
 
 def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None) -> int:
     """Park every rendered clip of a job in the publish queue.
 
     Two clocks are written per clip: publish_due_at is when this machine uploads
-    it, scheduled_publish_at is when YouTube releases it. Idempotent: a clip that
-    already waits keeps the slot it was given, and one that already has a video id
-    is finished. Returns how many rows were added.
+    it, scheduled_publish_at is when YouTube releases it. The upload time is
+    derived from the release, not from how fast this PC can push bytes, because
+    the channel's upload budget is spent at upload: fifteen clips dated over two
+    weeks would otherwise burn the whole rolling day of uploads on the first
+    afternoon and be refused before half of them ever had a turn.
+    Idempotent: a clip that already waits keeps the slot it was given, and one
+    that already has a video id is finished. Returns how many rows were added.
     """
     now = now or datetime.utcnow()
+    source_url = db.query(Job.youtube_url).filter(Job.id == job_id).scalar()
     pending = db.query(Clip).filter(
         Clip.job_id == job_id,
         Clip.publish_due_at.is_(None),
@@ -1234,15 +1332,25 @@ def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None) -
     ).order_by(Clip.index.asc()).all()
     if not pending and not unslotted:
         return 0
-    slot = next_publish_slot(db, now=now)
-    gap = max(0, int(settings.UPLOAD_MIN_GAP_SECONDS))
-    release = next_release_slot(db, now=now)
+    lead = max(60, int(getattr(settings, "PUBLISH_UPLOAD_LEAD_SECONDS", 21600)))
+    release = next_release_slot(db, now=now, source_url=source_url)
     release_gap = max(60, int(settings.PUBLISH_SCHEDULE_GAP_SECONDS))
-    for offset, clip in enumerate(pending):
-        clip.publish_due_at = slot + timedelta(seconds=offset * gap)
-        clip.scheduled_publish_at = release + timedelta(seconds=offset * release_gap)
-    for offset, clip in enumerate(unslotted, start=len(pending)):
-        clip.scheduled_publish_at = release + timedelta(seconds=offset * release_gap)
+    # Each slot is placed after the one before it and snapped again on the way,
+    # so a job's own clips cannot straddle the window's edge: adding the cadence
+    # to a slot that was already pushed to 06:00 would otherwise hand the second
+    # clip a 00:15 release, which is the cron-job look the window exists to stop.
+    slot = release
+    for clip in pending:
+        clip.scheduled_publish_at = slot
+        clip.publish_due_at = slot - timedelta(seconds=lead)
+        slot = _snap_into_release_window(slot + timedelta(seconds=release_gap))
+    for clip in unslotted:
+        clip.scheduled_publish_at = slot
+        # Never earlier than the row already asks for: a due time an operator set
+        # by hand is a request to wait, and the release maths has no authority to
+        # cancel it. It may still be pushed later, which is the whole point.
+        clip.publish_due_at = max(clip.publish_due_at, slot - timedelta(seconds=lead))
+        slot = _snap_into_release_window(slot + timedelta(seconds=release_gap))
     db.commit()
     return len(pending)
 
@@ -1308,8 +1416,12 @@ def _record_publish_failure(db, clip, now: datetime, message: str) -> None:
     """
     clip.upload_error = message
     if "uploadLimitExceeded" in message:
-        clip.publish_due_at = now + timedelta(
-            hours=max(1, int(settings.PUBLISH_LIMIT_RETRY_HOURS)))
+        retry_at = now + timedelta(hours=max(1, int(settings.PUBLISH_LIMIT_RETRY_HOURS)))
+        clear_at = next_budget_slot(db, now=now)
+        # A fixed wait is a guess about a window this code can measure: if the
+        # budget is already full of recent successes, the clip is not ready at
+        # +6 h, it is ready when the oldest success ages out of the rolling day.
+        clip.publish_due_at = max(retry_at, clear_at) if clear_at else retry_at
         db.commit()
         return
     clip.upload_retry_count = (clip.upload_retry_count or 0) + 1
@@ -1347,6 +1459,19 @@ def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[
         return 0
 
     clip, job = row
+    # The channel's upload budget is checked before the clip is claimed: an upload
+    # that will be refused still costs the row its turn, and a claim that then sits
+    # thirty minutes in the future is a clip that lost its slot for nothing.
+    clear_at = next_budget_slot(db, now=now)
+    if clear_at is not None:
+        clip.publish_due_at = clear_at
+        db.commit()
+        job_warning(job.id, f"Clip #{clip.index} held back: {int(settings.UPLOAD_DAILY_BUDGET)} "
+                            f"uploads already went out in the last 24 h. YouTube counts the "
+                            f"channel's unpublished budget as roughly ten, so the queue stops "
+                            f"short of it rather than learning it from a refusal. Trying again "
+                            f"at {clear_at:%Y-%m-%d %H:%M} UTC, when the oldest one ages out.")
+        return 0
     if not claim_clip_for_publish(db, clip.id, clip.publish_due_at, now=now):
         return 0
     db.expire_all()
@@ -1370,7 +1495,8 @@ def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[
     # because the alternative is publishing it the instant its turn comes.
     lead_floor = now + timedelta(seconds=max(60, int(settings.PUBLISH_SCHEDULE_LEAD_SECONDS)))
     if clip.scheduled_publish_at is None:
-        clip.scheduled_publish_at = next_release_slot(db, now=now)
+        clip.scheduled_publish_at = next_release_slot(db, now=now,
+                                                      source_url=job.youtube_url)
         db.commit()
     if clip.scheduled_publish_at < lead_floor:
         job_warning(job.id, f"Clip #{clip.index} release slot "
@@ -1386,6 +1512,7 @@ def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[
             description=clip.description or "",
             hashtags=clip.hashtags or ["#Shorts"],
             source_title=_source_title_for_job(job.id),
+            source_url=job.youtube_url,
             privacy_status=getattr(job, "upload_privacy", None) or settings.AUTO_UPLOAD_PRIVACY,
             job_id=job.id,
             thumbnail_path=_clip_thumbnail_path(clip),

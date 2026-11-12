@@ -168,7 +168,8 @@ def format_shorts_metadata(
     title: str,
     description: str,
     hashtags: Optional[List[str]] = None,
-    source_title: Optional[str] = None
+    source_title: Optional[str] = None,
+    source_url: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Format metadata specifically optimized for YouTube Shorts:
@@ -198,18 +199,39 @@ def format_shorts_metadata(
     hashtags_str = " ".join([f"#{t}" for t in tags[:5]])
 
     desc_lines = []
-    desc_lines.append(f"🔥 {clean_title.replace(' #Shorts', '')}")
+    # The title used to be repeated as the first description line with a 🔥 in
+    # front of it. YouTube indexes both fields; the duplication adds nothing a
+    # viewer or a search needs, and a description that opens by restating its
+    # own title in emoji is a template, which is what a repost farm's looks like.
     if description and description.strip():
-        desc_lines.append(f"\n{description.strip()}")
-    if source_title and source_title.strip():
-        desc_lines.append(f"\n🎬 Original Story: {source_title.strip()}")
+        desc_lines.append(description.strip())
 
-    desc_lines.append("\n👉 Like, Share & Subscribe for more daily viral clips!\n")
+    # Saying where the footage came from is both the honest thing to do and the
+    # cheapest defence a channel has: an unattributed clip from someone else's
+    # stream is what a Content ID claim and a reused-content rejection are built on.
+    credit = ""
+    if source_title and source_title.strip():
+        credit = f"🎬 From: {source_title.strip()}"
+        if source_url and source_url.strip():
+            credit = f"{credit} {source_url.strip()}"
+    elif source_url and source_url.strip():
+        credit = f"🎬 Source: {source_url.strip()}"
+    if credit:
+        desc_lines.append(credit)
+
+    # Was a hardcoded "Like, Share & Subscribe for more daily viral clips!" on
+    # every video since the beginning — one sentence, thousands of uploads, the
+    # most machine-readable signature a channel can carry. Now the operator's
+    # own line, and absent when they have not written one.
+    cta = (getattr(settings, "SHORTS_CTA", "") or "").strip()
+    if cta:
+        desc_lines.append(cta)
+
     desc_lines.append(hashtags_str)
 
     return {
         "title": clean_title[:100],
-        "description": "\n".join(desc_lines),
+        "description": "\n\n".join(desc_lines),
         "tags": tags[:15]
     }
 
@@ -220,6 +242,7 @@ def upload_clip_to_youtube(
     description: str,
     hashtags: Optional[List[str]] = None,
     source_title: Optional[str] = None,
+    source_url: Optional[str] = None,
     privacy_status: str = "unlisted",
     category_id: str = "24",  # 24: Entertainment, 22: People & Blogs
     progress_callback = None,
@@ -280,7 +303,8 @@ def upload_clip_to_youtube(
 
     youtube = build("youtube", "v3", credentials=creds)
 
-    meta = format_shorts_metadata(title, description, hashtags, source_title=source_title)
+    meta = format_shorts_metadata(title, description, hashtags,
+                                  source_title=source_title, source_url=source_url)
 
     # YouTube accepts a release time only on a private video, so a scheduled
     # upload is never the caller's privacy: it is private until its slot and
@@ -488,6 +512,7 @@ def upload_all_clips_for_job(
                 description=description,
                 hashtags=hashtags,
                 source_title=source_title,
+                source_url=getattr(job, "youtube_url", None),
                 privacy_status=privacy_status,
                 category_id=category_id,
                 job_id=job_id,

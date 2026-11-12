@@ -49,11 +49,20 @@ def db():
 
 @pytest.fixture(autouse=True)
 def _two_clocks(monkeypatch):
-    """Pinned here rather than inherited, so a default change cannot pass silently."""
+    """Pinned here rather than inherited, so a default change cannot pass silently.
+
+    The human-cadence guards (a daily upload budget, a release window, a
+    same-source spread) are switched off so that these tests measure the two
+    clocks and nothing else; `test_publish_hygiene.py` pins those guards on.
+    """
     monkeypatch.setattr(settings, "UPLOAD_MIN_GAP_SECONDS", 900, raising=False)
     monkeypatch.setattr(settings, "UPLOAD_GAP_JITTER_SECONDS", 0, raising=False)
     monkeypatch.setattr(settings, "PUBLISH_SCHEDULE_GAP_SECONDS", 3600, raising=False)
     monkeypatch.setattr(settings, "PUBLISH_SCHEDULE_LEAD_SECONDS", 900, raising=False)
+    monkeypatch.setattr(settings, "PUBLISH_UPLOAD_LEAD_SECONDS", 21600, raising=False)
+    monkeypatch.setattr(settings, "PUBLISH_RELEASE_WINDOW_UTC", "", raising=False)
+    monkeypatch.setattr(settings, "PUBLISH_SAME_SOURCE_MIN_GAP_SECONDS", 0, raising=False)
+    monkeypatch.setattr(settings, "UPLOAD_DAILY_BUDGET", 0, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -131,17 +140,29 @@ def test_parking_a_job_staggers_releases_an_hour_apart(db):
                         NOW + timedelta(hours=2, minutes=15)]
 
 
-def test_parking_a_job_uploads_on_the_minute_clock_not_the_hour(db):
-    """The two clocks must not be confused: uploads stay 15 minutes apart.
+def test_parking_a_job_uploads_on_the_way_to_each_release(db):
+    """The two clocks must not be confused: a row is dated by its release.
 
-    If uploads also waited an hour, the machine would still have to stay awake for
-    the whole schedule and nothing about the reported problem would change.
+    Uploads used to be spaced by how fast this machine could push bytes — one per
+    quarter hour here — so a job of fifteen clips spent the channel's whole
+    rolling day of YouTube uploads on the first afternoon and was refused before
+    the rest had a turn. Each upload now sits PUBLISH_UPLOAD_LEAD_SECONDS before
+    its own release, which leaves the budget roughly where the releases are.
     """
     job = _job(db, clip_count=3)
 
     worker.enqueue_clips_for_publish(db, job.id, now=NOW)
-    dues = sorted(clip.publish_due_at for clip in db.query(Clip).filter_by(job_id=job.id))
-    assert dues == [NOW, NOW + timedelta(minutes=15), NOW + timedelta(minutes=30)]
+    rows = db.query(Clip).filter_by(job_id=job.id).order_by(Clip.index.asc()).all()
+    assert [clip.scheduled_publish_at for clip in rows] == [
+        NOW + timedelta(minutes=15),
+        NOW + timedelta(hours=1, minutes=15),
+        NOW + timedelta(hours=2, minutes=15),
+    ]
+    assert [clip.publish_due_at for clip in rows] == [
+        NOW - timedelta(hours=5, minutes=45),
+        NOW - timedelta(hours=4, minutes=45),
+        NOW - timedelta(hours=3, minutes=45),
+    ]
 
 
 def test_the_first_release_is_never_the_moment_the_upload_finishes(db):
@@ -278,7 +299,8 @@ class _ScheduleRecorder:
         self.publish_ats = []
 
     def __call__(self, *, video_path, title, description, hashtags, source_title,
-                 privacy_status, job_id, thumbnail_path=None, publish_at=None):
+                 source_url=None, privacy_status, job_id, thumbnail_path=None,
+                 publish_at=None):
         self.publish_ats.append(publish_at)
         return {"video_id": "vid1",
                 "shorts_url": "https://youtube.com/shorts/vid1",
@@ -310,10 +332,23 @@ def test_uploading_a_clip_leaves_its_release_slot_in_place(db):
     assert clip.published_at is not None
 
 
-def test_the_shipped_defaults_upload_every_quarter_hour_and_release_every_hour():
+def test_the_shipped_defaults_are_two_shorts_a_day_within_a_daytime_window():
+    """The numbers a person running a channel would recognise, spelled out.
+
+    Two releases a day inside 06:00-22:00 UTC, uploaded six hours ahead of their
+    slot, at most eight uploads per rolling day against the roughly ten YouTube
+    allows this channel — see docs/YOUTUBE_PUBLISH_BUDGET.md. A quarter-hour
+    upload cadence with an hourly release used to be the shipped pair, which is
+    how a single job could empty a day of upload budget before releasing six clips.
+    """
     from config import Settings
 
     fields = Settings.model_fields
-    assert fields["UPLOAD_MIN_GAP_SECONDS"].default == 900
-    assert fields["PUBLISH_SCHEDULE_GAP_SECONDS"].default == 3600
+    assert fields["UPLOAD_MIN_GAP_SECONDS"].default == 3600
+    assert fields["UPLOAD_DAILY_BUDGET"].default == 8
+    assert fields["PUBLISH_SCHEDULE_GAP_SECONDS"].default == 43200
     assert fields["PUBLISH_SCHEDULE_LEAD_SECONDS"].default == 900
+    assert fields["PUBLISH_UPLOAD_LEAD_SECONDS"].default == 21600
+    assert fields["PUBLISH_RELEASE_WINDOW_UTC"].default == "6-22"
+    assert fields["PUBLISH_SAME_SOURCE_MIN_GAP_SECONDS"].default == 86400
+    assert fields["SHORTS_CTA"].default == ""
