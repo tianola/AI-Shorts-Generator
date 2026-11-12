@@ -42,6 +42,22 @@ class Settings(BaseSettings):
         default="agy/gemini-3-flash",
         description="OmniRoute model id for clip selection and metadata generation"
     )
+    # Ordered, comma-separated OmniRoute ids tried after OMNIROUTE_MODEL when a leg
+    # times out twice or answers with no JSON at all. Free models go dead without
+    # warning - quota spent, upstream down - and with nowhere to go the router fell
+    # through to an Ollama that is not running, so the selector shipped its grid.
+    # These three are every free id that answers the production selection prompt
+    # (job 110's source, 10 clips) with the schema filled, all 10 clip lengths
+    # inside the 20-30 s rule, and a reply in 8-16 s: 8.1s, 11.8s, 13.1s. The order
+    # is latency. Dropped: nvidia/poolside/laguna-xs-2.1 answered in 45-116 s, most
+    # of the 120 s timeout budget, with only 2 of 10 clips in the length rule;
+    # agy/gemini-3.6-flash-low and antigravity/gemini-3.1-flash-image were refused
+    # with HTTP 400 on every attempt. Combos (free/*, auto/*) are excluded by the
+    # rule above - they re-resolve upstream per call, so they are not a model.
+    OMNIROUTE_MODEL_FALLBACKS: str = Field(
+        default="agy/gemini-3.1-flash-lite,antigravity/gemini-3.1-flash-lite",
+        description="Comma-separated OmniRoute model ids to try after OMNIROUTE_MODEL"
+    )
     TRANSCRIPTION_PROVIDER: str = Field(
         default="groq",
         description="Transcription backend: 'groq' or 'local'"

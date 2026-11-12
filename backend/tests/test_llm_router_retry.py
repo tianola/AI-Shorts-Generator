@@ -9,6 +9,9 @@ this box — and clip selection silently degraded to evenly-spaced grid clips
 A 200 whose body carries no JSON is deliberately NOT retried: the same model
 answering in prose will answer in prose again, so a second attempt only spends
 the latency. Retrying belongs to the transport, not to the content.
+
+Everything here runs with the model chain switched off, so a post count means a
+retry. What happens when a leg runs out is test_selection_model_chain.py.
 """
 import httpx
 import pytest
@@ -70,6 +73,7 @@ def _install(monkeypatch, outcomes):
     monkeypatch.setattr(settings, "OMNIROUTE_BASE_URL", "http://localhost:20128/v1")
     monkeypatch.setattr(settings, "OMNIROUTE_API_KEY", "test-key")
     monkeypatch.setattr(settings, "OMNIROUTE_MODEL", "some/pinned-model")
+    monkeypatch.setattr(settings, "OMNIROUTE_MODEL_FALLBACKS", "")
     monkeypatch.setattr(settings, "OLLAMA_URL", "http://localhost:11434")
     return client
 
