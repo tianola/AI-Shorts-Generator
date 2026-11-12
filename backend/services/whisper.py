@@ -109,7 +109,6 @@ def detect_audio_language(audio_path: str, model_size: Optional[str] = None,
         Tuple of (language_code, confidence). Both None when no speech is
         detected or the audio cannot be decoded.
     """
-    model = get_whisper_model(model_size)
     try:
         # The first 30 seconds carry enough speech to choose a language, and a
         # multi-hour source is hundreds of megabytes of PCM we would otherwise
@@ -122,6 +121,13 @@ def detect_audio_language(audio_path: str, model_size: Optional[str] = None,
     if audio is None or len(audio) == 0:
         logger.info("Empty audio — no language detected")
         return None, None
+
+    # Load the model only once there is audio to look at. A silent or
+    # undecodable file used to pay the (download-backed) model load before the
+    # empty check — and if that load failed for an unrelated reason (proxy env,
+    # cold cache) it took detection down with it even when there was nothing
+    # to decide.
+    model = get_whisper_model(model_size)
 
     try:
         language, confidence, _ = model.detect_language(

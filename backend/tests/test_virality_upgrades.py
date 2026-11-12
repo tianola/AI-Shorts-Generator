@@ -10,53 +10,92 @@ import json
 import tempfile
 from unittest.mock import patch
 from services.clip_selector import (
+    _audio_dynamics_score,
     _composite_score,
+    _composite_score_v2,
     select_clips,
 )
 
 
+def _run_selection(segments):
+    """Drive select_clips with a stubbed LLM over the given segments file."""
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False, encoding="utf-8") as f:
+        json.dump(segments, f)
+        temp_path = f.name
+
+    # The LLM returns 1 clip spanning 0-35s
+    mock_llm_response = json.dumps({
+        "clips": [
+            {
+                "start": 0.0,
+                "end": 35.0,
+                "title": "CAUGHT RED-HANDED",
+                "hook": "Nobody knows what really happened",
+                "virality_score": 0.9,
+                "layout": "single_speaker",
+                "caption_style": "mrbeast"
+            }
+        ]
+    })
+
+    try:
+        with patch("services.clip_selector.analyze_story_segments", return_value={"story_type": "reaction", "cta": "Follow"}), \
+             patch("services.clip_selector.call_llm_json", return_value=mock_llm_response):
+            import asyncio
+            return asyncio.run(select_clips(temp_path, num_clips=1))
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
 def test_audio_energy_prepass_enrichment_in_composite_score():
-    """Test that enriched segments with audio_energy update the composite virality score."""
+    """The audio pre-pass reaches the composite score through the v2 channel.
+
+    Stale-contract history (tracked as #81): this test was written for the v1
+    composite, which consumed the pre-pass MEAN (clip["audio_energy_score"],
+    25% weight) and cleared 0.7 on these inputs. The v2 refactor moved the
+    composite off the mean and onto audio_dynamics — energy VARIATION, 10%
+    weight (clip_selector _composite_score_v2) — while the mean is still
+    stored as audio_energy_score for the UI breakdown. So the threshold
+    assertion went stale, not the enrichment: the pre-pass still moves the
+    score, through the renamed channel. That is what this pins — a change of
+    either channel re-breaks it.
+    """
     sample_segments = [
         {"start": 0.0, "end": 15.0, "text": "Nobody knows this secret truth!", "audio_energy": 0.85},
         {"start": 15.0, "end": 35.0, "text": "He got caught red-handed right now.", "audio_energy": 0.90},
     ]
-    
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False, encoding="utf-8") as f:
-        json.dump(sample_segments, f)
-        temp_path = f.name
+    plain_segments = [
+        {k: v for k, v in s.items() if k != "audio_energy"} for s in sample_segments
+    ]
 
-    try:
-        # Mock the LLM to return 1 clip spanning 0-35s
-        mock_llm_response = json.dumps({
-            "clips": [
-                {
-                    "start": 0.0,
-                    "end": 35.0,
-                    "title": "CAUGHT RED-HANDED",
-                    "hook": "Nobody knows what really happened",
-                    "virality_score": 0.9,
-                    "layout": "single_speaker",
-                    "caption_style": "mrbeast"
-                }
-            ]
-        })
-        
-        with patch("services.clip_selector.analyze_story_segments", return_value={"story_type": "reaction", "cta": "Follow"}), \
-             patch("services.clip_selector.call_llm_json", return_value=mock_llm_response):
-            import asyncio
-            clips = asyncio.run(select_clips(temp_path, num_clips=1))
-            
-            assert len(clips) == 1
-            clip = clips[0]
-            # Audio energy should be average of (0.85 + 0.90) / 2 = 0.875
-            assert "audio_energy_score" in clip
-            assert clip["audio_energy_score"] == pytest.approx(0.875, 0.01)
-            # Virality score should be composite calculation
-            assert clip["virality_score"] > 0.7
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    clips = _run_selection(sample_segments)
+    assert len(clips) == 1
+    clip = clips[0]
+
+    # The pre-pass mean is still stored on the clip for the breakdown UI.
+    assert "audio_energy_score" in clip
+    assert clip["audio_energy_score"] == pytest.approx(0.875, 0.01)
+
+    # The pre-pass reaches the composite via audio_dynamics (energy variation).
+    expected_dynamics = _audio_dynamics_score([0.85, 0.90])
+    assert clip["audio_dynamics"] == pytest.approx(expected_dynamics)
+
+    # The composite is exactly _composite_score_v2 over the stored signals
+    # (nothing after line 555 mutates virality_score).
+    recomputed = _composite_score_v2({**clip, "virality_score": clip["llm_score_raw"]})
+    assert clip["virality_score"] == pytest.approx(recomputed)
+
+    # And the enrichment genuinely moves the score: the difference against the
+    # same clip WITHOUT pre-passed energies equals the audio_dynamics term
+    # (10% weight) exactly. No audio in the segments keeps v2 at its neutral
+    # 0.5 default.
+    plain_clip = _run_selection(plain_segments)[0]
+    assert plain_clip["audio_dynamics"] == 0.5
+    assert clip["virality_score"] - plain_clip["virality_score"] == pytest.approx(
+        0.10 * (expected_dynamics - 0.5), abs=0.001
+    )
+    assert 0.0 < clip["virality_score"] <= 1.0
 
 
 def test_rerender_clip_request_schema_supports_thumbnail_template():
