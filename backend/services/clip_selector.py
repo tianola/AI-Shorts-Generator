@@ -1,8 +1,11 @@
 """
 Service for selecting the best clips from a video using AI.
 OpusClip-grade virality scoring, curiosity-gap hooks, and layout recommendations.
+Research-backed signals: hook strength, emotional intensity, audio dynamics, visual events, pacing, narrative completeness.
 """
 import json
+import re
+import string
 from loguru import logger
 from config import settings
 from services.llm_router import call_llm_json
@@ -26,6 +29,36 @@ POWER_WORDS = [
     "$", "%", "million", "billion", "number one", "#1",
 ]
 
+# High-arousal emotion words (drive sharing per Journal of Consumer Psychology 2024)
+HIGH_AROUSAL_EMOTIONS = [
+    # Awe/Wonder
+    "amazing", "incredible", "unbelievable", "mind-blowing", "astonishing",
+    "stunning", "breathtaking", "wow", "omg", "holy", "insane", "crazy",
+    # Humor/Amusement
+    "hilarious", "funny", "lol", "lmao", "laughing", "cracked up",
+    # Surprise/Shock
+    "shocked", "surprised", "unexpected", "didn't expect", "plot twist",
+    "caught", "exposed", "revealed",
+    # Anger/Outrage (drives shares but use carefully)
+    "outraged", "furious", "angry", "disgusted", "unfair", "wrong",
+    # Inspiration/Joy
+    "inspiring", "beautiful", "love", "amazing", "wonderful", "fantastic",
+]
+
+# Hook patterns (first 3 seconds) that predict high retention
+HOOK_PATTERNS = [
+    # Curiosity gap
+    r"\b(secret|never|nobody|hidden|actually|wait)\b",
+    # Concrete claim with numbers
+    r"\b\d+\s*(percent|million|billion|times|ways)\b",
+    # Question that demands answer
+    r"^(what|why|how|when|where)\b.*\?",
+    # Contrarian statement
+    r"\b(everyone|nobody|always|never)\b.*\b(wrong|right|lies|truth)\b",
+    # Start mid-action (no "so" or "well" opening)
+    r"^(?!so\b|well\b|okay\b|alright\b)",
+]
+
 
 def _keyword_score(text: str) -> float:
     """Score text 0-1 based on power-word matches."""
@@ -34,6 +67,177 @@ def _keyword_score(text: str) -> float:
     lower = text.lower()
     matches = sum(1 for word in POWER_WORDS if word in lower)
     return min(1.0, matches * 0.25)
+
+
+def _hook_strength_score(text: str) -> float:
+    """Score 0-1 based on hook quality in first 3 seconds of transcript.
+
+    Research (MLLM-VAU framework, arXiv 2602.22299): first 3 seconds are decisive.
+    Strong hooks: curiosity gap, concrete claim, question, contrarian, mid-action start.
+    Weak hooks: "so today", "well", generic openings.
+    """
+    if not text:
+        return 0.0
+
+    # Take first ~50 chars (roughly 3 seconds of speech)
+    hook_text = text[:50].lower().strip()
+    if not hook_text:
+        return 0.0
+
+    score = 0.0
+
+    # Check for hook patterns
+    for pattern in HOOK_PATTERNS:
+        if re.search(pattern, hook_text, re.IGNORECASE):
+            score += 0.2
+
+    # Penalize weak openings
+    weak_openings = ("so ", "well ", "okay ", "alright ", "um ", "like ")
+    if any(hook_text.startswith(w) for w in weak_openings):
+        score -= 0.3
+
+    # Bonus for questions (curiosity gap)
+    if hook_text.endswith("?") or "?" in hook_text[:30]:
+        score += 0.15
+
+    # Bonus for concrete numbers (specificity = trust)
+    if re.search(r"\d+", hook_text):
+        score += 0.1
+
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _emotional_intensity_score(text: str) -> float:
+    """Score 0-1 based on high-arousal emotion density.
+
+    Research (Journal of Consumer Psychology 2024): 72% of shares come from emotional reactions.
+    High-arousal emotions (awe, humor, surprise, anger) drive 30% more shares than neutral.
+    """
+    if not text:
+        return 0.0
+
+    lower = text.lower()
+    # Strip punctuation for word matching
+    cleaned = lower.translate(str.maketrans('', '', string.punctuation))
+    words = cleaned.split()
+    if not words:
+        return 0.0
+
+    emotion_matches = 0
+    for word in words:
+        if any(emotion in word for emotion in HIGH_AROUSAL_EMOTIONS):
+            emotion_matches += 1
+
+    # Also check for multi-word phrases in the full text
+    for emotion in HIGH_AROUSAL_EMOTIONS:
+        if " " in emotion and emotion in lower:
+            emotion_matches += 1
+
+    # Normalize: 1+ emotion per 10 words = high intensity
+    density = emotion_matches / max(1, len(words) / 10.0)
+    return round(min(1.0, density * 0.5), 3)
+
+
+def _audio_dynamics_score(energies: list) -> float:
+    """Score 0-1 based on audio energy variation (dB spikes), not just average.
+
+    Research: audio-only pseudo-highlights beat visual-only (Islam et al., WACV 2025).
+    Key signal: variance in energy, not mean. A spike indicates an exciting moment.
+    """
+    if not energies or len(energies) < 2:
+        return 0.5
+
+    # Calculate coefficient of variation (std/mean) — higher = more dynamic
+    mean_e = sum(energies) / len(energies)
+    if mean_e <= 0:
+        return 0.0
+
+    variance = sum((e - mean_e) ** 2 for e in energies) / len(energies)
+    std_e = variance ** 0.5
+    cv = std_e / mean_e  # coefficient of variation
+
+    # CV of 0.3+ indicates good dynamics; 0.5+ is excellent
+    score = min(1.0, cv * 2.0)
+    return round(score, 3)
+
+
+def _visual_event_density_score(event_count: int, duration: float) -> float:
+    """Score 0-1 based on visual events per second.
+
+    Research: scene changes and object appearances predict engagement.
+    Sweet spot: 1 event per 5-10 seconds (0.1-0.2 events/sec).
+    """
+    if duration <= 0:
+        return 0.0
+
+    density = event_count / duration
+    # Sweet spot: 0.1-0.2 events/sec; too dense (>0.5) is chaotic, too sparse (<0.05) is boring
+    if density < 0.05:
+        return round(density * 10.0, 3)  # linear ramp up
+    elif density <= 0.2:
+        return 0.5 + (density - 0.05) * 3.33  # peak at 0.2
+    else:
+        return round(max(0.3, 1.0 - (density - 0.2) * 2.0), 3)  # decay after peak
+
+
+def _pacing_score(segments: list, clip_start: float, clip_end: float) -> float:
+    """Score 0-1 based on coverage — penalizes dead air/gaps.
+
+    Research: dead air kills retention. Tight pacing = high completion rate.
+    Measures what fraction of the clip has speech vs. silence.
+    """
+    clip_duration = clip_end - clip_start
+    if clip_duration <= 0:
+        return 0.0
+
+    # Calculate total time covered by segments
+    covered = 0.0
+    for seg in segments:
+        seg_start = max(seg["start"], clip_start)
+        seg_end = min(seg["end"], clip_end)
+        if seg_end > seg_start:
+            covered += seg_end - seg_start
+
+    coverage = covered / clip_duration
+    # 90%+ coverage = excellent, 70-90% = good, <70% = has dead air
+    return round(min(1.0, coverage * 1.1), 3)  # scale so 90% coverage = ~1.0
+
+
+def _narrative_completeness_score(text: str) -> float:
+    """Score 0-1 based on whether the clip stands alone without context.
+
+    Research: viral clips are self-contained. Incomplete thoughts ("and then...") kill shares.
+    Checks: has subject, has conclusion (ends with punctuation), doesn't start with conjunction.
+    """
+    if not text:
+        return 0.0
+
+    text = text.strip()
+    words = text.split()
+    if len(words) < 3:
+        return 0.2  # too short to be complete
+
+    score = 0.5
+
+    # Penalize starting with conjunction (mid-thought)
+    bad_starts = ("and ", "but ", "or ", "so ", "because ", "that ", "which ", "then ")
+    if text.lower().startswith(bad_starts):
+        score -= 0.3
+
+    # Reward ending with proper punctuation (conclusion)
+    if text[-1] in ".!?":
+        score += 0.2
+
+    # Reward having a subject (pronoun or noun near start)
+    subject_markers = ("i ", "we ", "he ", "she ", "they ", "it ", "the ", "this ", "that ")
+    if any(text.lower().startswith(m) or f" {m}" in text.lower()[:30] for m in subject_markers):
+        score += 0.15
+
+    # Reward question format (self-contained curiosity)
+    if "?" in text:
+        score += 0.15
+
+    return round(max(0.0, min(1.0, score)), 3)
 
 
 def _structural_completeness(segments_in_clip: list) -> float:
@@ -67,7 +271,7 @@ def _semantic_density_score(seg: dict) -> float:
 
 
 def _composite_score(clip: dict) -> float:
-    """Weighted multi-signal virality score.
+    """Legacy weighted multi-signal virality score (kept for backward compat).
 
     Weights: LLM 40% | Audio Energy 25% | Keyword 20% | Density 10% | Structural 5%
     """
@@ -83,6 +287,43 @@ def _composite_score(clip: dict) -> float:
         keyword_score * 0.20 +
         density_score * 0.10 +
         structural    * 0.05
+    )
+    return round(min(1.0, composite), 4)
+
+
+def _composite_score_v2(clip: dict) -> float:
+    """Research-backed weighted virality score (v2).
+
+    Based on OpusClip, Munch, and academic research (WACV 2025, CVPR 2026, arXiv 2602.22299).
+
+    Weights:
+    - LLM raw score: 25% (down from 40% — LLM alone is not enough)
+    - Hook strength: 20% (first 3 seconds are decisive)
+    - Emotional intensity: 15% (high-arousal emotions drive 72% of shares)
+    - Audio dynamics: 10% (dB spikes, not just average)
+    - Keyword score: 10% (power words still matter)
+    - Visual event density: 8% (something happening on screen)
+    - Pacing: 7% (no dead air)
+    - Narrative completeness: 5% (stands alone)
+    """
+    llm_score           = float(clip.get("virality_score", 0.75))
+    hook_strength       = float(clip.get("hook_strength", 0.5))
+    emotional_intensity = float(clip.get("emotional_intensity", 0.5))
+    audio_dynamics      = float(clip.get("audio_dynamics", 0.5))
+    keyword_score       = float(clip.get("keyword_score", 0.5))
+    visual_density      = float(clip.get("visual_event_density", 0.5))
+    pacing              = float(clip.get("pacing_score", 0.5))
+    narrative           = float(clip.get("narrative_completeness", 0.5))
+
+    composite = (
+        llm_score           * 0.25 +
+        hook_strength       * 0.20 +
+        emotional_intensity * 0.15 +
+        audio_dynamics      * 0.10 +
+        keyword_score       * 0.10 +
+        visual_density      * 0.08 +
+        pacing              * 0.07 +
+        narrative           * 0.05
     )
     return round(min(1.0, composite), 4)
 
@@ -239,6 +480,8 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 'end': clip_end,
                 'text': clip_text
             }
+
+            # Legacy signals (kept for backward compat)
             clip["semantic_density"] = _semantic_density_score(clip_segment)
             clip["keyword_score"] = _keyword_score(clip_text)
             clip["structural_score"] = _structural_completeness(segments_in_clip)
@@ -250,10 +493,41 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 if energies:
                     clip["audio_energy_score"] = round(sum(energies) / len(energies), 4)
 
-            # Composite Virality Score — replaces raw LLM virality_score.
-            # Keep the raw signal so the UI can show a truthful breakdown.
+            # NEW: Research-backed viral signals (v2)
+            # Hook strength: first 3 seconds of the clip
+            clip["hook_strength"] = _hook_strength_score(clip_text)
+
+            # Emotional intensity: high-arousal emotion density
+            clip["emotional_intensity"] = _emotional_intensity_score(clip_text)
+
+            # Audio dynamics: energy variation (dB spikes), not just average
+            if segments_in_clip and any("audio_energy" in s for s in segments_in_clip):
+                energies = [float(s["audio_energy"]) for s in segments_in_clip if "audio_energy" in s]
+                clip["audio_dynamics"] = _audio_dynamics_score(energies) if energies else 0.5
+            else:
+                clip["audio_dynamics"] = 0.5
+
+            # Visual event density: count temporal events in clip window
+            visual_event_count = 0
+            if temporal_events:
+                for evt in temporal_events:
+                    evt_start = evt.get("start", evt.get("timestamp", 0))
+                    if clip_start <= evt_start <= clip_end:
+                        visual_event_count += 1
+            clip["visual_event_density"] = _visual_event_density_score(
+                visual_event_count, clip_end - clip_start
+            )
+
+            # Pacing: coverage of clip by speech segments (no dead air)
+            clip["pacing_score"] = _pacing_score(segments_in_clip, clip_start, clip_end)
+
+            # Narrative completeness: stands alone without context
+            clip["narrative_completeness"] = _narrative_completeness_score(clip_text)
+
+            # Composite Virality Score v2 — research-backed weights.
+            # Keep the raw LLM signal so the UI can show a truthful breakdown.
             clip["llm_score_raw"] = float(clip.get("virality_score", 0.75))
-            clip["virality_score"] = _composite_score({**clip})
+            clip["virality_score"] = _composite_score_v2({**clip})
 
             # Tone & Context Gating
             clip_txt = f"{clip.get('title', '')} {clip.get('hook', '')}"
@@ -292,18 +566,30 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             title = derive_title_from_text(text)
 
             tone_info = classify_content_tone(text, story_type=story_plan.get("story_type", ""))
-            
-            # Compute heuristic signals
+
+            # Compute heuristic signals (legacy)
             h_audio = float(seg.get("audio_energy", 0.5))
             h_kw = _keyword_score(text)
             h_density = _semantic_density_score({"start": start, "end": end, "text": text})
             h_struct = 0.75
-            h_composite = _composite_score({
+
+            # NEW: Research-backed signals for heuristic clips too
+            h_hook = _hook_strength_score(text)
+            h_emotion = _emotional_intensity_score(text)
+            h_dynamics = _audio_dynamics_score([h_audio])  # single segment, limited signal
+            h_visual = 0.3  # heuristic clips don't have visual event data
+            h_pacing = 0.7  # assume decent pacing for single segments
+            h_narrative = _narrative_completeness_score(text)
+
+            h_composite = _composite_score_v2({
                 "virality_score": round(min(0.95, strength), 2),
-                "audio_energy_score": h_audio,
+                "hook_strength": h_hook,
+                "emotional_intensity": h_emotion,
+                "audio_dynamics": h_dynamics,
                 "keyword_score": h_kw,
-                "semantic_density": h_density,
-                "structural_score": h_struct,
+                "visual_event_density": h_visual,
+                "pacing_score": h_pacing,
+                "narrative_completeness": h_narrative,
             })
 
             heuristic_clips.append({
@@ -317,6 +603,12 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 "keyword_score": h_kw,
                 "semantic_density": h_density,
                 "structural_score": h_struct,
+                "hook_strength": h_hook,
+                "emotional_intensity": h_emotion,
+                "audio_dynamics": h_dynamics,
+                "visual_event_density": h_visual,
+                "pacing_score": h_pacing,
+                "narrative_completeness": h_narrative,
                 "story_type": story_plan.get("story_type", "reaction"),
                 "layout": "single_speaker",
                 "caption_style": "mrbeast",
