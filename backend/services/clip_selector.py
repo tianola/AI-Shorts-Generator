@@ -652,15 +652,37 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             if not title:
                 continue
             words = len(window_text.split())
+
+            # Compute new viral signals for fallback clips too
+            f_hook = _hook_strength_score(window_text)
+            f_emotion = _emotional_intensity_score(window_text)
+            f_narrative = _narrative_completeness_score(window_text)
+            f_pacing = 0.7  # assume decent pacing for fallback
+
+            f_composite = _composite_score_v2({
+                "virality_score": round(0.45 + min(0.25, words / 60.0), 2),
+                "hook_strength": f_hook,
+                "emotional_intensity": f_emotion,
+                "audio_dynamics": 0.5,  # no audio data in fallback
+                "keyword_score": _keyword_score(window_text),
+                "visual_event_density": 0.3,  # no visual data in fallback
+                "pacing_score": f_pacing,
+                "narrative_completeness": f_narrative,
+            })
+
             fallback_clips.append({
                 "start": float(start),
                 "end": float(end),
                 "title": title,
                 "hook": title,
-                # Deliberately below any scored clip: an unanalysed window is not
-                # a 0.85 candidate, and the old fake descending 0.85 outrank was
-                # how placeholder clips got picked first.
-                "virality_score": round(0.45 + min(0.25, words / 60.0), 2),
+                "virality_score": f_composite,
+                "hook_strength": f_hook,
+                "emotional_intensity": f_emotion,
+                "audio_dynamics": 0.5,
+                "keyword_score": _keyword_score(window_text),
+                "visual_event_density": 0.3,
+                "pacing_score": f_pacing,
+                "narrative_completeness": f_narrative,
                 "story_type": "reaction",
                 "layout": "single_speaker",
                 "caption_style": "mrbeast",
