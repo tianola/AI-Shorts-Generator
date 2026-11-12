@@ -173,6 +173,55 @@ def touch_lease(db, job_id: int) -> int:
     db.commit()
     return touched
 
+
+# What a clip row may say about itself. Anything outside this set is identity
+# (id, job_id, index) or publish state, and the publish state is exactly why an
+# existing row is reused instead of replaced.
+CLIP_RECORD_FIELDS = (
+    "start", "end", "title", "hook", "hook_style", "score",
+    "hook_score", "coherence_score", "connection_score", "trend_score",
+    "score_breakdown", "file_path", "thumbnail_path", "description",
+    "hashtags", "platform_metadata", "caption_style", "layout_mode",
+)
+
+
+def record_clip(db, job_id: int, index: int, values: dict) -> Clip:
+    """Insert or re-record the row for one rendered clip, and return it.
+
+    Reusing the row a previous run left behind is not an optimization, it is the
+    double-publish guard: a fresh Clip() has no youtube_video_id, so the upload
+    step reads an unpublished clip and ships a short already on YouTube a second
+    time. Reuse therefore keeps every column outside CLIP_RECORD_FIELDS.
+
+    Reuse is not the same as ignoring the run. Writing only on insert left job
+    110 re-rendered onto ten new windows while its rows still reported the old
+    grid start, end and title - a row describing a file it no longer points at.
+    """
+    unknown = sorted(set(values) - set(CLIP_RECORD_FIELDS))
+    if unknown:
+        raise ValueError(
+            "record_clip only writes CLIP_RECORD_FIELDS, got "
+            + ", ".join(unknown)
+        )
+
+    clip_db = (
+        db.query(Clip)
+        .filter(Clip.job_id == job_id, Clip.index == index)
+        .first()
+    )
+    if clip_db is None:
+        clip_db = Clip(
+            job_id=job_id, index=index, uploaded=False, upload_retry_count=0,
+            **values
+        )
+        db.add(clip_db)
+    else:
+        for field, value in values.items():
+            setattr(clip_db, field, value)
+    db.commit()
+    db.refresh(clip_db)
+    return clip_db
+
 def _get_redis_client():
     global _REDIS_CLIENT, _REDIS_CHECKED
     if _REDIS_CHECKED:
@@ -1055,46 +1104,36 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         relative_thumbnail_path = os.path.relpath(thumbnail_path, settings.STORAGE_ROOT) if thumbnail_result else None
 
         # A reclaimed job re-enters this stage for clips it already recorded (the
-        # render stages skip on existing files). Reuse that row: a fresh Clip()
-        # has no youtube_video_id, so the re-upload guards below would never fire
-        # and a short already on YouTube would be published a second time.
-        clip_db = db.query(Clip).filter(Clip.job_id == job_id, Clip.index == index).first()
-        if clip_db is None:
-            clip_db = Clip(
-                job_id=job_id,
-                index=index,
-                start=clip_start,
-                end=clip_end,
-                title=final_title,
-                hook=clip.get("hook"),
-                # The A/B arm, so a later view-count sync can attribute the result.
-                hook_style=clip.get("hook_style"),
-                score=v_stats["virality_score_100"],
-                hook_score=clip.get("hook_score"),
-                coherence_score=clip.get("coherence_score"),
-                connection_score=clip.get("connection_score"),
-                trend_score=clip.get("trend_score"),
-                score_breakdown={
-                    "llm": clip.get("llm_score_raw"),
-                    "audio": clip.get("audio_energy_score"),
-                    "keyword": clip.get("keyword_score"),
-                    "density": clip.get("semantic_density"),
-                    "structural": clip.get("structural_score"),
-                },
-                file_path=relative_final_path,
-                thumbnail_path=relative_thumbnail_path,
-                description=metadata.get("description", ""),
-                hashtags=metadata.get("hashtags", ["#Shorts"]),
-                platform_metadata=metadata.get("platform_copy", {}),
-                caption_style=caption_style,
-                layout_mode=resolved_layout,
-                uploaded=False,
-                upload_retry_count=0
-            )
-
-            db.add(clip_db)
-            db.commit()
-            db.refresh(clip_db)
+        # render stages skip on existing files). record_clip reuses that row so a
+        # short already on YouTube keeps its youtube_video_id, and rewrites the
+        # descriptive columns so the row says what this run actually cut.
+        clip_db = record_clip(db, job_id, index, {
+            "start": clip_start,
+            "end": clip_end,
+            "title": final_title,
+            "hook": clip.get("hook"),
+            # The A/B arm, so a later view-count sync can attribute the result.
+            "hook_style": clip.get("hook_style"),
+            "score": v_stats["virality_score_100"],
+            "hook_score": clip.get("hook_score"),
+            "coherence_score": clip.get("coherence_score"),
+            "connection_score": clip.get("connection_score"),
+            "trend_score": clip.get("trend_score"),
+            "score_breakdown": {
+                "llm": clip.get("llm_score_raw"),
+                "audio": clip.get("audio_energy_score"),
+                "keyword": clip.get("keyword_score"),
+                "density": clip.get("semantic_density"),
+                "structural": clip.get("structural_score"),
+            },
+            "file_path": relative_final_path,
+            "thumbnail_path": relative_thumbnail_path,
+            "description": metadata.get("description", ""),
+            "hashtags": metadata.get("hashtags", ["#Shorts"]),
+            "platform_metadata": metadata.get("platform_copy", {}),
+            "caption_style": caption_style,
+            "layout_mode": resolved_layout,
+        })
         clip_id = clip_db.id
 
         job_info(job_id, f"Clip {index + 1}/{total_clips} saved to DB with ID {clip_id}")
