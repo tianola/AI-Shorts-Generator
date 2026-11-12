@@ -120,7 +120,7 @@ def probe_media(video_path: str) -> dict:
     }
 
 
-def _as_seconds(value: object, field: str) -> float:
+def as_seconds(value: object, field: str) -> float:
     """
     Coerce a trim time value to seconds.
 
@@ -188,8 +188,8 @@ def validate_trim_range(
 
     This function performs NO filesystem writes.
     """
-    start = _as_seconds(start_time, "start_time")
-    end = _as_seconds(end_time, "end_time")
+    start = as_seconds(start_time, "start_time")
+    end = as_seconds(end_time, "end_time")
 
     if start < 0:
         raise TrimValidationError("start_time must be non-negative")
