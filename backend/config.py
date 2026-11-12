@@ -144,7 +144,7 @@ class Settings(BaseSettings):
         description="Minimum clip duration in seconds"
     )
     MAX_CLIP_SECONDS: int = Field(
-        default=75,
+        default=30,
         ge=10,
         le=180,
         description="Maximum clip duration in seconds"

@@ -206,8 +206,13 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 continue
             if float(clip["start"]) < 0 or float(clip["end"]) > segments[-1]["end"]:
                 continue
-            if (float(clip["end"]) - float(clip["start"])) < (settings.MIN_CLIP_SECONDS * 0.6):
+            if (float(clip["end"]) - float(clip["start"])) < (settings.MIN_CLIP_SECONDS * 0.8):
                 continue
+            # The LLM is not trusted to respect the range; the code enforces it.
+            # A 45-second clip from a 10-minute source is what the old pipeline shipped;
+            # the new one trims it to MAX_CLIP_SECONDS so completion rate stays high.
+            if (float(clip["end"]) - float(clip["start"])) > settings.MAX_CLIP_SECONDS:
+                clip["end"] = float(clip["start"]) + settings.MAX_CLIP_SECONDS
 
             clip.setdefault("story_type", story_plan.get("story_type", "reaction"))
             clip.setdefault("layout", "single_speaker")
