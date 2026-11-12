@@ -119,6 +119,12 @@ class Clip(Base):
     # workers uploading the same video, and it is why the spacing survives a
     # restart: the clock is this column, not a dict in a process.
     publish_due_at = Column(DateTime, nullable=True)
+    # The release clock, and the only reason the schedule survives the PC being off.
+    # YouTube is handed this instant as status.publishAt when the clip is uploaded
+    # (private until then), so a clip that has already been uploaded publishes itself
+    # whether or not this machine is awake. The queue reads the latest value here to
+    # place the next one, exactly as it reads published_at for the upload clock.
+    scheduled_publish_at = Column(DateTime, nullable=True)
 
     # The experiment record. A zero-view diagnostic job gives every clip of the
     # job a different hook style, but a style only means something next to the

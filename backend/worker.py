@@ -1102,9 +1102,10 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # =========================================================
         # 5i. AUTO-UPLOAD: YouTube joins the queue, TikTok publishes here
         # The YouTube clip is parked in the database rather than uploaded the
-        # second it renders: the queue releases one publish per gap, and the clock
-        # for that lives in the clip row, so neither a burst nor a worker restart
-        # changes the cadence the channel is seen with.
+        # second it renders. Two clocks live in that row: publish_due_at is when
+        # this machine uploads, scheduled_publish_at is the release YouTube is
+        # handed as publishAt, so the cadence the channel is seen with holds even
+        # while this PC is off.
         # =========================================================
         if getattr(job, "auto_upload", False):
             try:
@@ -1114,7 +1115,8 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                     enqueue_clips_for_publish(db, job_id)
                     db.refresh(clip_db)
                     job_info(job_id, f"Clip {index + 1}/{total_clips} queued for YouTube, "
-                                     f"due {clip_db.publish_due_at:%Y-%m-%d %H:%M} UTC")
+                                     f"upload {clip_db.publish_due_at:%Y-%m-%d %H:%M} UTC, "
+                                     f"release {clip_db.scheduled_publish_at:%Y-%m-%d %H:%M} UTC")
             except Exception as yt_err:
                 job_warning(job_id, f"Could not queue Clip #{index + 1} for YouTube: {yt_err}")
 
@@ -1184,11 +1186,36 @@ def next_publish_slot(db, now: Optional[datetime] = None) -> datetime:
     return max(now, last + timedelta(seconds=gap + random.uniform(0, jitter)))
 
 
+def next_release_slot(db, now: Optional[datetime] = None) -> datetime:
+    """The earliest instant YouTube may be given as the next clip's release.
+
+    This is the channel's cadence — when the audience sees a video — and it is a
+    different clock from next_publish_slot, which is how fast this machine may
+    hand over uploads. The anchor is the latest scheduled_publish_at already in
+    the database, whether that clip is waiting for its slot or already released,
+    so a restart continues the schedule and two jobs cannot be parked on the
+    same minute. Nothing is ever released before PUBLISH_SCHEDULE_LEAD_SECONDS
+    after now, which is the window to inspect a clip first.
+    """
+    now = now or datetime.utcnow()
+    gap = max(60, int(settings.PUBLISH_SCHEDULE_GAP_SECONDS))
+    lead = max(60, int(settings.PUBLISH_SCHEDULE_LEAD_SECONDS))
+    floor = now + timedelta(seconds=lead)
+    last = db.query(func.max(Clip.scheduled_publish_at)).filter(
+        Clip.scheduled_publish_at.isnot(None),
+    ).scalar()
+    if not last:
+        return floor
+    return max(floor, last + timedelta(seconds=gap))
+
+
 def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None) -> int:
     """Park every rendered clip of a job in the publish queue.
 
-    Idempotent: a clip that already waits keeps the slot it was given, and one that
-    already has a video id is finished. Returns how many rows were added.
+    Two clocks are written per clip: publish_due_at is when this machine uploads
+    it, scheduled_publish_at is when YouTube releases it. Idempotent: a clip that
+    already waits keeps the slot it was given, and one that already has a video id
+    is finished. Returns how many rows were added.
     """
     now = now or datetime.utcnow()
     pending = db.query(Clip).filter(
@@ -1196,12 +1223,26 @@ def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None) -
         Clip.publish_due_at.is_(None),
         or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
     ).order_by(Clip.index.asc()).all()
-    if not pending:
+    # A row parked before the release clock existed has a due time and no slot.
+    # Left that way it uploads unscheduled, i.e. public the instant the queue
+    # reaches it, so the backlog gets slots continuing after the new ones.
+    unslotted = db.query(Clip).filter(
+        Clip.job_id == job_id,
+        Clip.publish_due_at.isnot(None),
+        Clip.scheduled_publish_at.is_(None),
+        or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
+    ).order_by(Clip.index.asc()).all()
+    if not pending and not unslotted:
         return 0
     slot = next_publish_slot(db, now=now)
     gap = max(0, int(settings.UPLOAD_MIN_GAP_SECONDS))
+    release = next_release_slot(db, now=now)
+    release_gap = max(60, int(settings.PUBLISH_SCHEDULE_GAP_SECONDS))
     for offset, clip in enumerate(pending):
         clip.publish_due_at = slot + timedelta(seconds=offset * gap)
+        clip.scheduled_publish_at = release + timedelta(seconds=offset * release_gap)
+    for offset, clip in enumerate(unslotted, start=len(pending)):
+        clip.scheduled_publish_at = release + timedelta(seconds=offset * release_gap)
     db.commit()
     return len(pending)
 
@@ -1215,14 +1256,17 @@ def claim_clip_for_publish(db, clip_id: int, expected_due: datetime,
     job lease comes back to the queue.
     """
     now = now or datetime.utcnow()
-    result = db.execute(
-        text("UPDATE clips SET publish_due_at=:held "
-             "WHERE id=:cid AND publish_due_at=:expected"),
-        {"held": now + timedelta(minutes=PUBLISH_CLAIM_MINUTES),
-         "cid": clip_id, "expected": expected_due},
-    )
+    # Typed ORM comparison, not a raw text() bind: SQLite stores these columns as
+    # '...:SS.000000' and an untyped datetime parameter renders without the
+    # microsecond suffix, so a whole-second slot matched nothing and was never
+    # claimed.
+    result = db.query(Clip).filter(
+        Clip.id == clip_id,
+        Clip.publish_due_at == expected_due,
+    ).update({"publish_due_at": now + timedelta(minutes=PUBLISH_CLAIM_MINUTES)},
+             synchronize_session=False)
     db.commit()
-    return result.rowcount == 1
+    return result == 1
 
 
 def _clip_video_path(clip) -> Optional[str]:
@@ -1271,6 +1315,9 @@ def _record_publish_failure(db, clip, now: datetime, message: str) -> None:
     clip.upload_retry_count = (clip.upload_retry_count or 0) + 1
     if clip.upload_retry_count >= max(1, int(settings.MAX_UPLOAD_RETRIES)):
         clip.publish_due_at = None
+        # The release slot belongs to the channel, not the clip, so a clip that
+        # gave up must not keep the schedule open an hour past its own failure.
+        clip.scheduled_publish_at = None
         job_warning(clip.job_id, f"Clip #{clip.index} left the publish queue after "
                                  f"{clip.upload_retry_count} failed attempts: {message}")
     else:
@@ -1314,6 +1361,19 @@ def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[
     if uploader is None:
         from services.youtube_upload import upload_clip_to_youtube
         uploader = upload_clip_to_youtube
+
+    # A release slot can expire while the queue is being refused uploads, and
+    # YouTube reads a publishAt in the past as "publish now". Moving the row keeps
+    # the promise the clip is actually shipped with, and places the next clip
+    # after it rather than on top of it.
+    lead_floor = now + timedelta(seconds=max(60, int(settings.PUBLISH_SCHEDULE_LEAD_SECONDS)))
+    if clip.scheduled_publish_at is not None and clip.scheduled_publish_at < lead_floor:
+        job_warning(job.id, f"Clip #{clip.index} release slot "
+                            f"{clip.scheduled_publish_at:%Y-%m-%d %H:%M} UTC had already "
+                            f"passed; moving it to {lead_floor:%Y-%m-%d %H:%M} UTC")
+        clip.scheduled_publish_at = lead_floor
+        db.commit()
+
     try:
         res = uploader(
             video_path=video_path,
@@ -1324,6 +1384,7 @@ def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[
             privacy_status=getattr(job, "upload_privacy", None) or settings.AUTO_UPLOAD_PRIVACY,
             job_id=job.id,
             thumbnail_path=_clip_thumbnail_path(clip),
+            publish_at=clip.scheduled_publish_at,
         )
     except Exception as e:
         _record_publish_failure(db, clip, now, str(e))

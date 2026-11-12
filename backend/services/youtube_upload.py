@@ -4,6 +4,7 @@ Handles token lifecycle, resumable video uploading, and shorts metadata formatti
 """
 import os
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from config import settings
@@ -223,10 +224,16 @@ def upload_clip_to_youtube(
     category_id: str = "24",  # 24: Entertainment, 22: People & Blogs
     progress_callback = None,
     job_id: int = 0,
-    thumbnail_path: Optional[str] = None
+    thumbnail_path: Optional[str] = None,
+    publish_at: Optional[datetime] = None
 ) -> Dict[str, Any]:
     """
     Upload video file to YouTube as a Short using Resumable Upload protocol.
+
+    ``publish_at`` hands the release to YouTube: the video is uploaded private
+    with ``status.publishAt`` and goes public on its own at that instant, so the
+    schedule outlives this machine. It overrides ``privacy_status``, because a
+    release time is only accepted on a private video.
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file to upload does not exist: {video_path}")
@@ -275,6 +282,12 @@ def upload_clip_to_youtube(
 
     meta = format_shorts_metadata(title, description, hashtags, source_title=source_title)
 
+    # YouTube accepts a release time only on a private video, so a scheduled
+    # upload is never the caller's privacy: it is private until its slot and
+    # public after, whichever visibility the request asked for.
+    effective_privacy = "private" if publish_at is not None else privacy_status
+    publish_at_iso = publish_at.strftime("%Y-%m-%dT%H:%M:%SZ") if publish_at else None
+
     body = {
         "snippet": {
             "title": meta["title"],
@@ -283,10 +296,12 @@ def upload_clip_to_youtube(
             "categoryId": str(category_id)
         },
         "status": {
-            "privacyStatus": privacy_status,
+            "privacyStatus": effective_privacy,
             "selfDeclaredMadeForKids": False
         }
     }
+    if publish_at_iso:
+        body["status"]["publishAt"] = publish_at_iso
 
     media = MediaFileUpload(
         video_path,
@@ -327,10 +342,13 @@ def upload_clip_to_youtube(
     if thumbnail_path and os.path.exists(thumbnail_path):
         try:
             from googleapiclient.http import MediaFileUpload as _ThumbMedia
+            # set() only builds the request. Without execute() nothing leaves
+            # this process and the log line below would be a lie, which is
+            # exactly how the first version of this shipped.
             youtube.thumbnails().set(
                 videoId=video_id,
                 media_body=_ThumbMedia(thumbnail_path, mimetype="image/jpeg")
-            )
+            ).execute()
             thumbnail_status = "set"
             job_info(0, f"Thumbnail applied for {video_id}: {thumbnail_path}")
         except Exception as thumb_err:
@@ -348,7 +366,8 @@ def upload_clip_to_youtube(
         "shorts_url": shorts_url,
         "watch_url": watch_url,
         "title": meta["title"],
-        "privacy_status": privacy_status,
+        "privacy_status": effective_privacy,
+        "publish_at": publish_at_iso,
         "thumbnail_status": thumbnail_status
     }
 

@@ -294,24 +294,50 @@ class Settings(BaseSettings):
     )
     AUTO_UPLOAD_PRIVACY: str = Field(
         default="unlisted",
-        description="Visibility for automatic uploads: 'public', 'unlisted' or 'private'"
+        description="Visibility for uploads that go out the moment they are made: "
+                    "the manual button and the batch sweep. The publish queue ignores "
+                    "it, because YouTube only accepts a scheduled release on a private "
+                    "video - those clips sit private until their publishAt."
     )
     DEFAULT_AUTO_UPLOAD: bool = Field(
         default=True,
         description="Whether a job created without an explicit auto_upload flag "
-                    "queues its finished clips for publishing. The queue paces "
-                    "them UPLOAD_MIN_GAP_SECONDS apart, so this only decides "
+                    "queues its finished clips for publishing. The queue uploads "
+                    "them UPLOAD_MIN_GAP_SECONDS apart and hands YouTube a release "
+                    "time PUBLISH_SCHEDULE_GAP_SECONDS apart, so this only decides "
                     "whether the queue is used at all. A request can still say "
                     "auto_upload=false to keep a job local."
     )
     UPLOAD_MIN_GAP_SECONDS: int = Field(
-        default=3600,
+        default=900,
         ge=0,
         le=86400,
-        description="Minimum spacing between publishes on the same platform. The "
-                    "publish queue schedules the next clip this far after the last one "
-                    "that actually went out, so the wait is a row in the database and "
+        description="Minimum spacing between uploads to the same platform. This is "
+                    "the upload clock: it keeps this machine from handing YouTube a "
+                    "burst of videos, which is all the local queue is left to decide "
+                    "now that the release cadence lives in publishAt. The publish "
+                    "queue schedules the next upload this far after the last one that "
+                    "actually went out, so the wait is a row in the database and "
                     "survives a worker restart. 0 disables pacing."
+    )
+    PUBLISH_SCHEDULE_GAP_SECONDS: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="Spacing between the release times YouTube is given for "
+                    "consecutive clips. This is the cadence the channel's audience "
+                    "sees, and the platform enforces it: each clip is uploaded "
+                    "private with status.publishAt this far after the previous "
+                    "release, so the schedule outlives the machine that made it."
+    )
+    PUBLISH_SCHEDULE_LEAD_SECONDS: int = Field(
+        default=900,
+        ge=60,
+        le=86400,
+        description="Smallest gap between an upload and its release. A publishAt "
+                    "already in the past makes YouTube publish the instant the "
+                    "upload lands, so this is the window to inspect a clip before "
+                    "the channel's audience can."
     )
     UPLOAD_GAP_JITTER_SECONDS: int = Field(
         default=600,

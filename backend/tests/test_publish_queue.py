@@ -80,7 +80,7 @@ class _Recorder:
         self.fail_with = fail_with
 
     def __call__(self, *, video_path, title, description, hashtags, source_title,
-                 privacy_status, job_id, thumbnail_path=None):
+                 privacy_status, job_id, thumbnail_path=None, publish_at=None):
         self.calls.append(title)
         if self.fail_with:
             raise self.fail_with
@@ -251,6 +251,23 @@ def test_two_workers_cannot_upload_the_same_clip(db):
                                          now=now) is False
 
 
+def test_a_clip_due_on_a_whole_second_is_still_claimable(db):
+    """The claim has to compare datetimes the way the column stores them.
+
+    A slot landing on an exact second is the normal case, not an edge: utcnow
+    happens to be microseconds=0 in a fraction of passes, and a release schedule
+    reads like 12:00 / 13:00. The raw UPDATE bound the datetime without the
+    column's type, so SQLite compared the stored '...00:00:00.000000' against
+    '...00:00:00' and matched nothing - the clip stayed queued forever and the
+    pass returned 0 with no error line anywhere.
+    """
+    now = datetime(2026, 10, 16, 12, 0, 0)
+    clip = _clip(db, due=now - timedelta(seconds=1))
+    assert clip.publish_due_at.microsecond == 0
+
+    assert worker.claim_clip_for_publish(db, clip.id, clip.publish_due_at, now=now) is True
+
+
 # ----------------------------------------------------------------- bookkeeping
 
 def test_success_clears_the_queue_row(db):
@@ -342,10 +359,11 @@ def test_the_completion_sweep_queues_rather_than_uploads(db, monkeypatch):
     assert clip.publish_due_at is not None
 
 
-def test_the_shipped_defaults_space_publishes_an_hour_apart():
+def test_the_shipped_retry_budget_defaults_are_what_the_queue_documents():
+    """The cadence defaults moved to test_scheduled_publish.py, where the release
+    clock lives; this one still pins how long a clip keeps trying."""
     from config import Settings
 
     fields = Settings.model_fields
-    assert fields["UPLOAD_MIN_GAP_SECONDS"].default == 3600
     assert fields["UPLOAD_GAP_JITTER_SECONDS"].default == 600
     assert fields["PUBLISH_LIMIT_RETRY_HOURS"].default == 6
