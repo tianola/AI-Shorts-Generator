@@ -14,10 +14,11 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from api.common import clip_payload, resolve_auto_upload, resolve_upload_privacy
 from config import settings
-from database.models import Clip, Job, JobProgress
+from database.models import Clip, Job, JobProgress, TERMINAL_JOB_STATUSES
 from database.session import get_database
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,63 @@ class JobListResponse(BaseModel):
     jobs: List[JobResponse]
 
 
+# Statuses a human may push back through the queue without restarting from zero:
+# exactly the ones no worker is working on. A partially rendered job belongs here
+# as well, or the new status would have no path back.
+_RESUMABLE_STATUSES = TERMINAL_JOB_STATUSES
+
+
+def _lease_is_live(job: Job) -> bool:
+    """True while a worker still owns this row.
+
+    status='processing' alone is not proof of life - the poller requeues
+    expired leases, so the lease columns are what actually say whether
+    somebody is working. A processing row with no claim, or one older than
+    JOB_LEASE_MINUTES, is an abandoned job, and restarting it is legitimate.
+    """
+    if job.status != "processing":
+        return False
+    if not job.claimed_by or job.claimed_at is None:
+        return False
+    age_seconds = (datetime.utcnow() - job.claimed_at).total_seconds()
+    return age_seconds < int(settings.JOB_LEASE_MINUTES) * 60
+
+
+def _requeue(job: Job) -> None:
+    """Push a job back into the queue and drop any claim on it.
+
+    The reset alone was not enough: touch_lease() refreshes the heartbeat for
+    whatever row still names this worker, and reclaim_expired_leases() only
+    looks at 'processing' rows. A 'created' row that still names a worker is
+    therefore invisible to the reclaim and still heartbeating, so the next
+    claim_job() CAS let a second worker into a job the first was rendering
+    (job 101, claimed four times in one run).
+    """
+    job.status = "created"
+    job.error_message = None
+    job.claimed_by = None
+    job.claimed_at = None
+
+
+async def _remove_tree(path: Path) -> None:
+    """Delete a job directory from a worker thread.
+
+    A finished job's tree is multi-GB of renders, and rmtree on Windows has to
+    walk every entry. On the event loop that is tens of seconds during which the
+    Studio UI, /ws/progress and every other request wait their turn.
+    """
+    await run_in_threadpool(shutil.rmtree, str(path), ignore_errors=True)
+
+
+async def _write_upload(file_handle, dest_path: Path) -> None:
+    """Stream an upload to disk from a worker thread, for the same reason."""
+    def _copy():
+        with open(dest_path, "wb") as buffer:
+            shutil.copyfileobj(file_handle, buffer)
+
+    await run_in_threadpool(_copy)
+
+
 @router.post("/jobs/{job_id}/start")
 async def start_job(job_id: int, db: Session = Depends(get_database)):
     """Manually start a created job so the worker can pick it up."""
@@ -61,8 +119,7 @@ async def start_job(job_id: int, db: Session = Depends(get_database)):
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     if job.status in ("processing", "created"):
         return {"id": job.id, "status": job.status, "message": "Job is already running or queued."}
-    job.status = "created"
-    job.error_message = None
+    _requeue(job)
     db.commit()
     db.refresh(job)
     return {"id": job.id, "status": job.status, "message": "Job started."}
@@ -70,14 +127,14 @@ async def start_job(job_id: int, db: Session = Depends(get_database)):
 
 @router.post("/jobs/{job_id}/resume")
 async def resume_job(job_id: int, db: Session = Depends(get_database)):
-    """Resume a failed or completed job by resetting it to created."""
+    """Resume a finished job - clean, failed, or half rendered - to created."""
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    if job.status not in ("failed", "completed"):
-        return {"id": job.id, "status": job.status, "message": "Job can only be resumed from failed or completed."}
-    job.status = "created"
-    job.error_message = None
+    if job.status not in _RESUMABLE_STATUSES:
+        return {"id": job.id, "status": job.status,
+                "message": f"Job can only be resumed from {', '.join(_RESUMABLE_STATUSES)}."}
+    _requeue(job)
     db.commit()
     db.refresh(job)
     return {"id": job.id, "status": job.status, "message": "Job resumed."}
@@ -89,6 +146,20 @@ async def restart_job(job_id: int, db: Session = Depends(get_database)):
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if _lease_is_live(job):
+        # Deleting the directory under a running render is how clip rows got
+        # written twice: the worker is mid-ffmpeg on files in this very tree,
+        # and the reset makes the row claimable again while it still works.
+        # Nothing is touched before the answer goes back.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Job {job_id} is being processed by worker {job.claimed_by}. "
+                "Restart is refused while a worker holds it; wait for the run to "
+                "finish, or let the lease expire (JOB_LEASE_MINUTES) and restart "
+                "the abandoned job."
+            ),
+        )
 
     job_dir = Path(settings.JOBS_DIR) / str(job_id)
 
@@ -103,15 +174,14 @@ async def restart_job(job_id: int, db: Session = Depends(get_database)):
             preserved_source = staging
 
     if job_dir.exists():
-        shutil.rmtree(job_dir, ignore_errors=True)
+        await _remove_tree(job_dir)
     job_dir.mkdir(parents=True, exist_ok=True)
 
     if preserved_source is not None and preserved_source.exists():
         preserved_source.replace(job_dir / "source.mp4")
 
-    # Reset status
-    job.status = "created"
-    job.error_message = None
+    # Reset status and hand the row back to the queue claimably.
+    _requeue(job)
     db.commit()
     db.refresh(job)
     return {"id": job.id, "status": job.status, "message": "Job restarted from scratch."}
@@ -227,8 +297,7 @@ async def zero_view_diagnostic_endpoint(
         job_dir = Path(settings.JOBS_DIR) / str(job.id)
         job_dir.mkdir(parents=True, exist_ok=True)
         dest_path = job_dir / "source.mp4"
-        with open(dest_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        await _write_upload(file.file, dest_path)
 
     # Set up for zero-view diagnostic: varied hook styles
     base_styles = ["aggressive", "curiosity", "story-driven"]
@@ -287,8 +356,7 @@ async def create_job_from_upload(
     dest_path = job_dir / "source.mp4"
 
     try:
-        with open(dest_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        await _write_upload(file.file, dest_path)
     except Exception as e:
         job.status = "failed"
         job.error_message = f"Failed to save uploaded file: {str(e)}"

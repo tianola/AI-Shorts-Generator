@@ -24,11 +24,12 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 
 from config import settings
+from database.models import TERMINAL_JOB_STATUSES
 from database.session import SessionLocal
 
 # A job in one of these states may still be worked on, so its files stay put.
 ACTIVE_STATUSES = {"created", "queued", "pending", "processing"}
-FINISHED_STATUSES = {"completed", "failed"}
+FINISHED_STATUSES = set(TERMINAL_JOB_STATUSES)
 
 PARTIAL_SUFFIXES = (".part", ".ytdl")
 PARTIAL_PREFIXES = ("source.f",)

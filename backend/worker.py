@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from sqlalchemy import func, or_, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from database.session import SessionLocal, init_database
 from database.models import Job, Clip, JobProgress
@@ -31,6 +32,8 @@ from utils.logger import job_info, job_error, job_warning, job_debug
 from utils.env_check import log_media_tools, missing_media_tools
 from utils.disk import has_headroom, reclaim
 from utils import derived_cache
+from utils import clip_trim
+from utils import upload_pacing
 from services.youtube import download_youtube
 from services.audio import extract_audio
 from services.whisper import transcribe_audio_file
@@ -66,6 +69,14 @@ _CURRENT_JOB = [None]
 def _touch_main_tick() -> None:
     _MAIN_TICK[0] = time.time()
     _MAIN_PROC[0] = time.process_time()
+
+
+# An upload-pacing gap is a bounded sleep that can legally outlast the stall
+# window (UPLOAD_MIN_GAP_SECONDS + jitter = 4200 s against 30 min), and it burns
+# no CPU - which is precisely the signature the watchdog kills on. Hand the
+# pacer our liveness signal so each chunk that wakes up reports itself; a wait
+# that never wakes still never ticks, so a real wedge keeps getting caught.
+upload_pacing.set_liveness_hook(_touch_main_tick)
 
 
 def _should_stall_exit(current_job_id, last_tick: float, now: float,
@@ -197,6 +208,11 @@ def record_clip(db, job_id: int, index: int, values: dict) -> Clip:
     Reuse is not the same as ignoring the run. Writing only on insert left job
     110 re-rendered onto ten new windows while its rows still reported the old
     grid start, end and title - a row describing a file it no longer points at.
+
+    The read above is not a lock, so two workers can both see "no row". The
+    unique index on clips(job_id, index) (database.migrations) decides the race
+    in the database, and the IntegrityError it raises here is handled as "the
+    row exists now, write into it" rather than as a failed render.
     """
     unknown = sorted(set(values) - set(CLIP_RECORD_FIELDS))
     if unknown:
@@ -219,7 +235,31 @@ def record_clip(db, job_id: int, index: int, values: dict) -> Clip:
     else:
         for field, value in values.items():
             setattr(clip_db, field, value)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # The read-then-write above has a window, and on two workers on one job
+        # (see api/jobs.restart_job's old lease hole) somebody else wins it: the
+        # unique index on clips(job_id, index) rejects our INSERT. That is the
+        # constraint doing its job, not an error to raise - the render is forty
+        # minutes old at this point and the row we wanted already exists. Fall
+        # through the same reuse path the pre-read would have taken.
+        db.rollback()
+        raced = (
+            db.query(Clip)
+            .filter(Clip.job_id == job_id, Clip.index == index)
+            .first()
+        )
+        if raced is None:
+            # Not our slot: some other constraint (or a genuinely broken row)
+            # failed. Nothing here can fix that silently.
+            raise
+        for field, value in values.items():
+            setattr(raced, field, value)
+        db.commit()
+        clip_db = raced
+        job_debug(job_id, f"Clip slot ({job_id}, {index}) was taken by another "
+                          f"worker mid-write; reused row {clip_db.id}")
     db.refresh(clip_db)
     return clip_db
 
@@ -316,6 +356,60 @@ def _clear_derived_artifacts(job_dir, job_id):
                     job_info(job_id, f"Removed stale clip dir: {clip_dir}")
                 except Exception as e:
                     job_warning(job_id, f"Could not remove {clip_dir}: {e}")
+
+# What the render step leaves beside final_video.mp4. The trimmed cut is on this
+# list because it is a deliverable derived from the render, not an intermediate
+# toward it: pruning it would delete the only file matching the row's
+# trim_start/trim_end, and the next resume would repoint the row at the long cut.
+RENDER_KEEP_NAMES = ("final_video.mp4", clip_trim.TRIMMED_ARTIFACT_NAME,
+                     "thumbnail.jpg", "metadata.json", "storyboard.jpg", "words.json")
+
+
+def _prune_render_intermediates(clip_dir) -> None:
+    """Delete the stage-by-stage videos, subtitle and audio files one render left."""
+    for entry in os.listdir(str(clip_dir)):
+        if entry in RENDER_KEEP_NAMES:
+            continue
+        if entry.endswith(".mp4") or entry.endswith(".ass") or entry.endswith(".wav"):
+            try:
+                os.remove(os.path.join(str(clip_dir), entry))
+            except OSError:
+                pass
+
+
+def _reapply_recorded_trim(db, job_id, clip_db, clip_dir, clip_start, clip_end,
+                           index) -> bool:
+    """Re-cut the operator's stored trim out of whatever render exists now.
+
+    A resume skips the render stages and re-records a row that already exists, so
+    without this the row keeps naming the untrimmed file and the queue publishes
+    the cut the operator removed from the timeline. A recorded trim that no longer
+    fits the new render is reported, not hidden: publishing the long version is
+    the failure being fixed, so the row stays on the render it describes and the
+    job log says why.
+
+    Returns True only when the row was repointed at a fresh trimmed artifact.
+    """
+    from services.trim import TrimValidationError
+
+    if clip_db.trim_start is None or clip_db.trim_end is None:
+        return False
+    try:
+        trimmed = clip_trim.sync_stored_trim(
+            clip_dir, (clip_start, clip_end), clip_db.trim_start, clip_db.trim_end)
+    except TrimValidationError as exc:
+        job_warning(job_id, f"Clip #{index + 1} will publish untrimmed: its recorded "
+                            f"{clip_db.trim_start}-{clip_db.trim_end}s cut does not fit this "
+                            f"render ({exc})")
+        return False
+    if not trimmed:
+        return False
+    clip_db.file_path = os.path.relpath(trimmed, settings.STORAGE_ROOT)
+    db.commit()
+    job_info(job_id, f"Clip #{index + 1} re-applied its recorded trim "
+                      f"{clip_db.trim_start}-{clip_db.trim_end}s")
+    return True
+
 
 def _drop_transcription_input(job_dir, job_id):
     """Delete the extracted audio once a transcript exists on disk.
@@ -1187,14 +1281,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         final_path = final_video_path
 
         # Remove all intermediate video/audio/ass files, keeping only final_video.mp4
-        keep_files = {"final_video.mp4", "thumbnail.jpg", "metadata.json", "storyboard.jpg", "words.json"}
-        for entry in os.listdir(str(clip_dir)):
-            if entry not in keep_files and (entry.endswith(".mp4") or entry.endswith(".ass") or entry.endswith(".wav")):
-                fp = os.path.join(str(clip_dir), entry)
-                try:
-                    os.remove(fp)
-                except Exception:
-                    pass
+        _prune_render_intermediates(clip_dir)
 
         # =====================
         # 5g-extra. DIMENSION CHECK (pre-upload 9:16 validation)
@@ -1260,6 +1347,13 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             "layout_mode": resolved_layout,
         })
         clip_id = clip_db.id
+
+        # The operator's manual trim lives in trim_start/trim_end, not in
+        # final_video.mp4 (utils/clip_trim.py keeps it as a keyed sibling), so a
+        # row re-recorded by a resumed run still describes a cut nobody applied
+        # here. Without this the one path that publishes automatically is the one
+        # path that can ship a short the operator cut out of the timeline.
+        _reapply_recorded_trim(db, job_id, clip_db, clip_dir, clip_start, clip_end, index)
 
         job_info(job_id, f"Clip {index + 1}/{total_clips} saved to DB with ID {clip_id}")
 
@@ -2147,9 +2241,30 @@ async def process_job_async(job_id: int):
             db.commit()
             job_error(job_id, job.error_message)
         elif clip_errors:
-            job.status = "completed"
+            # Not a success. Calling this "completed" is what made a job with a
+            # third of its clips missing read green in the Studio UI, and every
+            # automatic path that keys off that status (api/clips.py's
+            # pending-upload filter, api/realtime.py's terminal set, the pruner)
+            # then treated a half-rendered job as a finished one.
+            job.status = "completed_with_errors"
             job.error_message = f"{len(clip_errors)}/{len(clips)} clips failed: {', '.join(c['error'] for c in clip_errors[:3])}"
-            update_progress("Completed", 100)
+
+            # The clips that did render still go to the queue. This is a
+            # database write, not a publish: the upload pass is what ships, and
+            # it only ever reaches a row the operator opted in by setting
+            # auto_upload on the job - the same thing the per-clip step already
+            # did for every clip that rendered. The completion sweep is NOT run
+            # here, because that half publishes to TikTok on the spot, and a
+            # partial job is not something to push out unreviewed.
+            if getattr(job, "auto_upload", False):
+                try:
+                    queued = enqueue_clips_for_publish(db, job_id)
+                    job_info(job_id, f"Job {job_id}: queued {queued} surviving clip(s) "
+                                     f"for YouTube despite {len(clip_errors)} clip failure(s)")
+                except Exception as q_err:
+                    job_warning(job_id, f"Could not queue the surviving clips: {q_err}")
+
+            update_progress("Completed with errors", 100)
             job.updated_at = datetime.utcnow()
             db.commit()
             job_info(job_id, f"Job {job_id} completed with {len(clip_errors)} clip failure(s)")

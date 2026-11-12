@@ -17,6 +17,38 @@ from config import settings
 _lock = threading.Lock()
 _last_upload: dict[str, float] = {}
 
+# The worker's stall watchdog kills a job that produces no progress signal and
+# no CPU for WORKER_STALL_TIMEOUT_MINUTES. A pacing gap is exactly that shape -
+# no ticks, no CPU - and it can legally outlast the window (3600 s + 600 s of
+# jitter against 30 min), so an intentional wait would get a healthy render
+# failed and `os._exit(1)`'d. The worker registers its liveness signal here, and
+# every chunk that actually wakes up reports itself. That is not a permission to
+# stop watching: a wedge *after* the wait still starves the tick, and a sleeper
+# that never returns never ticks.
+_liveness_hook: Optional[Callable[[], None]] = None
+
+
+def set_liveness_hook(hook: Optional[Callable[[], None]]) -> None:
+    """Register a callable that says "the waiting thread is awake"."""
+    global _liveness_hook
+    _liveness_hook = hook
+
+
+def get_liveness_hook() -> Optional[Callable[[], None]]:
+    return _liveness_hook
+
+
+def _report_liveness() -> None:
+    hook = _liveness_hook
+    if hook is None:
+        return
+    try:
+        hook()
+    except Exception:
+        # A lost liveness signal must not turn a publish into a crash. The
+        # watchdog is the thing that notices, and it is designed for silence.
+        pass
+
 
 def reset(platform: Optional[str] = None) -> None:
     """Forget the spacing history. Tests and a deliberate re-run use this."""
@@ -77,6 +109,7 @@ def wait_for_slot(
         if stop is not None and stop.is_set():
             break
         sleeper(step)
+        _report_liveness()
         waited += step
     return waited
 
@@ -98,5 +131,6 @@ async def await_for_slot(
         if stop is not None and stop.is_set():
             break
         await sleep(step)
+        _report_liveness()
         waited += step
     return waited

@@ -2,10 +2,19 @@
 Database models for AI Shorts Generator.
 SQLAlchemy ORM models with proper relationships.
 """
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, Float, JSON, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, Float, JSON, ForeignKey, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database.base import Base
+from database.migrations import CLIP_UNIQUE_INDEX
+
+# Statuses a job sits at when no worker is working on it any more. The worker
+# writes 'completed_with_errors' for a run where some clips rendered and some
+# did not, so every place that used to compare against 'completed' has to know
+# about both shapes or it will keep a finished job in the live set: the
+# websocket poller never stops, the pruner never reclaims the source, and the
+# Resume button has no path back.
+TERMINAL_JOB_STATUSES = ("completed", "completed_with_errors", "failed")
 
 class Job(Base):
     """Represents a video processing job."""
@@ -14,7 +23,7 @@ class Job(Base):
     id = Column(Integer, primary_key=True, index=True)
     youtube_url = Column(String, nullable=False)
     style_prompt = Column(Text, nullable=True)
-    status = Column(String, default="created")  # created|processing|completed|failed
+    status = Column(String, default="created")  # created|processing|completed|completed_with_errors|failed
     # Lease bookkeeping. A worker that died mid-job left the row at 'processing'
     # forever, because the poller only queries 'created' and never reclaimed it.
     claimed_by = Column(String, nullable=True)
@@ -68,6 +77,17 @@ class JobProgress(Base):
 class Clip(Base):
     """Represents a generated clip from a job."""
     __tablename__ = "clips"
+
+    # One row per clip slot, enforced by the database instead of by whoever got
+    # there first. Without it a second worker on the same job re-creates the row
+    # (job 70: 214/232, 215/233, 216/234 - the same shorts published twice) or
+    # overwrites one (job 93: no index 0 at all, while clip_0/final_video.mp4
+    # sits on disk unpublished). An existing database that already holds
+    # duplicates cannot accept this index, so database.migrations creates it
+    # conditionally and only ever reports the violations.
+    __table_args__ = (
+        Index(CLIP_UNIQUE_INDEX, "job_id", "index", unique=True),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False)

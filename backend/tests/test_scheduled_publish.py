@@ -182,7 +182,7 @@ def test_the_release_clock_survives_a_worker_restart(db):
     the test passes with no clock read at all. Nothing here calls a note_*
     helper; the only state is the row.
     """
-    released = _clip(index=0, title="done", file_path="jobs/1/clip_0/final_video.mp4",
+    released = _clip(index=1, title="done", file_path="jobs/1/clip_0/final_video.mp4",
                      youtube_video_id="vid0", uploaded=True,
                      published_at=NOW - timedelta(minutes=5),
                      scheduled_publish_at=NOW - timedelta(minutes=5))

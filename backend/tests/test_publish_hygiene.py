@@ -167,7 +167,7 @@ def test_two_jobs_from_one_source_never_release_close_together(db, monkeypatch):
     """
     monkeypatch.setattr(settings, "PUBLISH_RELEASE_WINDOW_UTC", "", raising=False)
     same = _job(db, url="https://youtu.be/same", published=1)
-    db.add(Clip(job_id=same.id, index=0, start=0.0, end=9.0, title="released",
+    db.add(Clip(job_id=same.id, index=1, start=0.0, end=9.0, title="released",
                 file_path=VIDEO_FILE, youtube_video_id="r", uploaded=True,
                 published_at=NOW - timedelta(hours=5),
                 scheduled_publish_at=NOW - timedelta(hours=5)))
