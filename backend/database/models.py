@@ -125,6 +125,13 @@ class Clip(Base):
     # whether or not this machine is awake. The queue reads the latest value here to
     # place the next one, exactly as it reads published_at for the upload clock.
     scheduled_publish_at = Column(DateTime, nullable=True)
+    # The intent record. Written and committed before the file is handed to YouTube
+    # and cleared as soon as the outcome is known, so a process that dies in the
+    # window between the API returning a video id and the row being written leaves a
+    # row that says "an upload started here at this instant and nobody recorded what
+    # became of it" - which the queue stops on - instead of one that looks untouched
+    # and gets a second copy of the same clip uploaded.
+    publish_attempt_at = Column(DateTime, nullable=True)
 
     # The experiment record. A zero-view diagnostic job gives every clip of the
     # job a different hook style, but a style only means something next to the

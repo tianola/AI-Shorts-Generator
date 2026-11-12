@@ -1327,6 +1327,12 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
 
 PUBLISH_CLAIM_MINUTES = 30
 
+# An upload attempt whose outcome is still unrecorded once its own claim has
+# expired is not in flight any more - whoever started it is gone, and nothing left
+# behind says whether YouTube got the video. The grace is the claim window because
+# that is exactly how long a live attempt is promised to be.
+PUBLISH_ATTEMPT_GRACE_MINUTES = PUBLISH_CLAIM_MINUTES
+
 
 def next_publish_slot(db, now: Optional[datetime] = None) -> datetime:
     """The earliest moment the next YouTube publish may go out.
@@ -1577,8 +1583,13 @@ def _record_publish_failure(db, clip, now: datetime, message: str) -> None:
     is not charged as an attempt: the clip waits hours instead of retiring after
     three refusals on a busy day. Everything else counts, and a clip that fails
     MAX_UPLOAD_RETRIES times leaves the queue for a human to read.
+
+    An exception here is an outcome, so the attempt marker goes: leaving it set
+    would hold a clip that simply needs another try alongside one whose upload
+    genuinely vanished mid-flight.
     """
     clip.upload_error = message
+    clip.publish_attempt_at = None
     if "uploadLimitExceeded" in message:
         retry_at = now + timedelta(hours=max(1, int(settings.PUBLISH_LIMIT_RETRY_HOURS)))
         clear_at = next_budget_slot(db, now=now)
@@ -1602,6 +1613,130 @@ def _record_publish_failure(db, clip, now: datetime, message: str) -> None:
     db.commit()
 
 
+def _resolve_unresolved_attempts(db, now: datetime) -> int:
+    """Stop on rows whose recorded upload never came back with an outcome.
+
+    An attempt marker older than the claim window it was made under cannot still be
+    in flight. At that point the row genuinely does not know whether YouTube has the
+    video, and uploading again is the one action that turns an unknown into a
+    duplicate on the channel - so the clip leaves the queue with the instant it
+    started kept as evidence and the recovery named in its error, instead of going
+    out twice or vanishing quietly the way a third retry would have retired it.
+    """
+    cutoff = now - timedelta(minutes=PUBLISH_ATTEMPT_GRACE_MINUTES)
+    rows = db.query(Clip, Job).join(Job, Clip.job_id == Job.id).filter(
+        Clip.publish_attempt_at.isnot(None),
+        Clip.publish_attempt_at < cutoff,
+        Clip.publish_due_at.isnot(None),
+        or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
+    ).order_by(Clip.publish_attempt_at.asc()).all()
+    for clip, job in rows:
+        started = clip.publish_attempt_at
+        clip.upload_error = (
+            f"Publish attempt started {started:%Y-%m-%d %H:%M} UTC never recorded a video id, "
+            "so this clip may already be on YouTube. The queue refuses to upload it again. "
+            "Settle it by hand: if the video is on the channel, store its id and clear "
+            "publish_attempt_at; if it is not (`python -m scripts.reconcile_uploads --verify` "
+            f"says so), clear publish_attempt_at and give row {clip.id} a fresh publish_due_at "
+            "to queue it deliberately."
+        )
+        # Nulling the due time is also what keeps this announcement single: the row
+        # drops out of the query above on the next pass instead of warning again.
+        clip.publish_due_at = None
+        job_warning(job.id, f"Clip #{clip.index} stopped with an unresolved upload attempt: "
+                            f"{clip.upload_error}")
+    if rows:
+        db.commit()
+    return len(rows)
+
+
+def _ship_clip_to_youtube(db, clip, job, uploader: Optional[Callable], now: datetime,
+                          privacy_status: Optional[str] = None,
+                          category_id: Optional[str] = None) -> dict:
+    """Upload one clip and record it, in the order that survives being killed.
+
+    The single place this pipeline hands a file to YouTube. The order is the whole
+    point: resolve the file, settle the release slot, commit the *intent*
+    (`publish_attempt_at`), only then call the API, and clear the intent once the
+    outcome - success or a refusal - is on the row. Doing it the other way round
+    meant a process that died after the upload left a row that still looked
+    un-published, and the queue would have shipped a second copy of the same clip.
+
+    What remains is a narrower window, not a closed one: between the intent commit
+    and the outcome commit the truth is unknown, and the response to that is to stop
+    and tell a human (`_resolve_unresolved_attempts`), never to guess by re-uploading.
+    """
+    video_path = _clip_video_path(clip)
+    if not video_path:
+        message = "Rendered file is missing, nothing was uploaded"
+        _record_publish_failure(db, clip, now, message)
+        job_warning(job.id, f"Clip #{clip.index} could not be published: "
+                            f"no file at {clip.file_path}")
+        return {"status": "failed", "code": "missing_file", "error": message}
+
+    if uploader is None:
+        from services.youtube_upload import upload_clip_to_youtube
+        uploader = upload_clip_to_youtube
+
+    # A release slot can expire while the queue is being refused uploads, and
+    # YouTube reads a publishAt in the past as "publish now". Moving the row keeps
+    # the promise the clip is actually shipped with, and places the next clip
+    # after it rather than on top of it. A clip with no slot at all - parked
+    # before this column existed, or handed here by an operator's click - gets one
+    # here, because the alternative is publishing it the instant its turn comes.
+    lead_floor = now + timedelta(seconds=max(60, int(settings.PUBLISH_SCHEDULE_LEAD_SECONDS)))
+    if clip.scheduled_publish_at is None:
+        clip.scheduled_publish_at = next_release_slot(db, now=now,
+                                                      source_url=job.youtube_url)
+        db.commit()
+    if clip.scheduled_publish_at < lead_floor:
+        job_warning(job.id, f"Clip #{clip.index} release slot "
+                            f"{clip.scheduled_publish_at:%Y-%m-%d %H:%M} UTC had already "
+                            f"passed; moving it to {lead_floor:%Y-%m-%d %H:%M} UTC")
+        clip.scheduled_publish_at = lead_floor
+        db.commit()
+
+    clip.publish_attempt_at = now
+    db.commit()
+
+    upload_kwargs = {
+        "video_path": video_path,
+        "title": clip.title,
+        "description": clip.description or "",
+        "hashtags": clip.hashtags or ["#Shorts"],
+        "source_title": _source_title_for_job(job.id),
+        "source_url": job.youtube_url,
+        "privacy_status": privacy_status or getattr(job, "upload_privacy", None)
+                          or settings.AUTO_UPLOAD_PRIVACY,
+        "job_id": job.id,
+        "thumbnail_path": _clip_thumbnail_path(clip),
+        "publish_at": clip.scheduled_publish_at,
+    }
+    if category_id:
+        upload_kwargs["category_id"] = category_id
+
+    try:
+        res = uploader(**upload_kwargs)
+    except Exception as e:
+        _record_publish_failure(db, clip, now, str(e))
+        job_warning(job.id, f"Clip #{clip.index} failed to publish: {e}")
+        return {"status": "failed", "code": "upload_failed", "error": str(e)}
+
+    clip.uploaded = True
+    clip.youtube_video_id = res.get("video_id")
+    clip.published_at = datetime.utcnow()
+    # Both clocks go: a row that says "published" and "a publish is due" at the
+    # same time (clip 461) is a phantom every consumer of publish_due_at reads.
+    clip.publish_due_at = None
+    clip.publish_attempt_at = None
+    clip.upload_error = None
+    db.commit()
+    job_info(job.id, f"🎉 Clip #{clip.index} published: {res.get('shorts_url')}")
+    from utils.upload_pacing import note_upload
+    note_upload("youtube")
+    return {"status": "published", "result": res}
+
+
 def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[Callable] = None) -> int:
     """Upload the single oldest clip whose time has come. Returns 1 when one went out.
 
@@ -1612,12 +1747,17 @@ def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[
     the job's `auto_upload` flag decided whether to park it, and is not re-read here.
     """
     now = now or datetime.utcnow()
+    _resolve_unresolved_attempts(db, now)
     if now < next_publish_slot(db, now=now):
         return 0
     row = db.query(Clip, Job).join(Job, Clip.job_id == Job.id).filter(
         Clip.publish_due_at.isnot(None),
         Clip.publish_due_at <= now,
         or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
+        # A row carrying an attempt that has not resolved is not waiting for its
+        # turn: it is either mid-upload in another process or the survivor of a
+        # crash, and neither wants a second upload.
+        Clip.publish_attempt_at.is_(None),
     ).order_by(Clip.publish_due_at.asc()).first()
     if not row:
         return 0
@@ -1640,63 +1780,156 @@ def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[
         return 0
     db.expire_all()
 
-    video_path = _clip_video_path(clip)
-    if not video_path:
-        _record_publish_failure(db, clip, now,
-                                "Rendered file is missing, nothing was uploaded")
-        job_warning(job.id, f"Clip #{clip.index} could not be published: no file at {clip.file_path}")
-        return 0
+    outcome = _ship_clip_to_youtube(db, clip, job, uploader, now)
+    return 1 if outcome["status"] == "published" else 0
 
-    if uploader is None:
-        from services.youtube_upload import upload_clip_to_youtube
-        uploader = upload_clip_to_youtube
 
-    # A release slot can expire while the queue is being refused uploads, and
-    # YouTube reads a publishAt in the past as "publish now". Moving the row keeps
-    # the promise the clip is actually shipped with, and places the next clip
-    # after it rather than on top of it. A clip with no slot at all - parked
-    # before this column existed, or by an operator's hand - gets one here,
-    # because the alternative is publishing it the instant its turn comes.
-    lead_floor = now + timedelta(seconds=max(60, int(settings.PUBLISH_SCHEDULE_LEAD_SECONDS)))
-    if clip.scheduled_publish_at is None:
-        clip.scheduled_publish_at = next_release_slot(db, now=now,
-                                                      source_url=job.youtube_url)
-        db.commit()
-    if clip.scheduled_publish_at < lead_floor:
-        job_warning(job.id, f"Clip #{clip.index} release slot "
-                            f"{clip.scheduled_publish_at:%Y-%m-%d %H:%M} UTC had already "
-                            f"passed; moving it to {lead_floor:%Y-%m-%d %H:%M} UTC")
-        clip.scheduled_publish_at = lead_floor
-        db.commit()
+def _hold_clip_for_channel(db, clip, when: datetime, reason: str) -> dict:
+    """Park a clip the channel is not ready for, instead of dropping the request.
 
-    try:
-        res = uploader(
-            video_path=video_path,
-            title=clip.title,
-            description=clip.description or "",
-            hashtags=clip.hashtags or ["#Shorts"],
-            source_title=_source_title_for_job(job.id),
-            source_url=job.youtube_url,
-            privacy_status=getattr(job, "upload_privacy", None) or settings.AUTO_UPLOAD_PRIVACY,
-            job_id=job.id,
-            thumbnail_path=_clip_thumbnail_path(clip),
-            publish_at=clip.scheduled_publish_at,
-        )
-    except Exception as e:
-        _record_publish_failure(db, clip, now, str(e))
-        job_warning(job.id, f"Queued clip #{clip.index} failed to publish: {e}")
-        return 0
-
-    clip.uploaded = True
-    clip.youtube_video_id = res.get("video_id")
-    clip.published_at = datetime.utcnow()
-    clip.publish_due_at = None
-    clip.upload_error = None
+    A click is consent to publish, so a refusal has to leave the clip queued for the
+    moment the channel allows it - that is the unattended half of the same promise.
+    An existing due time is never pulled earlier: the release schedule the queue
+    wrote belongs to the channel, and `max` keeps both promises at once.
+    """
+    if clip.publish_due_at is None or clip.publish_due_at < when:
+        clip.publish_due_at = when
     db.commit()
-    job_info(job.id, f"🎉 Clip #{clip.index} published from the queue: {res.get('shorts_url')}")
-    from utils.upload_pacing import note_upload
-    note_upload("youtube")
-    return 1
+    job_warning(clip.job_id, f"Clip #{clip.index} held back from a manual publish: {reason}")
+    return {"status": "held", "retry_at": clip.publish_due_at, "reason": reason}
+
+
+def publish_clip_for_operator(db, clip, *, uploader: Optional[Callable] = None,
+                              now: Optional[datetime] = None,
+                              privacy_status: Optional[str] = None,
+                              category_id: Optional[str] = None) -> dict:
+    """Publish one clip because a human asked, under every guard the queue obeys.
+
+    The Studio buttons used to call `services.youtube_upload.upload_clip_to_youtube`
+    straight from the endpoint, and that bypassed all of it: no duplicate check (a
+    double click put the short on the channel twice), no gap, no rolling budget, no
+    claim, no release slot (clip 461 went public on click with
+    `scheduled_publish_at IS NULL`), a `publish_due_at` left set behind a publish,
+    and a strike charged for `uploadLimitExceeded` - the refusal the queue forgives
+    cost clip 371 two of its three attempts.
+
+    Outcomes are data, not exceptions, because the queue and the API read them
+    differently: "published", "already_published", "unresolved_attempt", "held",
+    "contended", "failed".
+    """
+    now = now or datetime.utcnow()
+    job = db.query(Job).filter(Job.id == clip.job_id).first()
+    if job is None:
+        return {"status": "failed", "code": "no_job",
+                "error": f"Job {clip.job_id} is gone; nothing was uploaded"}
+
+    if clip.youtube_video_id or clip.uploaded:
+        return {"status": "already_published", "video_id": clip.youtube_video_id}
+
+    if clip.publish_attempt_at is not None:
+        return {"status": "unresolved_attempt", "attempt_at": clip.publish_attempt_at}
+
+    slot = next_publish_slot(db, now=now)
+    if now < slot:
+        return _hold_clip_for_channel(
+            db, clip, slot,
+            f"the channel's gap: the next upload may go out at {slot:%Y-%m-%d %H:%M} UTC")
+
+    clear_at = next_budget_slot(db, now=now)
+    if clear_at is not None:
+        return _hold_clip_for_channel(
+            db, clip, clear_at,
+            f"{int(settings.UPLOAD_DAILY_BUDGET)} uploads already went out in the last 24 h; "
+            f"the window clears at {clear_at:%Y-%m-%d %H:%M} UTC")
+
+    if not claim_clip_for_publish(db, clip.id, clip.publish_due_at, now=now):
+        return {"status": "contended"}
+    db.expire_all()
+
+    outcome = _ship_clip_to_youtube(db, clip, job, uploader, now,
+                                   privacy_status=privacy_status,
+                                   category_id=category_id)
+    return outcome
+
+
+def publish_clips_of_job_for_operator(db, job_id: int, *, uploader: Optional[Callable] = None,
+                                      now: Optional[datetime] = None,
+                                      privacy_status: Optional[str] = None,
+                                      category_id: Optional[str] = None) -> dict:
+    """The batch button on the queue's rules: at most one clip leaves now, the rest wait.
+
+    `upload_all_clips_for_job` was called with `pace=False` on the reasoning that a
+    human pressing "upload" asked for them now, which is the sentence that put five
+    clips of job 91 on the channel inside four seconds. The request is honoured as
+    consent to publish the job - every clip gets a release slot and a queue row -
+    while the channel's gap still ships only the first one.
+    """
+    now = now or datetime.utcnow()
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+    clips = db.query(Clip).filter(Clip.job_id == job_id).order_by(Clip.index.asc()).all()
+    if not clips:
+        raise ValueError(f"No clips found for Job {job_id}")
+
+    enqueue_clips_for_publish(db, job_id, now=now)
+
+    results = []
+    counts = {"uploaded": 0, "queued": 0, "failed": 0, "skipped": 0}
+    for clip in clips:
+        db.refresh(clip)
+        row = {"clip_id": clip.id, "clip_index": clip.index,
+               "title": clip.title or f"Clip #{clip.index + 1}"}
+        if clip.youtube_video_id:
+            counts["skipped"] += 1
+            row.update({"status": "uploaded", "video_id": clip.youtube_video_id,
+                        "shorts_url": f"https://youtube.com/shorts/{clip.youtube_video_id}"})
+            results.append(row)
+            continue
+
+        outcome = publish_clip_for_operator(db, clip, uploader=uploader, now=now,
+                                            privacy_status=privacy_status,
+                                            category_id=category_id)
+        status = outcome["status"]
+        if status == "published":
+            res = outcome["result"]
+            counts["uploaded"] += 1
+            row.update({"status": "uploaded", "video_id": res.get("video_id"),
+                        "shorts_url": res.get("shorts_url"),
+                        "privacy_status": res.get("privacy_status"),
+                        "publish_at": res.get("publish_at")})
+        elif status == "held":
+            counts["queued"] += 1
+            row.update({"status": "queued",
+                        "held_until": outcome["retry_at"].isoformat(timespec="seconds"),
+                        "error": f"Held by the publish queue: {outcome['reason']}"})
+        elif status == "already_published":
+            counts["skipped"] += 1
+            row.update({"status": "uploaded", "video_id": outcome["video_id"]})
+        elif status == "unresolved_attempt":
+            counts["failed"] += 1
+            row.update({"status": "blocked",
+                        "error": "an earlier publish attempt never recorded a video id; "
+                                 "this clip may already be on YouTube"})
+        elif status == "contended":
+            counts["queued"] += 1
+            row.update({"status": "queued",
+                        "error": "another publish owns this clip right now"})
+        else:
+            counts["failed"] += 1
+            row.update({"status": "failed", "error": outcome.get("error")})
+        results.append(row)
+
+    return {
+        "success": counts["uploaded"] > 0,
+        "job_id": job_id,
+        "total_clips": len(clips),
+        "uploaded_count": counts["uploaded"],
+        "queued_count": counts["queued"],
+        "failed_count": counts["failed"],
+        "skipped_count": counts["skipped"],
+        "results": results,
+    }
 
 
 async def stage_publish_all_clips(job_id: int, db: Session, job: Job, tiktok_privacy: str, update_progress: Callable[[str, int], None], lease_stop: Optional[threading.Event] = None) -> None:

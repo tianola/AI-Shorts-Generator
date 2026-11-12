@@ -5,10 +5,8 @@ only the file they live in. The HTML escapers moved here with the OAuth callback
 which is the only thing that renders inline HTML.
 """
 import json
-import os
 import html as html_escape_mod
 from datetime import datetime
-from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -17,9 +15,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from api.common import resolve_upload_privacy
-from config import settings
 from database.models import Clip
 from database.session import get_database
+
+# `os`, `pathlib` and `settings` left with the upload handlers below: a publish
+# request no longer walks the storage tree itself, it asks the queue's path to do it.
 
 router = APIRouter()
 
@@ -178,9 +178,24 @@ async def upload_clip_to_youtube_endpoint(
     req: YouTubeUploadRequest = YouTubeUploadRequest(),
     db: Session = Depends(get_database)
 ):
-    """Upload a generated clip directly to YouTube Shorts."""
-    from services.youtube_upload import (
-        upload_clip_to_youtube, get_youtube_auth_status, resolve_stored_path)
+    """Publish one clip because a human clicked, under the queue's own rules.
+
+    This handler used to call `upload_clip_to_youtube` directly, which skipped every
+    piece of publish discipline the worker applies: no duplicate check (a double click
+    uploaded the same clip twice), no channel gap, no rolling upload budget, no claim,
+    no release slot, and a `publish_due_at` left behind a completed publish - clip 461
+    is `uploaded=1` with a video id, `scheduled_publish_at IS NULL` and a due time still
+    set, which is why it went public on click and why the row reads as two states at
+    once. Its exception handler also charged a strike for any error, including
+    `uploadLimitExceeded`, the one refusal the queue deliberately forgives (clip 371).
+
+    The click is now a request the queue answers: the channel's gap and budget are
+    checked first, the clip keeps a claim so nothing races it, and the upload carries
+    its release slot. A refusal does not lose the request - the row is parked for the
+    moment the channel allows it and the worker ships it then.
+    """
+    from services.youtube_upload import get_youtube_auth_status
+    from worker import publish_clip_for_operator
 
     auth_status = get_youtube_auth_status()
     if not auth_status["authenticated"]:
@@ -193,67 +208,89 @@ async def upload_clip_to_youtube_endpoint(
     if not clip:
         raise HTTPException(status_code=404, detail=f"Clip {clip_id} not found")
 
-    # Locate the video file on disk
-    video_path = None
-    if clip.file_path:
-        cand = Path(settings.STORAGE_ROOT) / clip.file_path
-        if cand.exists():
-            video_path = str(cand.resolve())
-        elif os.path.exists(clip.file_path):
-            video_path = str(Path(clip.file_path).resolve())
-
-    if not video_path:
-        job_dir = Path(settings.STORAGE_ROOT) / "jobs" / str(clip.job_id) / f"clip_{clip.index}"
-        for cand_name in ["final_video.mp4", "final_short.mp4", "short.mp4"]:
-            cand = job_dir / cand_name
-            if cand.exists():
-                video_path = str(cand.resolve())
-                break
-
-    if not video_path or not os.path.exists(video_path):
-        raise HTTPException(status_code=404, detail=f"Video file for clip {clip_id} not found on disk")
-
-    # Prepare metadata. A placeholder title is refused by the uploader rather
-    # than published, so an operator sees the real problem instead of a short
-    # named "Viral Moment 2" on the channel.
-    title = req.title or clip.title
-    description = req.description or clip.description or ""
-    hashtags = req.hashtags if req.hashtags is not None else (clip.hashtags or ["#Shorts"])
-    privacy = resolve_upload_privacy(req.privacy_status)
-
-    try:
-        result = upload_clip_to_youtube(
-            video_path=video_path,
-            title=title,
-            description=description,
-            hashtags=hashtags,
-            privacy_status=privacy,
-            job_id=clip.job_id if clip.job_id else 0,
-            thumbnail_path=resolve_stored_path(clip.thumbnail_path)
-        )
-
-        clip.uploaded = True
-        clip.youtube_video_id = result["video_id"]
-        clip.published_at = datetime.utcnow()
-        clip.upload_error = None
+    # The edits the panel sent are written before the publish is asked for, so the
+    # row, the queue and YouTube all end up holding the copy that was clicked. They
+    # used to reach only the upload, which left the row describing a different video
+    # than the channel - and any later queue pass republished the old copy.
+    changed = False
+    if req.title is not None and req.title != clip.title:
+        clip.title = req.title
+        changed = True
+    if req.description is not None and req.description != clip.description:
+        clip.description = req.description
+        changed = True
+    if req.hashtags is not None and req.hashtags != clip.hashtags:
+        clip.hashtags = req.hashtags
+        changed = True
+    if changed:
         db.commit()
-        db.refresh(clip)
 
+    privacy = resolve_upload_privacy(req.privacy_status)
+    outcome = publish_clip_for_operator(db, clip, now=datetime.utcnow(),
+                                        privacy_status=privacy)
+    state = outcome["status"]
+
+    if state == "published":
+        result = outcome["result"]
+        db.refresh(clip)
         return {
             "success": True,
-            "video_id": result["video_id"],
-            "shorts_url": result["shorts_url"],
-            "watch_url": result["watch_url"],
-            "title": result["title"],
-            "privacy_status": result["privacy_status"],
-            "clip_id": clip.id
+            "video_id": result.get("video_id"),
+            "shorts_url": result.get("shorts_url"),
+            "watch_url": result.get("watch_url"),
+            "title": result.get("title"),
+            "privacy_status": result.get("privacy_status"),
+            "clip_id": clip.id,
+            # What the operator needs to see now that a click no longer means
+            # "public this second": the release is YouTube's, not this machine's.
+            "scheduled_publish_at": clip.scheduled_publish_at,
         }
-    except Exception as e:
-        clip.uploaded = False
-        clip.upload_error = str(e)
-        clip.upload_retry_count += 1
-        db.commit()
-        raise HTTPException(status_code=500, detail=f"YouTube upload failed: {str(e)}")
+
+    if state == "already_published":
+        video_id = outcome.get("video_id")
+        where = f" as {video_id} (https://youtube.com/shorts/{video_id})" if video_id else ""
+        raise HTTPException(
+            status_code=409,
+            detail=f"Clip {clip_id} is already published{where}. Refusing to upload a "
+                   f"second copy of it to the channel."
+        )
+
+    if state == "unresolved_attempt":
+        attempt = outcome["attempt_at"]
+        raise HTTPException(
+            status_code=409,
+            detail=f"Clip {clip_id} has a publish attempt from "
+                   f"{attempt:%Y-%m-%d %H:%M} UTC that never recorded a video id, so it may "
+                   f"already be on YouTube. Check the channel (python -m "
+                   f"scripts.reconcile_uploads --verify); only once you know it is not there "
+                   f"should you clear publish_attempt_at on this row and click again."
+        )
+
+    if state == "held":
+        return {
+            "success": False,
+            "queued": True,
+            "clip_id": clip.id,
+            "held_until": outcome["retry_at"],
+            "message": f"Held by the publish queue: {outcome['reason']}",
+            # `error` is what the Studio panel reads on a non-success response.
+            "error": f"Not uploaded: {outcome['reason']}. The clip is queued and will "
+                     f"publish itself at {outcome['retry_at']:%Y-%m-%d %H:%M} UTC.",
+        }
+
+    if state == "contended":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Another publish already owns clip {clip_id}; try again after its "
+                   f"claim expires."
+        )
+
+    if outcome.get("code") == "missing_file":
+        raise HTTPException(status_code=404,
+                            detail=f"Video file for clip {clip_id} not found on disk")
+
+    raise HTTPException(status_code=500,
+                        detail=f"YouTube upload failed: {outcome.get('error')}")
 
 
 class BatchYouTubeUploadRequest(BaseModel):
@@ -267,8 +304,17 @@ async def upload_all_clips_to_youtube_endpoint(
     req: BatchYouTubeUploadRequest = BatchYouTubeUploadRequest(),
     db: Session = Depends(get_database)
 ):
-    """Batch upload all clips from a job directly to YouTube Shorts."""
-    from services.youtube_upload import upload_all_clips_for_job, get_youtube_auth_status
+    """Queue a whole job for publishing; at most one clip leaves in this call.
+
+    The batch button was the single-clip bypass with a loop around it -
+    `upload_all_clips_for_job(..., pace=False)` on the reasoning that a human
+    pressing "upload" asked for them now, which is how five clips of job 91 went out
+    inside four seconds. Pressing it still means "publish this job", and the job now
+    gets that: every clip takes a release slot and a queue row, and the channel's gap
+    ships the first one immediately and the rest one per hour by itself.
+    """
+    from services.youtube_upload import get_youtube_auth_status
+    from worker import publish_clips_of_job_for_operator
 
     auth_status = get_youtube_auth_status()
     if not auth_status["authenticated"]:
@@ -278,13 +324,12 @@ async def upload_all_clips_to_youtube_endpoint(
         )
 
     try:
-        result = upload_all_clips_for_job(
-            job_id=job_id,
-            db=db,
+        return publish_clips_of_job_for_operator(
+            db, job_id,
+            now=datetime.utcnow(),
             privacy_status=resolve_upload_privacy(req.privacy_status),
-            category_id=req.category_id or "24"
+            category_id=req.category_id or "24",
         )
-        return result
     except ValueError as ve:
         raise HTTPException(status_code=404, detail=str(ve))
     except PermissionError as pe:

@@ -410,6 +410,13 @@ def upload_all_clips_for_job(
 
     ``pace`` spaces the publishes like the worker's per-clip path does; the API
     endpoints leave it off, because a human pressing "upload" asked for them now.
+
+    Kept for scripts. The /jobs/{id}/upload-all-youtube endpoint no longer calls it:
+    this loop uploads on the spot, so it skips the channel gap and rolling budget
+    checks, the claim, the release slot and the attempt record that
+    ``worker.publish_clips_of_job_for_operator`` now applies to every publish. A
+    caller that needs those - which is anything the operator can click - goes through
+    the worker.
     """
     from database.models import Clip, Job
     from datetime import datetime
@@ -537,7 +544,12 @@ def upload_all_clips_for_job(
         except Exception as e:
             clip.uploaded = False
             clip.upload_error = str(e)
-            clip.upload_retry_count += 1
+            # The same rule the publish queue applies: YouTube's upload limit is the
+            # channel's budget, not a fault in this clip, so it may not burn one of
+            # MAX_UPLOAD_RETRIES strikes. Charging it there is how clip 371 lost two
+            # of its three attempts to a refusal that said nothing about it.
+            if "uploadLimitExceeded" not in str(e):
+                clip.upload_retry_count = (clip.upload_retry_count or 0) + 1
             db.commit()
             results.append({
                 "clip_id": clip.id,
