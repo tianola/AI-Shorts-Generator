@@ -122,6 +122,17 @@ async def rerender_clip(
         from services.motion_title import add_motion_title
         from services.sfx import add_automatic_sfx
 
+        # This endpoint rebuilds with inputs the worker's cache key does not
+        # know about (karaoke, thumbnail template), so any manifest left behind
+        # would vouch for artifacts it did not build. Drop the claims first;
+        # the next worker run then rebuilds on its own terms instead of
+        # trusting a key that no longer describes this output.
+        from utils import derived_cache
+        for _stale in ("short.mp4", "vertical.mp4", "words.json", "captions.ass",
+                       "final_short.mp4", "final_with_title.mp4", "final_with_sfx.mp4",
+                       "final_video.mp4"):
+            derived_cache.forget(os.path.join(str(clip_dir), _stale))
+
         # 1. Cut clip
         short_path = os.path.join(str(clip_dir), "short.mp4")
         cut_clip(source_video, clip.start, clip.end, short_path)

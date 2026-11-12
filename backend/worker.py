@@ -30,6 +30,7 @@ from loguru import logger
 from utils.logger import job_info, job_error, job_warning, job_debug
 from utils.env_check import log_media_tools, missing_media_tools
 from utils.disk import has_headroom, reclaim
+from utils import derived_cache
 from services.youtube import download_youtube
 from services.audio import extract_audio
 from services.whisper import transcribe_audio_file
@@ -246,6 +247,42 @@ def _url_fingerprint(url: str) -> str:
     import hashlib
     return hashlib.sha256((url or "").strip().encode("utf-8")).hexdigest()[:16]
 
+
+def ensure_derived(job_id: int, artifact_path: str, kind: str,
+                   build: Callable[[], object], inputs: dict,
+                   legacy_current: bool = False) -> bool:
+    """Produce ``artifact_path`` unless it already comes from these exact inputs.
+
+    Returns True when the artifact was (re)built, so the caller keeps its own
+    log wording. ``inputs`` is what the build consumed — the clip window, the
+    caption style, the source fingerprint, the identity of the file this
+    artifact was derived from — and it is recorded in ``<dir>/artifact.json``
+    next to the artifact.
+
+    ``os.path.exists`` was the old test and it is not evidence: the per-clip
+    files live in a directory named by the clip *index*, so a re-run whose
+    selector picked other windows found ``clip_0/words.json`` sitting there from
+    the previous window and burned its text into a freshly cut picture (job 110:
+    a frame at t=3175 s carrying the caption "own. Something the legacy" from
+    t=0 s). An artifact now only counts as current while its key matches, and
+    anything the key cannot answer (no entry, unreadable manifest, different
+    kind) is rebuilt.
+
+    The entry is dropped before the rebuild on purpose: a build that dies
+    half-way (an ffmpeg failure, the stall watchdog's ``os._exit``) must not
+    leave behind a key that still vouches for the truncated file.
+    """
+    if derived_cache.is_current(artifact_path, kind, inputs, legacy_current=legacy_current):
+        return False
+
+    derived_cache.forget(artifact_path)
+    build()
+    if not derived_cache.record(artifact_path, kind, inputs):
+        job_warning(job_id, f"Could not record the cache key for {artifact_path}; "
+                            "it will be rebuilt on the next run")
+    return True
+
+
 def _clear_derived_artifacts(job_dir, job_id):
     """Remove per-job files that derive from the source video, so a re-downloaded
     source is never paired with stale audio/transcript/timing or old clip cuts
@@ -255,6 +292,9 @@ def _clear_derived_artifacts(job_dir, job_id):
         "audio.wav", "words.json", "segments.json", "transcript.txt",
         "short.mp4", "vertical.mp4", "final_short.mp4", "final_with_title.mp4",
         "final_with_sfx.mp4", "popup_card.png", "captions.ass", "diarization.json",
+        # The cache keys for the files above. Leaving this behind would let the
+        # next run vouch for a transcript that no longer exists under it.
+        derived_cache.MANIFEST_NAME,
     ]
     for name in stale_files:
         p = os.path.join(str(job_dir), name)
@@ -305,6 +345,11 @@ def _drop_transcription_input(job_dir, job_id):
 
 def load_clip_diarization(job_dir, clip_start: float, clip_end: float) -> list:
     """Speaker turns inside one clip, re-zeroed to clip time. [] when none."""
+    if not settings.DIARIZATION_ENABLED:
+        # The switch owns the whole run: a diarization.json from when it was on
+        # must not reach the layouts either (stage_diarize returns [] above, but
+        # this file is what the per-clip render actually reads).
+        return []
     try:
         path = os.path.join(str(job_dir), "diarization.json")
         if not os.path.exists(path):
@@ -513,7 +558,25 @@ async def stage_transcribe(job_id: int, job: Job, job_dir: Path, audio_path: str
     source_language = getattr(job, "source_language", None) or None
     keep_native = bool(getattr(job, "keep_native_transcript", False))
 
-    if not os.path.exists(segments_file) or not os.path.exists(words_file):
+    # The transcript is keyed by the source it was heard from and by every
+    # setting that changes what the model returns. Rebuilding it costs a full
+    # Whisper pass on a multi-hour source, so a transcript that predates this
+    # manifest is accepted on existence alone (legacy_current) — the only way
+    # the file can exist while the source changed is the re-download branch,
+    # and that branch deletes both files before it re-fetches.
+    transcript_inputs = {
+        "source": derived_cache.source_fingerprint(job_dir),
+        "model": getattr(job, "whisper_model", None),
+        "task": transcribe_task,
+        "language": source_language,
+        "keep_native": keep_native,
+    }
+    transcript_on_disk = os.path.exists(segments_file) and os.path.exists(words_file)
+    cached_transcript = transcript_on_disk and all(
+        derived_cache.is_current(path, "transcript", transcript_inputs, legacy_current=True)
+        for path in (segments_file, words_file))
+
+    if not cached_transcript:
         transcribe_audio_file(
             audio_path,
             str(job_dir),
@@ -523,6 +586,8 @@ async def stage_transcribe(job_id: int, job: Job, job_dir: Path, audio_path: str
             keep_native=keep_native,
             progress_callback=update_progress,
         )
+        derived_cache.record(segments_file, "transcript", transcript_inputs)
+        derived_cache.record(words_file, "transcript", transcript_inputs)
         job_info(job_id, f"Transcript created (task={transcribe_task}): {segments_file}, {words_file}")
     else:
         job_info(job_id, "Transcript already exists")
@@ -561,25 +626,52 @@ async def stage_diarize(job_id: int, job_dir: Path, video_path: str, clips: list
     leaves the job with no speaker turns and a logged warning — every later stage
     reads 'no diarization' as the old behavior, not as an error.
     """
-    diarization_file = os.path.join(str(job_dir), "diarization.json")
-    if os.path.exists(diarization_file):
-        try:
-            with open(diarization_file, "r", encoding="utf-8") as f:
-                turns = (json.load(f) or {}).get("turns") or []
-            job_info(job_id, f"Diarization already on disk: {len(turns)} speaker turns (resume)")
-            return turns
-        except Exception as e:
-            job_warning(job_id, f"Could not read existing diarization.json ({e}); re-running diarization")
-
+    # The switch first. A diarization.json left by an older run with the switch
+    # on is evidence about that run, not an instruction for this one, and the
+    # resume used to sit above the gate — so a job with DIARIZATION_ENABLED=false
+    # still fed cached speaker turns to the layouts.
     if not settings.DIARIZATION_ENABLED:
         job_info(job_id, "Speaker diarization disabled (DIARIZATION_ENABLED=false), skipping")
         return []
+
+    diarization_file = os.path.join(str(job_dir), "diarization.json")
 
     windows = [{"start": float(c["start"]), "end": float(c["end"])}
                for c in (clips or []) if c.get("start") is not None and c.get("end") is not None]
     if not windows:
         job_info(job_id, "Speaker diarization skipped: no clip windows to analyze")
         return []
+
+    # Diarization runs over the selected windows only, and pyannote numbers the
+    # voices it finds per call (SPEAKER_00 of one call is not SPEAKER_00 of the
+    # next), so turns computed for other windows are not reusable at all. The
+    # resume is therefore keyed by the exact window set plus the source and the
+    # model that produced it.
+    diarization_inputs = {
+        "source": derived_cache.source_fingerprint(job_dir, video_path),
+        "windows": windows,
+        "model": settings.DIARIZATION_MODEL,
+        "margin": settings.DIARIZATION_CLIP_MARGIN_SECONDS,
+    }
+    if derived_cache.is_current(diarization_file, "diarization", diarization_inputs):
+        try:
+            with open(diarization_file, "r", encoding="utf-8") as f:
+                turns = (json.load(f) or {}).get("turns") or []
+            job_info(job_id, f"Diarization already on disk for these {len(windows)} clip "
+                             f"windows: {len(turns)} speaker turns (resume)")
+            return turns
+        except Exception as e:
+            job_warning(job_id, f"Could not read existing diarization.json ({e}); re-running diarization")
+
+    if os.path.exists(diarization_file):
+        # Built for a different selection (or unreadable): drop it and its key so
+        # no clip slices turns that were never computed over its own window.
+        try:
+            os.remove(diarization_file)
+            job_info(job_id, "Diarization is for different clip windows — re-running")
+        except Exception as e:
+            job_warning(job_id, f"Could not remove stale diarization.json ({e})")
+        derived_cache.forget(diarization_file)
 
     total = sum(w["end"] - w["start"] for w in windows)
     job_info(job_id, f"Speaker diarization over {len(windows)} clip windows "
@@ -599,6 +691,7 @@ async def stage_diarize(job_id: int, job_dir: Path, video_path: str, clips: list
     try:
         with open(diarization_file, "w", encoding="utf-8") as f:
             json.dump({"model": settings.DIARIZATION_MODEL, "turns": turns}, f, ensure_ascii=False, indent=2)
+        derived_cache.record(diarization_file, "diarization", diarization_inputs)
     except Exception as e:
         job_warning(job_id, f"Diarization computed but could not be written to disk: {e}")
     job_info(job_id, f"Diarization: {len(turns)} speaker turns across clip windows")
@@ -675,8 +768,16 @@ async def stage_score_audio_energy(job_id: int, video_path: str, segments: list,
     job_info(job_id, "Step 4a/8: Audio energy pre-pass (FFmpeg RMS analysis)...")
     update_progress("Analyzing audio energy...", 51)
     try:
-        segments = score_audio_energy(str(video_path), segments)
+        energy_status: dict = {}
+        segments = score_audio_energy(str(video_path), segments, status_out=energy_status)
         job_info(job_id, f"Audio energy scored for {len(segments)} segments")
+        if energy_status.get("partial"):
+            job_warning(job_id, f"Audio energy band incomplete: "
+                        f"{energy_status.get('windows_read')}/{energy_status.get('windows_attempted')} "
+                        f"windows readable, {energy_status.get('unmeasured_segments')} segments carry "
+                        f"the measured mean (coverage {energy_status.get('coverage')})")
+        elif energy_status.get("flat_band"):
+            job_info(job_id, "Audio energy band is flat but measured - audio_dynamics will be near 0")
         # Persist enriched segments so select_clips can read audio_energy_score
         with open(segments_file, "w", encoding="utf-8") as f:
             json.dump(segments, f, ensure_ascii=False, indent=2)
@@ -768,11 +869,15 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # 5a. CUT CLIP
         # =====================
         short_path = os.path.join(str(clip_dir), "short.mp4")
-        if not os.path.exists(short_path):
-            cut_clip(video_path, clip_start, clip_end, short_path)
+        clip_window = [float(clip_start), float(clip_end)]
+        if ensure_derived(job_id, short_path, "clip_cut",
+                          lambda: cut_clip(video_path, clip_start, clip_end, short_path),
+                          {"source": derived_cache.source_fingerprint(job_dir, video_path),
+                           "window": clip_window}):
             job_info(job_id, f"Clip cut: {short_path}")
         else:
-            job_info(job_id, f"Clip already exists: {short_path}")
+            job_info(job_id, f"Clip already exists for [{clip_window[0]:.1f}s - "
+                             f"{clip_window[1]:.1f}s]: {short_path}")
 
         # =====================
         # 5b-5e. RENDER: SINGLE-PASS UNIFIED (Task D) OR SEQUENTIAL FALLBACK
@@ -782,12 +887,19 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         caption_style = getattr(job, "default_caption_style", None) or clip.get("caption_style") or "mrbeast"
 
         # 5c. Crop Words
+        # Keyed by the window it was sliced for and by the transcript file it was
+        # sliced from. words.json is the one per-clip file the end-of-render
+        # cleanup keeps, which is exactly why an existence check here silently
+        # reused the previous selection's text (job 110).
         clip_words_file = os.path.join(str(clip_dir), "words.json")
-        if not os.path.exists(clip_words_file):
-            crop_words(words_file, clip_start, clip_end, clip_words_file)
+        if ensure_derived(job_id, clip_words_file, "clip_words",
+                          lambda: crop_words(words_file, clip_start, clip_end, clip_words_file),
+                          {"window": clip_window,
+                           "transcript": derived_cache.input_fingerprint(words_file)}):
             job_info(job_id, f"Words cropped: {clip_words_file}")
         else:
-            job_info(job_id, "Words already cropped")
+            job_info(job_id, f"Words already cropped for [{clip_window[0]:.1f}s - "
+                             f"{clip_window[1]:.1f}s]: {clip_words_file}")
 
         # ---- transcript (used for SFX selection + virality) ----
         clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
@@ -822,12 +934,20 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             resolved_layout = layout_choice
 
         # 5d. Generate ASS Captions with Selected Preset & Emojis
+        # The style is part of the key, so switching presets on a re-render can
+        # not leave an old-styled .ass behind; the cropped-words identity is in it
+        # too, so a window change that rebuilt words.json rebuilds the captions
+        # even if the style and the index are untouched.
         captions_path = os.path.join(str(clip_dir), "captions.ass")
-        if not os.path.exists(captions_path):
-            create_captions(clip_words_file, captions_path, style_name=caption_style)
+        if ensure_derived(job_id, captions_path, "captions",
+                          lambda: create_captions(clip_words_file, captions_path,
+                                                  style_name=caption_style),
+                          {"window": clip_window,
+                           "style": caption_style,
+                           "words": derived_cache.input_fingerprint(clip_words_file)}):
             job_info(job_id, f"Captions created with '{caption_style}' style: {captions_path}")
         else:
-            job_info(job_id, "Captions already exist")
+            job_info(job_id, f"Captions already exist for '{caption_style}' style")
 
         final_path = os.path.join(str(clip_dir), "final_short.mp4")
 
@@ -936,19 +1056,24 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # ---- Sequential fallback ----
         if not _used_single_pass:
             vertical_path = os.path.join(str(clip_dir), "vertical.mp4")
-            if not os.path.exists(vertical_path):
-                try:
-                    smart_crop_video(short_path, vertical_path, mode=resolved_layout)
+            try:
+                if ensure_derived(job_id, vertical_path, "vertical",
+                                  lambda: smart_crop_video(short_path, vertical_path,
+                                                           mode=resolved_layout),
+                                  {"short": derived_cache.input_fingerprint(short_path),
+                                   "layout": resolved_layout}):
                     job_info(job_id, f"Vertical conversion ({resolved_layout}): {vertical_path}")
-                except Exception as e:
-                    job_warning(job_id, f"Vertical conversion failed, using original short: {str(e)}")
-                    vertical_path = short_path
-                    job_info(job_id, f"Vertical conversion fallback: {vertical_path}")
-            else:
-                job_info(job_id, f"Vertical already exists: {vertical_path}")
+                else:
+                    job_info(job_id, f"Vertical already exists: {vertical_path}")
+            except Exception as e:
+                job_warning(job_id, f"Vertical conversion failed, using original short: {str(e)}")
+                vertical_path = short_path
+                job_info(job_id, f"Vertical conversion fallback: {vertical_path}")
 
-            if not os.path.exists(final_path):
-                burn_captions(vertical_path, captions_path, final_path)
+            if ensure_derived(job_id, final_path, "burned",
+                              lambda: burn_captions(vertical_path, captions_path, final_path),
+                              {"vertical": derived_cache.input_fingerprint(vertical_path),
+                               "captions": derived_cache.input_fingerprint(captions_path)}):
                 job_info(job_id, f"Final video (sequential): {final_path}")
             else:
                 job_info(job_id, "Final video already exists")
