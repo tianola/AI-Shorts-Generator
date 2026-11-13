@@ -59,6 +59,8 @@ def _budget_and_cadence(monkeypatch):
     monkeypatch.setattr(settings, "PUBLISH_RELEASE_WINDOW_UTC", "6-22", raising=False)
     monkeypatch.setattr(settings, "PUBLISH_SAME_SOURCE_MIN_GAP_SECONDS", 86400, raising=False)
     monkeypatch.setattr(settings, "PUBLISH_LIMIT_RETRY_HOURS", 6, raising=False)
+    monkeypatch.setattr(settings, "PUBLISH_RETRY_MINUTES", 30, raising=False)
+    monkeypatch.setattr(settings, "MAX_UPLOAD_RETRIES", 3, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -140,6 +142,106 @@ def test_a_refusal_now_waits_for_the_window_to_clear_not_for_a_fixed_six_hours(d
 
     assert clip.publish_due_at == NOW + timedelta(hours=19)
     assert clip.upload_retry_count == 0, "the channel's budget is not the clip's fault"
+
+
+# ------------------------------------- a disconnected channel is no clip's fault
+
+AUTH_REFUSAL = ("YouTube account is not authenticated. "
+                "Please connect your YouTube account first.")
+TOKEN_REVOKED = ("('invalid_grant: Token has been expired or revoked.', "
+                 "{'error': 'invalid_grant', 'error_description': "
+                 "'Token has been expired or revoked.'})")
+
+
+@pytest.fixture
+def logged(monkeypatch):
+    """What the operator would actually read in the log, level included."""
+    records = []
+    monkeypatch.setattr(worker, "job_warning",
+                        lambda jid, m: records.append(("warning", m)))
+    monkeypatch.setattr(worker, "job_error",
+                        lambda jid, m: records.append(("error", m)))
+    return records
+
+
+def _waiting_clip(db):
+    _job(db, queued=1)
+    return db.query(Clip).filter(Clip.youtube_video_id.is_(None)).one()
+
+
+def test_an_expired_token_does_not_charge_the_clips_that_could_not_go_out(db, logged):
+    """Job 109 lost five clips this way overnight: three refusals in ninety minutes.
+
+    The strikes are a budget for faults in *this* upload. A channel nobody can
+    authenticate against fails every clip identically, so it retires the whole
+    queue while the operator's own next upload looks fine.
+    """
+    clip = _waiting_clip(db)
+
+    worker._record_publish_failure(db, clip, NOW, AUTH_REFUSAL)
+
+    assert clip.upload_retry_count == 0, "the channel being offline is not this clip's fault"
+    assert clip.publish_due_at == NOW + timedelta(minutes=30)
+    assert not any("left the publish queue" in m for _, m in logged)
+
+
+def test_a_revoked_refresh_token_holds_the_queue_the_same_way(db, logged):
+    """The same outage arrives as google's RefreshError when the upload is already past
+    the auth check - the classifier has to know both shapes or one of them still strikes.
+    """
+    clip = _waiting_clip(db)
+
+    worker._record_publish_failure(db, clip, NOW, TOKEN_REVOKED)
+
+    assert clip.upload_retry_count == 0
+    assert clip.publish_due_at == NOW + timedelta(minutes=30)
+
+
+def test_the_release_slot_survives_an_outage(db, logged):
+    """A clip held back by the channel keeps its slot; the schedule is the channel's.
+
+    Retiring with the slot cleared is what made those five clips invisible - no clock
+    left set means nothing in the UI or the queue can find them again. Tried at the
+    boundary, on a clip whose next failure would have been its third strike.
+    """
+    clip = _waiting_clip(db)
+    clip.upload_retry_count = settings.MAX_UPLOAD_RETRIES - 1
+    db.commit()
+    slot = clip.scheduled_publish_at
+
+    worker._record_publish_failure(db, clip, NOW, AUTH_REFUSAL)
+
+    assert clip.upload_retry_count == settings.MAX_UPLOAD_RETRIES - 1
+    assert clip.scheduled_publish_at == slot
+
+
+def test_the_outage_is_announced_with_the_step_that_repairs_it(db, logged):
+    """A warning naming a clip is the wrong shape for a failure of the whole channel.
+
+    The line has to say what to do: the token cannot be renewed by code, only by a
+    human re-consenting in Settings.
+    """
+    clip = _waiting_clip(db)
+
+    worker._record_publish_failure(db, clip, NOW, AUTH_REFUSAL)
+
+    errors = [m for level, m in logged if level == "error"]
+    text = " ".join(errors).lower()
+    assert errors, f"an outage is only logged as {logged}"
+    assert "connect" in text and "settings" in text, f"recovery not named: {text}"
+
+
+def test_an_ordinary_upload_failure_still_costs_a_strike(db, logged):
+    """The exemption must not become a blanket: without it nothing ever leaves the queue.
+
+    A crop that cannot be encoded, or a 403 on one video, is this clip's problem.
+    """
+    clip = _waiting_clip(db)
+
+    worker._record_publish_failure(db, clip, NOW, "HttpError 403 forbidden for this video")
+
+    assert clip.upload_retry_count == 1
+    assert clip.publish_due_at == NOW + timedelta(minutes=30)
 
 
 # ------------------------------------------------------ the release cadence and hours

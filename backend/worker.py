@@ -1670,13 +1670,29 @@ def _source_title_for_job(job_id: int) -> Optional[str]:
     return None
 
 
+def _is_channel_auth_failure(message: str) -> bool:
+    """True when the refusal says the channel is not connected, not that this clip failed.
+
+    Two shapes reach here: the uploader's own `PermissionError` after its auth check,
+    and Google's `RefreshError` from the refresh inside the upload. Both mean the
+    refresh token is dead Google-side, which code cannot renew - only a person
+    re-consenting can. Job 109 lost five clips to the first shape in ninety minutes,
+    each on three strikes, with both clocks cleared so nothing could ever find them.
+    """
+    text = (message or "").lower()
+    return any(marker in text for marker in
+               ("not authenticated", "invalid_grant", "token has been expired or revoked"))
+
+
 def _record_publish_failure(db, clip, now: datetime, message: str) -> None:
     """Keep the clip queued and decide when it may be tried again.
 
     YouTube's upload limit is the channel's budget, not a fault in this clip, so it
     is not charged as an attempt: the clip waits hours instead of retiring after
-    three refusals on a busy day. Everything else counts, and a clip that fails
-    MAX_UPLOAD_RETRIES times leaves the queue for a human to read.
+    three refusals on a busy day. A disconnected channel is the same shape but worse
+    - every clip on it fails identically and no retry can ever succeed - so it is
+    forgiven too, and said out loud instead. Everything else counts, and a clip that
+    fails MAX_UPLOAD_RETRIES times leaves the queue for a human to read.
 
     An exception here is an outcome, so the attempt marker goes: leaving it set
     would hold a clip that simply needs another try alongside one whose upload
@@ -1692,6 +1708,15 @@ def _record_publish_failure(db, clip, now: datetime, message: str) -> None:
         # +6 h, it is ready when the oldest success ages out of the rolling day.
         clip.publish_due_at = max(retry_at, clear_at) if clear_at else retry_at
         db.commit()
+        return
+    if _is_channel_auth_failure(message):
+        clip.publish_due_at = now + timedelta(
+            minutes=max(1, int(settings.PUBLISH_RETRY_MINUTES)))
+        db.commit()
+        job_error(clip.job_id, "YouTube is not connected: the OAuth token is expired or "
+                               "revoked, so nothing on this channel can publish. Reconnect "
+                               "it in Settings -> YouTube; only a person can do that. "
+                               "No clip lost a retry and the release schedule is untouched.")
         return
     clip.upload_retry_count = (clip.upload_retry_count or 0) + 1
     if clip.upload_retry_count >= max(1, int(settings.MAX_UPLOAD_RETRIES)):
