@@ -4,6 +4,7 @@ Polling-based job processor with comprehensive error handling and logging.
 Uses async/await for Cloud API calls.
 """
 import os
+import unicodedata
 
 # Must run before any import that pulls in loguru: see utils/daemon_streams.py
 from utils.daemon_streams import redirect_daemon_streams
@@ -1793,6 +1794,19 @@ def _ship_clip_to_youtube(db, clip, job, uploader: Optional[Callable], now: date
                             f"no file at {clip.file_path}")
         return {"status": "failed", "code": "missing_file", "error": message}
 
+    blocked = _blocked_script(clip)
+    if blocked is not None:
+        # The clip stays queued and the intent marker is cleared: this is not a
+        # failed upload, so holding it must not look like a publish that vanished
+        # mid-flight, which is what `_resolve_unresolved_attempts` exists to recover.
+        clip.publish_attempt_at = None
+        db.commit()
+        job_warning(job.id, f"Clip #{clip.index} held back: {blocked}. The title, "
+                            f"description and hashtags are what the channel reads, so a "
+                            f"non-Latin character there is a visible defect, not a "
+                            f"metadata one. Edit the copy and click again.")
+        return {"status": "held", "retry_at": clip.publish_due_at, "reason": blocked}
+
     if uploader is None:
         from services.youtube_upload import upload_clip_to_youtube
         uploader = upload_clip_to_youtube
@@ -1854,6 +1868,66 @@ def _ship_clip_to_youtube(db, clip, job, uploader: Optional[Callable], now: date
     from utils.upload_pacing import note_upload
     note_upload("youtube")
     return {"status": "published", "result": res}
+
+
+def _blocked_script(clip) -> Optional[str]:
+    """The script of the copy this clip would be published with, or None when it is fine.
+
+    The gate is about the script, not the language: a Greek title is not a defect, and the
+    generator may write in any Latin or Greek word it likes. It is about the script, because
+    clip 233 went live on a Greek/English channel with a Chinese title and nothing in the
+    pipeline asked what script a published title was in before the upload call. The boundary
+    is what decides what leaves this machine, so the check lives here and not at the
+    generator: a clip an operator edits and re-clicks is still gated, and a clip rendered
+    before this column existed is gated too.
+    """
+    for field in ("title", "description", "hashtags"):
+        values = getattr(clip, field, None)
+        if values is None:
+            continue
+        if field != "hashtags":
+            values = [values]
+        for txt in values:
+            if not txt:
+                continue
+            for ch in txt:
+                code = ord(ch)
+                if ch.isspace() or ch.isdigit():
+                    continue
+                if ch.isascii():
+                    continue
+                if any(lo <= code <= hi for lo, hi in _ALLOWED_SCRIPT_RANGES):
+                    continue
+                category = unicodedata.category(ch)
+                if not category.startswith("L"):
+                    continue
+                name = _LETTER_CATEGORIES.get(category, category.lower())
+                offending = text[:60]
+                return (f"{field} contains a {name} letter: {offending}. The title, "
+                        f"description and hashtags are what the channel reads, so a "
+                        f"non-Latin character there is a visible defect, not a "
+                        f"metadata one. Edit the copy and click again.")
+    return None
+
+
+_LETTER_CATEGORIES = {
+    "Lu": "uppercase", "Ll": "lowercase", "Lt": "titlecase",
+    "Lm": "modifier", "Lo": "other",
+}
+
+
+_ALLOWED_SCRIPT_RANGES = (
+    (0x0041, 0x005A), (0x0061, 0x007F),   # Basic Latin letters
+    (0x00AA, 0x00AA), (0x00BA, 0x00BA),   # ordinal indicator, masculine ordinal
+    (0x0100, 0x024F),                     # Latin Extended-A / B
+    (0x1E00, 0x1EFF),                     # Latin Extended Additional
+    (0x2C60, 0x2C7F),                     # Latin Extended-C
+    (0xA720, 0xA7FF),                     # Latin Extended-D
+    (0xFB00, 0xFB04),                     # Latin ligatures (fi, fl, ...)
+    (0xFF21, 0xFF3A), (0xFF41, 0xFF5A),   # fullwidth Latin
+    (0x0370, 0x03FF),                     # Greek and Coptic
+    (0x1F00, 0x1FFF),                     # Greek Extended
+)
 
 
 def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[Callable] = None) -> int:

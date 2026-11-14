@@ -361,3 +361,71 @@ def test_the_closing_line_comes_from_settings_and_defaults_to_nothing(monkeypatc
     monkeypatch.setattr(settings, "SHORTS_CTA", "New clips twice a day.", raising=False)
     with_cta = format_shorts_metadata("Title", "Body", ["#Shorts"])
     assert "New clips twice a day." in with_cta["description"]
+
+
+# ------------------------------------------------- the script a published title is written in
+# Clip 233 went live on 2026-09-17 with a Chinese title on a Greek/English channel. Nothing
+# in the pipeline checked the script of a title, description or hashtag before the upload
+# call, so a Chinese roll from a free-tier model reached the channel and nothing would have
+# stopped a second one. The gate is at the publish boundary - the one place every clip
+# crosses - not at the generator, because the boundary is what decides what leaves this
+# machine, and an operator can edit a clip and click again there.
+def _blocked_clip(db, *, title, description="A description", hashtags=None):
+    clip = db.query(Clip).filter(Clip.youtube_video_id.is_(None)).first()
+    clip.title = title
+    clip.description = description
+    clip.hashtags = hashtags if hashtags is not None else ["#Shorts"]
+    db.commit()
+    return clip
+
+
+def test_a_clip_with_a_non_latin_title_never_reaches_youtube(db, monkeypatch):
+    """The gate is the boundary, so it stops the upload call rather than the generator."""
+    _job(db, queued=1)
+    _blocked_clip(db, title="当他拿出这盘菌子的时候全场都愣住了")
+    uploader = _Recorder()
+
+    assert worker.publish_queued_clips(db, now=NOW, uploader=uploader) == 0
+    assert uploader.calls == [], "the upload call must never see a foreign-script title"
+
+    waiting = db.query(Clip).filter(Clip.youtube_video_id.is_(None)).one()
+    assert waiting.publish_due_at > NOW, "the clip stays queued, not retired"
+    assert waiting.upload_retry_count == 0, "a title the generator got wrong is not a clip fault"
+
+
+def test_a_greek_title_is_not_blocked_by_the_gate(db):
+    """The gate checks script, not language, so Greek copy still ships."""
+    _job(db, queued=1)
+    _blocked_clip(db, title="Ο καλύτερος τρόπος να μάθεις κάτι")
+    uploader = _Recorder()
+
+    assert worker.publish_queued_clips(db, now=NOW, uploader=uploader) == 1
+    assert len(uploader.calls) == 1
+
+
+def test_the_gate_blocks_the_script_in_any_field_it_reaches(db):
+    """A foreign hashtag is the same defect as a foreign title: the channel reads it."""
+    _job(db, queued=1)
+    _blocked_clip(db, title="A title", hashtags=["#Shorts", "搞笑"])
+    uploader = _Recorder()
+
+    assert worker.publish_queued_clips(db, now=NOW, uploader=uploader) == 0
+    assert uploader.calls == []
+
+
+def test_the_gate_reports_what_was_blocked_and_how_to_fix_it(db, monkeypatch):
+    """A refusal that names the repair is the one an operator will act on."""
+    _job(db, queued=1)
+    _blocked_clip(db, title="当他拿出这盘菌子的时候全场都愣住了")
+    uploader = _Recorder()
+    warnings = []
+    monkeypatch.setattr(worker, "job_warning", lambda jid, msg: warnings.append(msg))
+
+    worker.publish_queued_clips(db, now=NOW, uploader=uploader)
+
+    assert warnings, "a held clip is announced"
+    held = [w for w in warnings if "held back" in w]
+    assert held, warnings
+    assert "当他拿出这盘菌子的时候全场都愣住了" in held[0], \
+        "the message shows the characters it refused, not just a label"
+    assert "edit" in held[0].lower()
