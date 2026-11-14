@@ -32,12 +32,16 @@ export async function checkYouTubeStatus() {
       if (modalHeading) modalHeading.innerHTML = `🟢 Connected Channel: ${escapeHtml(res.channel_name || 'Active')}`;
       if (modalSub) modalSub.textContent = 'Ready to upload shorts instantly!';
     } else {
+      // The panel used to guess from `has_client_secrets` alone, which told an
+      // operator who was connected and then lost the authorization to go "click to
+      // connect" without ever saying that Google had refused the saved token.
+      const reason = res.reason || '';
       if (res.has_client_secrets) {
         if (topbarDot) topbarDot.style.background = '#f59e0b';
         if (topbarLabel) topbarLabel.textContent = 'Connect YouTube';
-        if (bannerText) bannerText.innerHTML = `⚪ <strong>client_secrets.json detected.</strong> Click to connect channel.`;
-        if (modalHeading) modalHeading.textContent = 'Status: Credentials found, authorization needed';
-        if (modalSub) modalSub.textContent = 'Proceed to Step 2 to authorize your YouTube channel.';
+        if (bannerText) bannerText.innerHTML = `⚪ <strong>YouTube not connected:</strong> <span style="color: #f59e0b;">${escapeHtml(reason || 'client_secrets.json detected. Click to connect channel.')}</span>`;
+        if (modalHeading) modalHeading.textContent = 'Status: Credentials found, but the channel is not connected';
+        if (modalSub) modalSub.textContent = reason || 'Proceed to Step 2 to authorize your YouTube channel.';
       } else {
         if (topbarDot) topbarDot.style.background = '#94a3b8';
         if (topbarLabel) topbarLabel.textContent = 'YouTube Setup';

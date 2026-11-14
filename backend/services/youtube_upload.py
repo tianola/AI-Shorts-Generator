@@ -28,15 +28,30 @@ def get_token_path() -> Path:
 
 
 def get_youtube_auth_status() -> Dict[str, Any]:
-    """Check if YouTube OAuth credentials and active token exist."""
+    """Report the channel connection, and say why when it is not there.
+
+    `authenticated: false` alone is three different problems wearing one face: no
+    OAuth client installed, a channel never connected, and a saved authorization
+    Google now refuses. Only the last one arrives by itself - it is the shape that
+    retired job 109's five clips - and it was a warning line in a rotating log.
+    """
     client_secrets = get_client_secrets_path()
     token_file = get_token_path()
 
     has_secrets = client_secrets.exists() and client_secrets.stat().st_size > 0
+    has_token = token_file.exists() and token_file.stat().st_size > 0
     is_authenticated = False
     channel_name = None
 
-    if has_secrets and token_file.exists() and token_file.stat().st_size > 0:
+    if not has_secrets:
+        reason = ("client_secrets.json is missing, so there is no OAuth client to ask "
+                  "Google with. Download it from Google Cloud Console and add it in "
+                  "Settings -> YouTube.")
+    elif not has_token:
+        reason = ("This channel has never been authorized on this machine. Connect it "
+                  "in Settings -> YouTube.")
+    else:
+        reason = None
         try:
             from google.oauth2.credentials import Credentials
             from googleapiclient.discovery import build
@@ -59,14 +74,29 @@ def get_youtube_auth_status() -> Dict[str, Any]:
                 items = resp.get("items", [])
                 if items:
                     channel_name = items[0]["snippet"].get("title")
+            else:
+                reason = ("Google returned no usable access token for the saved "
+                          "authorization. Reconnect the channel in Settings -> YouTube.")
         except Exception as e:
             job_warning(0, f"YouTube auth check warning: {e}")
             is_authenticated = False
+            detail = str(e)
+            if any(marker in detail.lower() for marker in
+                   ("invalid_grant", "token has been expired or revoked")):
+                reason = (f"Google refused the saved authorization ({detail}). The refresh "
+                          "token is expired or revoked Google-side, so no retry, restart or "
+                          "code change can renew it - reconnect the channel in "
+                          "Settings -> YouTube.")
+            else:
+                reason = (f"The saved authorization could not be checked ({detail}). "
+                          "This is not a revocation; if it keeps happening, reconnect the "
+                          "channel in Settings -> YouTube.")
 
     return {
         "has_client_secrets": has_secrets,
         "authenticated": is_authenticated,
         "channel_name": channel_name or ("Connected Channel" if is_authenticated else None),
+        "reason": reason,
         "client_secrets_path": str(client_secrets.resolve()),
         "token_path": str(token_file.resolve()),
     }
@@ -284,7 +314,9 @@ def upload_clip_to_youtube(
 
     status = get_youtube_auth_status()
     if not status["authenticated"]:
-        raise PermissionError("YouTube account is not authenticated. Please connect your YouTube account first.")
+        raise PermissionError(
+            "YouTube account is not authenticated. "
+            + (status.get("reason") or "Connect the channel in Settings -> YouTube first."))
 
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
@@ -425,7 +457,9 @@ def upload_all_clips_for_job(
 
     status = get_youtube_auth_status()
     if not status["authenticated"]:
-        raise PermissionError("YouTube account is not connected. Please connect your YouTube account in settings first.")
+        raise PermissionError(
+            "YouTube account is not authenticated. "
+            + (status.get("reason") or "Connect the channel in Settings -> YouTube first."))
 
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
