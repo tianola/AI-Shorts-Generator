@@ -80,6 +80,27 @@ def test_a_focus_hidden_inside_one_shot_still_holds_its_position():
     assert trajectory[0][1] == trajectory[1][1]
 
 
+def test_before_the_focus_appears_the_crop_follows_who_is_on_screen():
+    """Job 112 clip 7: the narrator's voice was bound to a figure that first shows
+    up 6 s in, at the right edge. The crop sat there from frame one and cut the
+    presenter, who was talking in the centre, out of his own intro."""
+    centre = (660, 30, 600, 1000)
+    samples = [(i * 0.5, [_person(centre)]) for i in range(12)] + \
+              [(6.0 + i * 0.5, [_person(RIGHT)]) for i in range(6)]
+    focus = [(6.0 + i * 0.5, RIGHT) for i in range(6)]
+
+    trajectory = focus_tracking.compute_smooth_yolo_trajectory(
+        samples, SRC_W, SRC_H, focus_boxes=focus)
+
+    crop_w = trajectory[0][3]
+    centre_x = centre[0] + centre[2] / 2
+    x_intro = _crop_x_at(trajectory, 1.0)
+    assert x_intro <= centre_x <= x_intro + crop_w, "the presenter is outside the opening crop"
+    right_x = RIGHT[0] + RIGHT[2] / 2
+    x_later = _crop_x_at(trajectory, 7.0)
+    assert x_later <= right_x <= x_later + crop_w, "the focus is followed once it appears"
+
+
 def test_people_staying_in_place_are_not_a_shot_change():
     assert not focus_tracking._is_shot_change([LEFT], [(210, 205, 400, 800)])
     assert focus_tracking._is_shot_change([LEFT], [RIGHT])

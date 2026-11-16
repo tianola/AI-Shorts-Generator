@@ -337,6 +337,71 @@ def _get_caption_font(style: CaptionPreset):
         return None
 
 
+def _caption_gaps(widths: List[float], space_w: float, style: CaptionPreset) -> List[float]:
+    """Gap after each word but the last, wide enough for the active word's pop.
+
+    The active word scales about its centre to pop_scale, so it grows by
+    (pop_scale - 1) * width / 2 on each side, plus one pixel of extra outline.
+    A fixed 1.5-space gap let long words like VENTURE or REGULATION cover their
+    neighbours on job 112 ("WASVENTURE", "ANDTHEREFORE"). Only one word pops at
+    a time, so each gap needs room for the wider of its two neighbours.
+    """
+    growth = max(0.0, (float(style.pop_scale) / 100.0) - 1.0) if style.jump else 0.0
+    pad = 2.0 * (float(style.outline) + 1.0)
+    gaps = []
+    for i in range(len(widths) - 1):
+        overhang = growth * max(widths[i], widths[i + 1]) / 2.0
+        gaps.append(space_w + overhang + pad)
+    return gaps
+
+
+def _display_word(word: Dict, style: CaptionPreset) -> str:
+    """The text a caption word is drawn as (case, emoji), before ASS escaping."""
+    raw_word = str(word.get("word", word.get("text", "")) or "").strip()
+    if style.uppercase:
+        from services.motion_title import _headline_upper
+        raw_word = _headline_upper(raw_word)
+    if style.add_emojis:
+        raw_word = inject_emojis(raw_word)
+    return raw_word
+
+
+def _available_width(style: CaptionPreset) -> float:
+    return 1080.0 - style.margin_l - style.margin_r
+
+
+def _block_metrics(texts: List[str], style: CaptionPreset):
+    """(widths, gaps, lead, tail) of a caption block at the preset's full size."""
+    font = _get_caption_font(style)
+    if font and hasattr(font, "getlength"):
+        widths = [font.getlength(t) if t else 0.0 for t in texts]
+        space_w = font.getlength(" ")
+    else:
+        # Approximate measurement fallback
+        widths = [len(t) * (style.font_size * 0.52) for t in texts]
+        space_w = style.font_size * 0.30
+    gaps = _caption_gaps(widths, space_w, style)
+    # The first and last word pop outward too; keep that inside the margins.
+    growth = max(0.0, (float(style.pop_scale) / 100.0) - 1.0) if style.jump else 0.0
+    lead = growth * widths[0] / 2.0 if widths else 0.0
+    tail = growth * widths[-1] / 2.0 if widths else 0.0
+    return widths, gaps, lead, tail
+
+
+# A group may shrink this far to keep a second word on the line; beyond it the
+# word moves to the next group. At 1.0 the big presets showed mostly one word
+# per line; with no floor job 113 drew three-word groups at about half size.
+MIN_GROUP_FIT = 0.85
+
+
+def _block_fits(words: List[Dict], style: CaptionPreset) -> bool:
+    """True when these words fit one caption line, pops included, shrinking at most to MIN_GROUP_FIT."""
+    if not words:
+        return True
+    widths, gaps, lead, tail = _block_metrics([escape_ass(_display_word(w, style)) for w in words], style)
+    return (sum(widths) + sum(gaps) + lead + tail) * MIN_GROUP_FIT <= _available_width(style)
+
+
 def create_caption_block(
     words: List[Dict],
     style: CaptionPreset = DEFAULT_STYLE
@@ -361,51 +426,33 @@ def create_caption_block(
     block_start = float(words[0].get("start", words[0].get("start_time", 0.0)))
     block_end = float(words[-1].get("end", words[-1].get("end_time", block_start + 0.5)))
 
-    # Pre-process word strings
-    processed_words = []
-    for w in words:
-        raw_word = w.get("word", w.get("text", "")).strip()
-        if style.uppercase:
-            from services.motion_title import _headline_upper
-            raw_word = _headline_upper(raw_word)
-        if style.add_emojis:
-            raw_word = inject_emojis(raw_word)
-        word_escaped = escape_ass(raw_word)
-        processed_words.append(word_escaped)
-
+    processed_words = [escape_ass(_display_word(w, style)) for w in words]
     num_words = len(words)
-    font = _get_caption_font(style)
 
     # Calculate exact horizontal center coordinates for each word with natural inter-word spacing
     y_base = 1920 - style.margin_v  # default ~1480px in 1080x1920 space
-    if font and hasattr(font, "getlength"):
-        widths = [font.getlength(pw) if pw else 0.0 for pw in processed_words]
-        # Wider than a text space: the active word grows by pop_scale and would
-        # otherwise touch its neighbours.
-        space_w = font.getlength(" ") * 1.5
-    else:
-        # Approximate measurement fallback
-        widths = [len(pw) * (style.font_size * 0.52) for pw in processed_words]
-        space_w = style.font_size * 0.30
-
-    total_w = sum(widths) + (num_words - 1) * space_w
+    widths, gaps, lead, tail = _block_metrics(processed_words, style)
+    total_w = sum(widths) + sum(gaps)
     # Large type is the point, but a long group must still fit between the
     # margins: shrink that one block rather than let it run off the frame.
-    available_w = 1080.0 - style.margin_l - style.margin_r
-    fit = min(1.0, available_w / total_w) if total_w > 0 else 1.0
+    available_w = _available_width(style)
+    span = total_w + lead + tail
+    fit = min(1.0, available_w / span) if span > 0 else 1.0
     if fit < 1.0:
         widths = [width * fit for width in widths]
-        space_w *= fit
+        gaps = [gap * fit for gap in gaps]
         total_w *= fit
+        lead *= fit
+        tail *= fit
     fs_tag = "\\fs" + str(_ass_font_size(style, fit))
-    start_x = max((1080.0 - total_w) / 2.0, float(style.margin_l))
+    start_x = max((1080.0 - (total_w + lead + tail)) / 2.0 + lead, float(style.margin_l) + lead)
 
     word_centers = []
     curr_x = start_x
     for i in range(num_words):
         cx = curr_x + widths[i] / 2.0
         word_centers.append(cx)
-        curr_x += widths[i] + space_w
+        curr_x += widths[i] + (gaps[i] if i < len(gaps) else 0.0)
 
     events = []
 
@@ -498,11 +545,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 def _group_words_by_natural_phrasing(
     words: List[Dict],
     max_group_size: int = 5,
-    max_chars: int = 30
+    max_chars: int = 30,
+    style: Optional[CaptionPreset] = None,
 ) -> List[List[Dict]]:
     """
     Group words dynamically into punchy 4-5 word phrases (or 3-4 if words are long),
     respecting word character limits (24-32 char cap, default 30), punctuation, and natural speech pauses.
+
+    With ``style`` a word also starts a new group when it would not fit on the
+    line at full size: job 113 shrank "VALENTINE INITIALLY PASSES." to fit
+    rather than carry the last word over, and long groups became hard to read.
     """
     if not words:
         return []
@@ -517,7 +569,9 @@ def _group_words_by_natural_phrasing(
         added_len = word_len if not current_group else (1 + word_len)
 
         # If adding this word exceeds character limit (24-32 char cap) and we already have 3+ words, break
-        if current_group and (current_chars + added_len > max_chars) and len(current_group) >= 3:
+        too_wide = bool(style is not None and current_group
+                        and not _block_fits(current_group + [item], style))
+        if current_group and (too_wide or ((current_chars + added_len > max_chars) and len(current_group) >= 3)):
             groups.append(current_group)
             current_group = []
             current_chars = 0
@@ -564,6 +618,28 @@ def _group_words_by_natural_phrasing(
         groups.append(current_group)
 
     return groups
+
+
+# Only tails that cannot start a word of their own: "1990" "2000" stay two words.
+_NUMBER_TAIL = re.compile(r"^[.,]\d|^%")
+_HYPHEN_TAIL = re.compile(r"^-\w")
+
+
+def _continues_number(previous: str, token: str) -> bool:
+    """True when `token` is the rest of the word `previous` ends with.
+
+    Whisper's tokens split "300,000" into "300" ",000", "3.5" into "3" ".5" and
+    "face-to-face" into "face" "-to" "-face"; job 112 showed them as "300 ,000"
+    and "FACE -TO -FACE".
+    """
+    prev = str(previous or "").rstrip()
+    tok = str(token or "")
+    if not prev or tok[:1].isspace():
+        return False
+    tok = tok.strip()
+    if prev[-1].isdigit() and _NUMBER_TAIL.match(tok):
+        return True
+    return prev[-1].isalnum() and bool(_HYPHEN_TAIL.match(tok))
 
 
 def create_captions(
@@ -636,6 +712,13 @@ def create_captions(
         if end <= start:
             continue
 
+        # Whisper splits numbers into tokens: "300" ",000", "$3" ".5", "10" "%".
+        # Shown as words they read "300 ,000"; glue them back onto the number.
+        if clean_words and _continues_number(clean_words[-1]["word"], word):
+            clean_words[-1]["word"] = clean_words[-1]["word"].rstrip() + str(word).strip()
+            clean_words[-1]["end"] = end
+            continue
+
         clean_words.append({
             "word": word,
             "start": start,
@@ -647,7 +730,7 @@ def create_captions(
         style.font_name = GREEK_CAPABLE_FONT
 
     # Group words cleanly using natural phrasing (3-5 words default)
-    word_groups = _group_words_by_natural_phrasing(clean_words, max_group_size=group_size)
+    word_groups = _group_words_by_natural_phrasing(clean_words, max_group_size=group_size, style=style)
     events = []
     for block in word_groups:
         if block:

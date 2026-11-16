@@ -94,6 +94,19 @@ class Settings(BaseSettings):
         description="Directory holding OpenAI-whisper .pt checkpoints for the "
                     "'local_pt_<name>' transcription backend"
     )
+    # Misheard names in captions ("THE TRADERS ATE" for the Traitorous Eight on
+    # job 112) are corrected per clip by a model reading the words in context;
+    # whisper small/medium made the same mistakes. On job 112's clip words only
+    # free/best found the name: agnes-3.0-flash (free/shorts' live member) and
+    # gemma answered in prose, codestral/laguna echoed every word.
+    CAPTION_FIX_ENABLED: bool = Field(
+        default=True,
+        description="Correct misheard names in each clip's words before captioning"
+    )
+    CAPTION_FIX_MODEL: str = Field(
+        default="free/best",
+        description="OmniRoute model or combo for caption name correction"
+    )
 
     # ====================
     # FALLBACK LLM PROVIDERS

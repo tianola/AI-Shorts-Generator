@@ -120,6 +120,10 @@ def detect_objects_in_frame(frame: np.ndarray, conf: float = 0.25) -> list:
         return []
 
 
+# At or above this spacing, seeking to each sample beats decoding every frame.
+SEEK_SAMPLE_INTERVAL = 2.0
+
+
 def sample_frames(video_path: str, sample_interval: float = 0.5) -> list:
     """Sample frames and return [(timestamp, [{cls,name,conf,box}...]), ...]."""
     cap = cv2.VideoCapture(video_path)
@@ -131,6 +135,23 @@ def sample_frames(video_path: str, sample_interval: float = 0.5) -> list:
     frame_interval = max(1, int(fps * sample_interval))
     results = []
     count = 0
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if sample_interval >= SEEK_SAMPLE_INTERVAL and n_frames > 0:
+        # grab() still decodes each frame: the whole-source sweep (one sample per
+        # 11.4 s of job 112's 46 min source) decoded all ~82k frames to keep 240,
+        # about 11 of its 16 minutes. A seek decodes one GOP per sample.
+        try:
+            for index in range(0, n_frames, frame_interval):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                dets = detect_objects_in_frame(frame, conf=0.25)
+                dets.sort(key=lambda d: (d["cls"] != 0, -d["conf"]))
+                results.append((index / fps, dets))
+        finally:
+            cap.release()
+        return results
     try:
         while True:
             if count % frame_interval == 0:
@@ -230,7 +251,12 @@ def compute_smooth_yolo_trajectory(
     points = []
     focus_map = {round(float(ts), 4): box for ts, box in (focus_boxes or [])}
     last_person_boxes: list = []
-    cut_since_focus = False
+    # Until the focus first shows up there is no position of it to hold, so
+    # follow whoever is on screen. Starting at False parked the crop, for the
+    # opening shots, where the focus would appear seconds later: job 112 clip 7
+    # cut the presenter out of his own 6 s intro to wait for a figure at the
+    # right edge of a later shot.
+    cut_since_focus = True
     for ts, dets in samples:
         person_boxes = [d["box"] for d in dets if d["cls"] == 0]
         is_cut = _is_shot_change(last_person_boxes, person_boxes)

@@ -35,6 +35,10 @@ atexit.register(shutil.rmtree, _LOG_DIR, ignore_errors=True)
 # send transcripts to the paid API. An environment variable outranks .env, so an
 # empty one here keeps every run on the fakes.
 os.environ["ANTHROPIC_API_KEY"] = ""
+# The render loop corrects caption names with a real OmniRoute call per clip; a
+# worker test that drives the loop would wait on the live gateway for each clip.
+# test_caption_name_fix.py exercises the correction against a fake.
+os.environ["CAPTION_FIX_ENABLED"] = "false"
 
 import pytest
 

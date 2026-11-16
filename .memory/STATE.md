@@ -22,6 +22,16 @@
 - Scripts: scratchpad `bench.py`, `rank.py`, `write_combo.py` (not in repo). Tests 791 passed.
 - OmniRoute keys live outside the repo (Qoder `draft_secrets.txt`); never copy them into project files.
 
+## Done 2026-11-16 (afternoon, uncommitted; worker service NOT restarted - UAC denied twice)
+- Committed earlier work as 953c8ed. Services restarted 12:57.
+- ffmpeg: `utils/env_check.ensure_media_tools_on_path` finds FFmpeg in `C:\Users\*\AppData\Local\Microsoft\WinGet\{Packages\*FFmpeg*\*\bin,Links}` (LocalSystem PATH lacks it) or `FFMPEG_DIR`. Backend self-restarts on idle; confirmed finding ffmpeg 14:07.
+- Test run: job 112 (fwW3XVFrm9c, 46 min source, 10 `ai` clips, 33 min) via service; job 113 same URL via own process (`queued` status, scratchpad run_job.py) with new code, 37 min, OK.
+- Captions: active-word pop overlapped neighbours ("WASVENTURE") -> per-gap width from pop growth (`_caption_gaps`), end overhang kept inside margins; groups break by pixel width (`_block_fits`, `MIN_GROUP_FIT=0.85`); number/hyphen tokens glued (",000", ".5", "%", "-to").
+- Caption names: new `services/caption_fix.py` + `CAPTION_FIX_ENABLED`/`CAPTION_FIX_MODEL=free/best`; LLM returns index->word fixes, similarity/homophone gate, <=25% edits, keeps punctuation; runs as task beside scene attention, 120 s cap; part of clip_words cache key. Whisper tiny..medium all wrote "Traders 8"; free/best fixes it, agnes/gemma/codestral/laguna useless for this. Tests force it off (conftest).
+- Focus: `compute_smooth_yolo_trajectory` starts with `cut_since_focus=True` -> before the focus track appears, follow who is on screen (job 112 clip 7 cut the presenter out for 6 s; narrator voice bound to a later track).
+- `sample_frames` seeks when interval >= 2 s (temporal sweep decoded all frames: ~11 of 16 min).
+- Tests 806 passed, ruff clean.
+
 ## Known state
 - Free OmniRoute models are in 429 cooldown until ~2026-11-21 → job 111 got grid clips and transcript-derived titles. Root cause of "bad titles".
 - `ANTHROPIC_API_KEY` not set in `backend/.env` yet. No real Claude call has been made.

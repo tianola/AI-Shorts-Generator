@@ -793,6 +793,20 @@ async def stage_diarize(job_id: int, job_dir: Path, video_path: str, clips: list
     return turns
 
 
+async def _fix_caption_names(job_dir, clip_words_file: str) -> int:
+    """Correct misheard names in one clip's words, with the source's title and tags as context."""
+    from services.caption_fix import fix_clip_words
+    title, tags = "", []
+    try:
+        with open(os.path.join(str(job_dir), "meta.json"), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        title = meta.get("title") or ""
+        tags = meta.get("tags") or []
+    except Exception:
+        pass
+    return await fix_clip_words(clip_words_file, title=title, tags=tags)
+
+
 async def stage_scene_attention(job_id: int, clip_dir, short_path: str, clip_words_file: str,
                                  clip_transcript: str) -> Optional[dict]:
     """What each scene of this clip is about, for the reframe decision.
@@ -987,11 +1001,23 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # cleanup keeps, which is exactly why an existence check here silently
         # reused the previous selection's text (job 110).
         clip_words_file = os.path.join(str(clip_dir), "words.json")
+        name_fix_task = None
+        name_fix_model = (settings.CAPTION_FIX_MODEL or "default") \
+            if getattr(settings, "CAPTION_FIX_ENABLED", False) else None
+        words_key = {"window": clip_window,
+                     "transcript": derived_cache.input_fingerprint(words_file)}
+        if name_fix_model:
+            # Part of the key so words cropped before the correction existed are
+            # re-cropped and corrected instead of being reused as they were.
+            words_key["name_fix"] = name_fix_model
         if ensure_derived(job_id, clip_words_file, "clip_words",
                           lambda: crop_words(words_file, clip_start, clip_end, clip_words_file),
-                          {"window": clip_window,
-                           "transcript": derived_cache.input_fingerprint(words_file)}):
+                          words_key):
             job_info(job_id, f"Words cropped: {clip_words_file}")
+            # Runs alongside scene attention (a ~25 s model call of its own) and is
+            # awaited just before the captions are built from these words.
+            if name_fix_model:
+                name_fix_task = asyncio.create_task(_fix_caption_names(job_dir, clip_words_file))
         else:
             job_info(job_id, f"Words already cropped for [{clip_window[0]:.1f}s - "
                              f"{clip_window[1]:.1f}s]: {clip_words_file}")
@@ -1034,6 +1060,15 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # too, so a window change that rebuilt words.json rebuilds the captions
         # even if the style and the index are untouched.
         captions_path = os.path.join(str(clip_dir), "captions.ass")
+        if name_fix_task is not None:
+            try:
+                # free/best took 14-85 s per clip on job 112; past this the clip
+                # keeps Whisper's words rather than holding up the render.
+                fixed = await asyncio.wait_for(name_fix_task, timeout=120)
+                if fixed:
+                    job_info(job_id, f"Caption names corrected: {fixed} word(s) in clip {index + 1}")
+            except Exception as e:
+                job_warning(job_id, f"Caption name correction skipped ({e})")
         if ensure_derived(job_id, captions_path, "captions",
                           lambda: create_captions(clip_words_file, captions_path,
                                                   style_name=caption_style),
