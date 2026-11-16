@@ -168,12 +168,16 @@ def test_no_fallbacks_configured_means_the_head_only(monkeypatch):
 #                                 re-resolves upstream per call - the thing the pin
 #                                 removed from the head, so it does not come back
 #                                 through the fallbacks either.
+# The free-only priority chains on the local OmniRoute (2026-11-16): free/shorts,
+# built for clip selection from a 38-model benchmark on job 111's prompts, then
+# the general free/best (5 model-picked clips in 70 s on job 111).
 MEASURED_CHAIN = [
-    "agy/gemini-3-flash",
-    "agy/gemini-3.1-flash-lite",
-    "antigravity/gemini-3.1-flash-lite",
+    "free/shorts",
+    "free/best",
 ]
-COMBO_PREFIXES = ("auto/", "free/", "best/")
+# auto/* resolves to an arbitrary upstream per call: auto/best-free timed out on
+# the job 111 prompt, and an earlier auto/* resolution cost job 110 its selection.
+COMBO_PREFIXES = ("auto/", "best/")
 
 
 def _defaults(monkeypatch):
@@ -185,13 +189,39 @@ def _defaults(monkeypatch):
     return fresh
 
 
-def test_the_default_chain_names_concrete_models_only(monkeypatch):
+def test_the_default_chain_has_no_auto_routed_combo(monkeypatch):
     _defaults(monkeypatch)
     for leg in llm_router.omniroute_chain():
         assert not leg.startswith(COMBO_PREFIXES), (
             f"{leg!r} is a gateway combo, not a model: every call would resolve to "
             f"a different upstream, which is how job 110 lost its selection."
         )
+
+
+def test_the_text_block_of_a_thinking_reply_is_the_answer():
+    content = [
+        {"type": "thinking", "thinking": "considering the windows..."},
+        {"type": "text", "text": '{"clips": []}'},
+    ]
+    assert llm_router._json_object_in(content) == '{"clips": []}'
+    assert llm_router._json_object_in([{"type": "thinking", "thinking": "{not this}"}]) == ""
+
+
+@pytest.mark.asyncio
+async def test_the_omniroute_selection_call_leaves_room_for_reasoning(monkeypatch):
+    """nemotron-3-ultra returned no JSON at 3500 tokens and ten windows at 12000."""
+    from services import clip_selector
+
+    seen = {}
+
+    async def fake_llm(prompt, system, model=None, temperature=0.4, max_tokens=2000):
+        seen["max_tokens"] = max_tokens
+        return '{"clips": []}'
+
+    monkeypatch.setattr(clip_selector, "call_llm_json", fake_llm)
+    _, path = await clip_selector._selection_model_json("p", {}, 3500)
+    assert path == "ai"
+    assert seen["max_tokens"] >= 12000
 
 
 def test_the_default_chain_is_the_measured_one(monkeypatch):

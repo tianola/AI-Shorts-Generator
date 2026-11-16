@@ -12,7 +12,7 @@ from unittest.mock import patch
 from services.clip_selector import (
     _audio_dynamics_score,
     _composite_score,
-    _composite_score_v2,
+    _selection_score,
     select_clips,
 )
 
@@ -58,7 +58,7 @@ def test_audio_energy_prepass_enrichment_in_composite_score():
     weight (clip_selector _composite_score_v2) — while the mean is still
     stored as audio_energy_score for the UI breakdown. So the threshold
     assertion went stale, not the enrichment: the pre-pass still moves the
-    score, through the renamed channel. That is what this pins — a change of
+    score, through the renamed channel (now _selection_score, same 10% weight). That is what this pins — a change of
     either channel re-breaks it.
     """
     sample_segments = [
@@ -81,9 +81,10 @@ def test_audio_energy_prepass_enrichment_in_composite_score():
     expected_dynamics = _audio_dynamics_score([0.85, 0.90])
     assert clip["audio_dynamics"] == pytest.approx(expected_dynamics)
 
-    # The composite is exactly _composite_score_v2 over the stored signals
-    # (nothing after line 555 mutates virality_score).
-    recomputed = _composite_score_v2({**clip, "virality_score": clip["llm_score_raw"]})
+    # The ranking score is exactly _selection_score over the stored signals: the
+    # model's rating plus the language-independent measurements. The English
+    # keyword/hook/emotion terms of _composite_score_v2 no longer rank model picks.
+    recomputed = _selection_score(clip)
     assert clip["virality_score"] == pytest.approx(recomputed)
 
     # And the enrichment genuinely moves the score: the difference against the

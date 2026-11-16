@@ -1100,10 +1100,16 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # burned into every frame while the database held the real title.
         job_info(job_id, "Generating metadata...")
         clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
+        # A model pick keeps the selector's headline: it was written with the whole
+        # video in view and ranked on it. The diagnostic arms carry a bracketed
+        # test label in the title, which must not be burned in as-is.
+        from services.clip_selector import MODEL_SELECTION_PATHS
         metadata = await generate_metadata(
             clip_transcript,
             clip.get("title", ""),
-            clip.get("hook", "")
+            clip.get("hook", ""),
+            keep_title=(clip.get("selection_path") in MODEL_SELECTION_PATHS
+                        and not clip.get("hook_style")),
         )
         final_title = metadata.get("title") or clip.get("title") or ""
 
@@ -1338,6 +1344,13 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                 "keyword": clip.get("keyword_score"),
                 "density": clip.get("semantic_density"),
                 "structural": clip.get("structural_score"),
+                # Where the window came from and what the second pass said about
+                # it. The publish queue reads selection_path: only a model pick
+                # goes out unattended.
+                "selection_path": clip.get("selection_path"),
+                "judge": clip.get("judge_score"),
+                "judge_reason": clip.get("judge_reason"),
+                "why": clip.get("why"),
             },
             "file_path": relative_final_path,
             "thumbnail_path": relative_thumbnail_path,
@@ -1366,7 +1379,11 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # handed as publishAt, so the cadence the channel is seen with holds even
         # while this PC is off.
         # =========================================================
-        if getattr(job, "auto_upload", False):
+        if getattr(job, "auto_upload", False) and _needs_review_before_publish(clip_db):
+            job_warning(job_id, f"Clip {index + 1} was not chosen by a model "
+                                f"(selection path: {clip.get('selection_path')}); it is rendered "
+                                f"but not published automatically. Review it and press upload.")
+        elif getattr(job, "auto_upload", False):
             try:
                 if clip_db.youtube_video_id:
                     job_info(job_id, f"Clip {index + 1} already on YouTube ({clip_db.youtube_video_id}), skipping")
@@ -1567,7 +1584,19 @@ def next_release_slot(db, now: Optional[datetime] = None,
     return _snap_into_release_window(candidate)
 
 
-def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None) -> int:
+# Selection paths that are not a model's choice: the transcript-heuristic filler
+# and the evenly spaced grid the selector emits when every LLM is down.
+UNREVIEWED_SELECTION_PATHS = ("heuristic", "grid")
+
+
+def _needs_review_before_publish(clip) -> bool:
+    """True for a clip no model chose, which must not publish unattended."""
+    breakdown = clip.score_breakdown if isinstance(clip.score_breakdown, dict) else {}
+    return breakdown.get("selection_path") in UNREVIEWED_SELECTION_PATHS
+
+
+def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None,
+                              include_unreviewed: bool = False) -> int:
     """Park every rendered clip of a job in the publish queue.
 
     Two clocks are written per clip: publish_due_at is when this machine uploads
@@ -1578,6 +1607,11 @@ def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None) -
     afternoon and be refused before half of them ever had a turn.
     Idempotent: a clip that already waits keeps the slot it was given, and one
     that already has a video id is finished. Returns how many rows were added.
+
+    A clip the selector did not get from a model (see UNREVIEWED_SELECTION_PATHS)
+    is left out unless include_unreviewed is set, which only the operator's own
+    "upload" request does. Those windows exist so an LLM outage still renders
+    something to look at; queued automatically they put filler on the channel.
     """
     now = now or datetime.utcnow()
     source_url = db.query(Job.youtube_url).filter(Job.id == job_id).scalar()
@@ -1586,6 +1620,13 @@ def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None) -
         Clip.publish_due_at.is_(None),
         or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
     ).order_by(Clip.index.asc()).all()
+    if not include_unreviewed:
+        unreviewed = [clip for clip in pending if _needs_review_before_publish(clip)]
+        if unreviewed:
+            pending = [clip for clip in pending if clip not in unreviewed]
+            job_warning(job_id, "Not queued automatically (no model chose these windows): clip "
+                                + ", ".join(f"#{clip.index}" for clip in unreviewed)
+                                + ". Review them and press upload to publish.")
     # A row parked before the release clock existed has a due time and no slot.
     # Left that way it uploads unscheduled, i.e. public the instant the queue
     # reaches it, so the backlog gets slots continuing after the new ones.
@@ -1902,7 +1943,7 @@ def _blocked_script(clip) -> Optional[str]:
                 if not category.startswith("L"):
                     continue
                 name = _LETTER_CATEGORIES.get(category, category.lower())
-                offending = text[:60]
+                offending = str(txt)[:60]
                 return (f"{field} contains a {name} letter: {offending}. The title, "
                         f"description and hashtags are what the channel reads, so a "
                         f"non-Latin character there is a visible defect, not a "
@@ -2065,7 +2106,7 @@ def publish_clips_of_job_for_operator(db, job_id: int, *, uploader: Optional[Cal
     if not clips:
         raise ValueError(f"No clips found for Job {job_id}")
 
-    enqueue_clips_for_publish(db, job_id, now=now)
+    enqueue_clips_for_publish(db, job_id, now=now, include_unreviewed=True)
 
     results = []
     counts = {"uploaded": 0, "queued": 0, "failed": 0, "skipped": 0}
@@ -2148,6 +2189,14 @@ async def stage_publish_all_clips(job_id: int, db: Session, job: Job, tiktok_pri
 
             # Auto upload to TikTok
             try:
+                # The sweep publishes every clip of the job on the spot and has no
+                # per-clip filter, so it does not run when the job holds a window
+                # no model chose. The per-clip step already sent the model picks.
+                unreviewed = [c.index for c in db.query(Clip).filter(Clip.job_id == job_id).all()
+                              if _needs_review_before_publish(c)]
+                if unreviewed:
+                    raise RuntimeError(
+                        f"skipped: clip(s) {unreviewed} were not chosen by a model and need review")
                 from services.tiktok_upload import upload_all_clips_to_tiktok_for_job
                 job_info(job_id, f"Auto-uploading to TikTok as '{tiktok_privacy}'...")
                 upload_all_clips_to_tiktok_for_job(job_id, db, privacy_level=tiktok_privacy,

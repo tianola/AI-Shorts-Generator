@@ -43,7 +43,9 @@ SPEECH_RATIO_MIN = 0.10          # a conversation is mostly talking
 VOICE_FLOOR_RMS = 0.02           # ≈ -34 dBFS: below this nobody is audible
 MOTION_DOMINANCE_RATIO = 1.7     # head motion of the talker over the listener
 MIN_HEAD_MOTION = 0.004          # below this both are just JPEG/cut noise
-MIN_SPEAKER_SHARE = 0.30         # both voices of a conversation carry this much talk time
+MIN_SPEAKER_SHARE = 0.20         # both voices of a conversation carry this much talk time
+                                 # (0.30 kept a 70/30 exchange on one face; in a 25 s clip
+                                 # 0.20 is still five seconds of the second voice, not an "mm-hm")
 MIN_BINDING_PRESENCE = 0.50      # a voice's own picture is on screen most of its turns
 BINDING_DOMINANCE = 1.3          # ...and clearly ahead of the runner-up track
 ATTENTION_MIN_IMPORTANCE = 0.6   # the narration must be clearly about the thing

@@ -17,6 +17,12 @@ T = TypeVar("T", bound=BaseModel)
 # clip selection to a single ReadTimeout. Two is the smallest number that helps.
 TRANSPORT_ATTEMPTS = 2
 
+# Read timeout for one OmniRoute call. The free combos (free/best, free/coding)
+# fall through their members server-side with a 120 s first-output budget each, so
+# a 120 s client timeout gave up at the exact moment the combo moved to its next
+# member. 300 s lets the combo try a second member inside one call.
+OMNIROUTE_TIMEOUT_SECONDS = 300.0
+
 def _extract_json_text(text: str) -> str:
 	"""Helper to extract JSON text from raw LLM output."""
 	text = text.strip()
@@ -65,7 +71,17 @@ def _json_object_in(content) -> str:
 	`_extract_json_text` hands its input back unchanged when there are no braces,
 	so a bare refusal used to count as a successful answer. Under a chain that test
 	decides whether to hop to the next model, so it has to mean what it says.
+
+	A thinking model behind a combo can answer with a content array
+	([{"type": "thinking", ...}, {"type": "text", "text": "{...}"}]) instead of a
+	string; job 110 lost its selection to that shape. The text blocks are the answer.
 	"""
+	if isinstance(content, list):
+		content = "".join(
+			str(block.get("text") or "")
+			for block in content
+			if isinstance(block, dict) and block.get("type") in ("text", "output_text")
+		)
 	if not isinstance(content, str) or "{" not in content:
 		return ""
 	return _extract_json_text(content)
@@ -191,7 +207,7 @@ async def call_llm_json(
 
 				for attempt in range(1, TRANSPORT_ATTEMPTS + 1):
 					try:
-						async with httpx.AsyncClient(timeout=120.0) as client:
+						async with httpx.AsyncClient(timeout=OMNIROUTE_TIMEOUT_SECONDS) as client:
 							response = await client.post(
 								f"{base_url}/chat/completions",
 								headers={

@@ -132,9 +132,11 @@ async def test_a_truncated_selection_reply_still_ships_the_ai_windows(monkeypatc
 
         result = await clip_selector.select_clips(segments_file.name, num_clips=10)
 
+        # A window is moved onto a transcript boundary when one is within a second
+        # of the model's timestamp, so a kept clip is one that starts near its pick.
         starts = [round(c["start"], 1) for c in result]
         for expected in _ai_starts(7):
-            assert round(expected, 1) in starts, (
+            assert any(abs(start - expected) <= 1.0 for start in starts), (
                 f"the model finished a clip at {expected}s and the run dropped it; starts={starts}"
             )
 

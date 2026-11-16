@@ -10,7 +10,7 @@ from config import settings
 from services.llm_router import call_llm_structured
 
 class ClipMetadata(BaseModel):
-    title: str = Field(..., description="Under 55 chars, names one concrete element of this clip; no hashtags, no emojis, no generic hype")
+    title: str = Field(..., description="Under 45 chars; teases the most surprising concrete thing in this clip without giving the answer away; true to the clip; no hashtags, no emojis")
     description: str = Field(..., description="2-3 sentences of real context for this clip, then one call to action")
     hashtags: List[str] = Field(default_factory=lambda: ["#Shorts"], description="3-5 niche-specific tags starting with #Shorts; never #Viral/#Trending/#FYP")
     story_type: str = Field(default="reaction", description="question_answer|reveal|challenge|emotion|lesson|reaction")
@@ -70,7 +70,8 @@ def derive_title_from_text(text: str, max_words: int = 7) -> str:
 async def generate_metadata(
     transcript: str,
     title: str = "",
-    hook: str = ""
+    hook: str = "",
+    keep_title: bool = False,
 ) -> dict:
     """
     Generate clean, viral metadata for a clip using AI.
@@ -79,15 +80,37 @@ async def generate_metadata(
         transcript: The clip's transcript text
         title: Optional existing title
         hook: Optional existing hook
+        keep_title: The given title is final (the clip selector wrote it while
+            reading the whole video and it survived the ranking pass). Only the
+            description and hashtags are generated; a second model rewriting the
+            headline from the clip text alone is how a teasing title turned back
+            into a plain summary.
 
     Returns:
         Dictionary with title, description, and hashtags
     """
+    fixed_title = ""
+    if keep_title and not is_placeholder_title(title):
+        fixed_title = _clean_title(title)
+
     system_prompt = (
-        "You are a top-tier YouTube Shorts strategist. You write titles that name the "
-        "specific thing the clip actually says or shows - a number, a mechanism, a named "
-        "object, a real consequence. You never write a title that could sit on any video, "
+        "You are a top-tier YouTube Shorts strategist. A title has one job: make a "
+        "stranger in the feed need to watch. You build it on the specific thing the clip "
+        "actually says or shows - a number, a name, a consequence - and you tease it "
+        "instead of summarising it. You never write a title that could sit on any video, "
         "and you never promise a reveal the clip does not deliver."
+    )
+
+    title_requirement = (
+        f"""1. Title: it is already decided - return exactly: {fixed_title}"""
+        if fixed_title else
+        """1. Title: under 45 characters and at most 7 words, in the language spoken in the
+       transcript. Take the most surprising concrete element of the transcript (a
+       number, a named thing, a consequence) and open a curiosity gap around it: say
+       enough to intrigue, hold back the answer. It must be true to the clip.
+       Describes (bad): 'He Talks About His First Business Failing'.
+       Generic (bad): 'Wait For The Reaction', 'You Will Not Believe This'.
+       Teases (good): 'He Lost 40,000 In One Weekend', 'The One Question That Got Him Fired'."""
     )
 
     user_prompt = f"""
@@ -99,14 +122,10 @@ async def generate_metadata(
     - Key Hook: {hook or 'None'}
 
     Requirements:
-    1. Title: under 55 characters, front-loaded, and it must contain one concrete
-       element taken from the transcript (a number, a named thing, a mechanism, a
-       result). Bad: 'Wait For The Reaction', 'You Will Not Believe This',
-       'The Secret Nobody Knew' - those describe nothing. Good: 'Rereading Fails
-       After 3 Pages', 'One Recall Beats Ten Rereads'.
+    {title_requirement}
     2. Do NOT put hashtags or emojis in the title.
     3. Description: 2-3 sentences that state the context of THIS clip, then one
-       plain call to action.
+       plain call to action. Same language as the transcript.
     4. Hashtags: 3-5 tags, starting with #Shorts, all specific to the clip's niche.
        Never #Viral, #Trending, #FYP, #ForYou, #Explore.
     """
@@ -120,7 +139,7 @@ async def generate_metadata(
             temperature=0.3,
         )
 
-        final_title = _clean_title(data.title) or derive_title_from_text(hook or transcript)
+        final_title = fixed_title or _clean_title(data.title) or derive_title_from_text(hook or transcript)
         tags = [tag if tag.startswith('#') else f"#{tag}" for tag in data.hashtags if tag]
         if "#Shorts" not in tags:
             tags.insert(0, "#Shorts")

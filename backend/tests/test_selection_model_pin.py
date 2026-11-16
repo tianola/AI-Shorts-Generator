@@ -1,23 +1,20 @@
-"""Γ: clip selection must call one named model, not a gateway combo.
+"""Γ: which OmniRoute id clip selection calls by default.
 
-`auto/*` and `free/*` are OmniRoute combos. Each call re-resolves to whichever
-upstream passes prescreening at that moment, so neither the latency nor the
-shape of the reply belongs to the pipeline.
-
-Measured on job 110's own source at num_clips=10 (2026-11-12), the two answers
-were 6x apart and only one of them was usable:
+`auto/*` combos re-resolve to whichever upstream passes prescreening at that
+moment. Measured on job 110's source at num_clips=10 (2026-11-12):
 
   auto/pro-reasoning   75.4s  10 clips, starts 0.0 / 354.0 / 708.0 / 1062.0
   agy/gemini-3-flash   12.5s  10 clips, starts 3165.0 / 0.0 / 485.0 / 2355.0
 
-The evenly spaced starts are the giveaway: `auto/pro-reasoning` answered with a
-`thinking` content array instead of a string, so the JSON path never saw a
-reply, the retry was no help, the dead Ollama fallback raised, and the selector
-shipped its grid fallback — the exact job 110 defect. A pinned model cannot
-fail that way by changing identity between calls.
+The evenly spaced starts are the grid fallback: `auto/pro-reasoning` answered
+with a `thinking` content array instead of a string, and the selector never saw
+a reply. The router now reads the text blocks out of such an array.
 
-So this test pins the invariant, not the id: whatever the default is, it must
-name a model, and the caller's choice of upstream must not be part of it.
+By 2026-11-16 every pinned free gemini id was in a 429 cooldown until 11-21 and
+job 111 shipped the grid for that reason. The default moved to `free/shorts`, a
+free-only *priority* combo built on this machine for clip selection from a
+benchmark of 38 models on job 111's prompts: a fixed, ordered member list, not
+an auto-routed pick. auto/best-free timed out on the same prompt.
 """
 
 import os
@@ -27,9 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Settings
 
-# Gateway-side routing aliases, not models. A value with one of these prefixes
-# means the pipeline does not know which upstream produced its clips.
-COMBO_PREFIXES = ("auto/", "free/", "best/")
+# Auto-routed aliases: the gateway picks an arbitrary upstream per call.
+AUTO_ROUTED_PREFIXES = ("auto/", "best/")
 
 
 def _defaults(monkeypatch):
@@ -38,15 +34,14 @@ def _defaults(monkeypatch):
     return Settings(_env_file=None)
 
 
-def test_the_default_selection_model_names_a_concrete_model(monkeypatch):
+def test_the_default_selection_model_is_not_auto_routed(monkeypatch):
     model = _defaults(monkeypatch).OMNIROUTE_MODEL
     assert model, "OMNIROUTE_MODEL defaults to an empty string"
-    assert not model.startswith(COMBO_PREFIXES), (
-        f"OMNIROUTE_MODEL={model!r} is a gateway combo, not a model. Every call "
-        f"would resolve to a different upstream, which is how job 110 lost its "
-        f"clip selection to a thinking-block reply and shipped the grid."
+    assert not model.startswith(AUTO_ROUTED_PREFIXES), (
+        f"OMNIROUTE_MODEL={model!r} is an auto-routed combo: every call resolves to "
+        f"a different upstream, which is how job 110 shipped the grid."
     )
 
 
 def test_the_default_selection_model_is_the_measured_one(monkeypatch):
-    assert _defaults(monkeypatch).OMNIROUTE_MODEL == "agy/gemini-3-flash"
+    assert _defaults(monkeypatch).OMNIROUTE_MODEL == "free/shorts"

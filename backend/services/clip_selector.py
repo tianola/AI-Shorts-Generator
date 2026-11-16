@@ -34,6 +34,412 @@ POWER_WORDS = [
 # any ask above 7 clips; scale it with num_clips and keep a floor for small runs.
 CLIP_OUTPUT_TOKENS = 350
 
+_CANDIDATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "clips": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "number"},
+                    "end": {"type": "number"},
+                    "title": {"type": "string"},
+                    "hook": {"type": "string"},
+                    "why": {"type": "string"},
+                    "virality_score": {"type": "number"},
+                    "story_type": {
+                        "type": "string",
+                        "enum": ["question_answer", "reveal", "challenge", "emotion", "lesson", "reaction"],
+                    },
+                    "layout": {"type": "string", "enum": ["single_speaker", "split_screen", "fit_blur"]},
+                    "tone_category": {
+                        "type": "string",
+                        "enum": ["humorous_entertainment", "casual_podcast", "tech_educational",
+                                 "business_strategy", "documentary_serious", "somber_tragic"],
+                    },
+                    "popup_eligible": {"type": "boolean"},
+                    "popup_cues": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "start_offset": {"type": "number"},
+                                "duration": {"type": "number"},
+                                "position": {"type": "string", "enum": ["upper_third", "upper_right"]},
+                            },
+                            "required": ["query", "start_offset", "duration", "position"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["start", "end", "title", "hook", "why", "virality_score", "story_type",
+                             "layout", "tone_category", "popup_eligible", "popup_cues"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["clips"],
+    "additionalProperties": False,
+}
+
+_RANKING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ranked": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "candidate_id": {"type": "string"},
+                    "score": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["candidate_id", "score", "reason"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["ranked"],
+    "additionalProperties": False,
+}
+
+# Where a clip came from. Only a window a model actually chose may publish on its
+# own; the transcript-heuristic filler and the time grid are there so a job still
+# renders something to review, not so it reaches the channel unattended.
+MODEL_SELECTION_PATHS = ("claude", "ai")
+
+_SELECTION_SYSTEM = (
+    "You pick and judge moments from long videos for standalone vertical shorts. "
+    "You are honest about quality and you answer with JSON only."
+)
+
+# Adaptive thinking is billed inside max_tokens on Claude, so the reply budget the
+# OmniRoute chain needs is not enough headroom there.
+_CLAUDE_THINKING_HEADROOM = 16000
+
+# The free reasoning members of the OmniRoute chain (nemotron-3-ultra) think inside
+# max_tokens too: at 3500 they returned no JSON on job 111's prompt, at 12000 all
+# ten windows. Models that do not think stop when their answer ends, so the floor
+# costs them nothing.
+_OMNIROUTE_MIN_TOKENS = 12000
+
+
+async def _selection_model_json(prompt: str, schema: dict, max_tokens: int) -> tuple:
+    """Ask Claude when a key is configured, else (or on failure) the OmniRoute chain.
+
+    Returns the reply text and the path it came from ("claude" or "ai").
+    """
+    from services.claude_client import call_claude_json, claude_available
+
+    if claude_available():
+        try:
+            return await call_claude_json(
+                prompt=prompt,
+                system=_SELECTION_SYSTEM,
+                schema=schema,
+                max_tokens=max_tokens + _CLAUDE_THINKING_HEADROOM,
+                effort="high",
+            ), "claude"
+        except Exception as exc:
+            logger.warning(f"Claude clip-selection call failed ({type(exc).__name__}: {exc}); trying OmniRoute")
+
+    text = await call_llm_json(
+        prompt=prompt,
+        system=_SELECTION_SYSTEM,
+        model=settings.OLLAMA_MODEL if settings.AI_PROVIDER == "ollama" else settings.OMNIROUTE_MODEL,
+        temperature=0.35,
+        max_tokens=max(max_tokens, _OMNIROUTE_MIN_TOKENS),
+    )
+    return text, "ai"
+
+
+def _dedupe_overlapping_clips(clips: list, overlap_ratio: float = 0.5) -> list:
+    """Keep the stronger window when two picks substantially cover the same moment."""
+    kept = []
+    for clip in sorted(clips, key=lambda item: item.get("virality_score", 0.0), reverse=True):
+        start, end = float(clip["start"]), float(clip["end"])
+        duplicate = False
+        for prior in kept:
+            overlap = max(0.0, min(end, float(prior["end"])) - max(start, float(prior["start"])))
+            shorter = min(end - start, float(prior["end"]) - float(prior["start"]))
+            if shorter > 0 and overlap / shorter >= overlap_ratio:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(clip)
+    return kept
+
+
+def _candidates_wanted(num_clips: int) -> int:
+    """How many candidates to ask for: about twice the clips that will ship.
+
+    Asking for exactly num_clips meant every answer was published and the scoring
+    only reordered them. The surplus is what gives the second pass something to
+    reject. Capped so a 20-clip job does not ask for a reply nobody can finish.
+    """
+    return min(30, max(num_clips + 4, num_clips * 2))
+
+
+def _fit_window(start: float, end: float, segments: list, tolerance: float = 1.0):
+    """Place a model-proposed window on transcript boundaries, inside the length rule.
+
+    Returns (start, end), or None when the window cannot be made valid. The model's
+    timestamps are approximate, so an edge within `tolerance` of a segment edge moves
+    onto it - that is where a sentence starts or ends, and a cut anywhere else lands
+    mid-word. A window that is too long is ended at the last segment end that still
+    fits rather than at start+MAX, because the tail is where the payoff is and a
+    blind cut removes it mid-sentence. One that is too short is extended to the next
+    segment end when that fits, and dropped otherwise.
+    """
+    if not segments:
+        return None
+    total = float(segments[-1]["end"])
+    if start < 0 or start >= total or end <= start:
+        return None
+    end = min(end, total)
+
+    min_len = settings.MIN_CLIP_SECONDS * 0.8
+    max_len = float(settings.MAX_CLIP_SECONDS)
+    starts = [float(seg["start"]) for seg in segments]
+    ends = [float(seg["end"]) for seg in segments]
+
+    nearest_start = min(starts, key=lambda value: abs(value - start))
+    if abs(nearest_start - start) <= tolerance:
+        start = nearest_start
+    nearest_end = min(ends, key=lambda value: abs(value - end))
+    if abs(nearest_end - end) <= tolerance and nearest_end > start:
+        end = nearest_end
+
+    if end - start > max_len:
+        fitting = [value for value in ends if start + min_len <= value <= start + max_len]
+        end = max(fitting) if fitting else start + max_len
+    elif end - start < min_len:
+        later = [value for value in ends if value > end and start + min_len <= value <= start + max_len]
+        if not later:
+            return None
+        end = min(later)
+
+    return round(start, 2), round(end, 2)
+
+
+def _segments_in_window(segments: list, start: float, end: float) -> list:
+    """Segments that really overlap the window.
+
+    A segment that only touches the window's edge is not in it. The old `<`/`>`
+    test let the sentence before the clip in, so a clip that began on a segment
+    boundary - the normal case - had its hook scored on the previous sentence.
+    """
+    return [
+        seg for seg in segments
+        if min(float(seg["end"]), end) - max(float(seg["start"]), start) > 0.05
+    ]
+
+
+def _spoken_language_hint(segments: list) -> str:
+    """"Greek" when the transcript is mostly Greek script, else "" (let the model match)."""
+    sample = " ".join(str(seg.get("text") or "") for seg in segments[:300])
+    greek = sum(1 for ch in sample if "Ͱ" <= ch <= "Ͽ" or "ἀ" <= ch <= "῿")
+    latin = sum(1 for ch in sample if ch.isascii() and ch.isalpha())
+    return "Greek" if greek > latin else ""
+
+
+def _candidate_prompt(segments: list, story_plan: dict, wanted: int, num_clips: int,
+                      video_title: str, temporal_events) -> str:
+    transcript_text = "".join(
+        f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}\n" for seg in segments
+    )
+
+    key_moments = ""
+    for moment in (story_plan.get("key_moments") or [])[:8]:
+        if isinstance(moment, dict) and moment.get("start") is not None:
+            key_moments += f"\n- around {moment.get('start')}s: {moment.get('reason', '')}"
+    key_moments_block = (
+        f"\nA first read of the video flagged these moments (hints, not a list to copy):{key_moments}\n"
+        if key_moments else ""
+    )
+
+    visual_events_block = ""
+    if temporal_events:
+        from services.temporal_localization import format_events_for_prompt
+        visual_events = format_events_for_prompt(temporal_events)
+        if visual_events:
+            visual_events_block = (
+                f"\n{visual_events}\n\n"
+                "Use the visual events to prefer moments where something also HAPPENS on screen "
+                "(a person enters, an object appears, the scene changes), not only where the talk is good.\n"
+            )
+
+    language = _spoken_language_hint(segments)
+    language_note = f" ({language})" if language else ""
+    title_line = f'\nSource video title: "{video_title}"' if video_title else ""
+
+    return f"""
+You are choosing moments from a long video to publish as standalone vertical shorts
+(YouTube Shorts / TikTok). A viewer decides in the first 1-3 seconds whether to swipe
+away, and most of them never saw the full video, so every pick has to work for a
+stranger with zero context.
+{title_line}
+What the video is about: {story_plan.get('story_summary', '')}
+{key_moments_block}
+Find the {wanted} strongest candidate moments. That is more than will be published on
+purpose: a second pass ranks them and keeps the best {num_clips}, so include a real
+range rather than padding with near-duplicates. Candidates must not overlap.
+
+What makes a moment worth picking:
+- It opens on its strongest line. The first sentence spoken already creates tension or
+  curiosity: a bold claim, a surprising number, a confession, a question the viewer
+  wants answered, a conflict already in motion. Start the clip exactly on that
+  sentence - not on the setup before it (greetings, "so", "anyway", the interviewer
+  winding up to the question).
+- It pays off. The clip ends right after the answer, punchline, reveal or reaction
+  lands. A complete thought, never cut mid-sentence, never ending on the setup.
+- It stands alone. No "as I said before", no unexplained "he" or "that thing".
+- Something is at stake: emotion, disagreement, money, risk, a strong opinion, a funny
+  or shocking turn. A calm explanation with no turn in it is a weak pick.
+
+Length: between {settings.MIN_CLIP_SECONDS} and {settings.MAX_CLIP_SECONDS} seconds.
+Use the transcript's own timestamps and start and end on the segment boundaries shown.
+
+For each candidate:
+- title: the headline burned onto the video and used as the published title. Its job is
+  to make someone need to watch, not to summarise. Take the single most surprising
+  concrete thing in the clip (a number, a name, a consequence) and build a curiosity
+  gap around it: say enough to intrigue, hold back the answer. At most 7 words and 45
+  characters. No hashtags, no emojis, no quotation marks. It has to be true to what is
+  said - tease the real payoff, never invent stakes the clip does not deliver.
+    Describes (weak):  He talks about his first business failing
+    Teases (strong):   He lost 40,000 in one weekend
+    Generic (weak):    You won't believe what happened
+    Teases (strong):   The one question that got him fired
+- hook: the first sentence spoken in the clip, copied word for word from the transcript.
+- why: one sentence on why a stranger keeps watching to the end.
+- virality_score: 0.0 to 1.0. Be honest and spread the scores out; most moments in any
+  video are not a 0.9.
+- story_type, layout ('split_screen' for a two-person conversation, 'single_speaker'
+  for one person talking, 'fit_blur' when the whole frame matters), tone_category.
+- popup_eligible: false for serious, somber or tragic content. popup_cues: zero to two
+  image queries of 1-3 keywords for something concrete that is mentioned, with
+  start_offset in seconds from the clip start (at least 2.0) and duration 2-3 seconds.
+
+Language: write title and why in the language spoken in the transcript{language_note}.
+Never switch to another language or script.
+
+Transcript:
+{transcript_text}{visual_events_block}
+Return ONLY valid JSON in this shape:
+{{
+  "clips": [
+    {{
+      "start": float, "end": float,
+      "title": "string", "hook": "string", "why": "string",
+      "virality_score": float,
+      "story_type": "question_answer|reveal|challenge|emotion|lesson|reaction",
+      "layout": "single_speaker|split_screen|fit_blur",
+      "tone_category": "humorous_entertainment|casual_podcast|tech_educational|business_strategy|documentary_serious|somber_tragic",
+      "popup_eligible": boolean,
+      "popup_cues": [{{"query": "string", "start_offset": float, "duration": float, "position": "upper_third|upper_right"}}]
+    }}
+  ]
+}}
+"""
+
+
+async def _judge_candidates(clips: list, segments: list, num_clips: int) -> bool:
+    """Second pass: score each candidate on what the viewer will actually hear.
+
+    The first pass rates its own picks while reading the whole transcript. Here the
+    model sees only the words inside each final window, opening line first - the
+    same information a stranger in the feed gets. Writes judge_score (0-1) and
+    judge_reason onto the clips it rated. Returns False, leaving the clips as they
+    were, when the reply is unusable: the first pass's own scores still rank them.
+    """
+    blocks = []
+    for index, clip in enumerate(clips):
+        inside = _segments_in_window(segments, float(clip["start"]), float(clip["end"]))
+        opening = str(inside[0].get("text") or "").strip() if inside else ""
+        rest = " ".join(str(seg.get("text") or "").strip() for seg in inside[1:])
+        blocks.append(
+            f"Candidate c{index} ({float(clip['end']) - float(clip['start']):.0f}s) - "
+            f"title: {clip.get('title', '')}\n"
+            f"OPENING LINE: {opening}\n"
+            f"THEN: {rest}"
+        )
+    candidates_text = "\n\n".join(blocks)
+
+    prompt = f"""
+Below are {len(clips)} candidate shorts cut from one long video. For each you see exactly
+what the viewer hears, from the first word to the last. Only the best {num_clips} will be
+published. Judge each one as a stranger scrolling a feed who has never seen the video:
+
+- Opening: do the first ~3 seconds (the OPENING LINE) stop the scroll on their own?
+- Standalone: does it make sense with no context?
+- Payoff: does it end on something landing - an answer, a punchline, a reveal - rather
+  than trailing off or stopping mid-thought?
+- Stakes: is there emotion, conflict, surprise or a strong opinion in it?
+- Title: does it tease this clip truthfully, or is it generic or a plain summary?
+
+Give each candidate one overall score from 0 to 10. It is not an average: a weak
+opening caps the score at 5, because viewers leave before the rest matters. Spread the
+scores out and score every candidate.
+
+{candidates_text}
+
+Return ONLY valid JSON:
+{{"ranked": [{{"candidate_id": "c0", "score": float, "reason": "one short sentence"}}]}}
+"""
+
+    try:
+        text, _ = await _selection_model_json(
+            prompt, _RANKING_SCHEMA, max_tokens=max(2000, len(clips) * 150)
+        )
+        data = salvage_incomplete_json(text.replace("```json", "").replace("```", "").strip())
+        ranked = data.get("ranked")
+        if not isinstance(ranked, list):
+            return False
+        rated = 0
+        for row in ranked:
+            if not isinstance(row, dict):
+                continue
+            try:
+                index = int(str(row.get("candidate_id", "")).strip().lstrip("cC"))
+                score = float(row.get("score"))
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= index < len(clips):
+                continue
+            clips[index]["judge_score"] = round(max(0.0, min(1.0, score / 10.0)), 4)
+            clips[index]["judge_reason"] = str(row.get("reason") or "")[:240]
+            rated += 1
+        return rated > 0
+    except Exception as exc:
+        logger.warning(f"Clip ranking pass failed ({type(exc).__name__}: {exc}); keeping first-pass scores")
+        return False
+
+
+def _selection_score(clip: dict) -> float:
+    """Rank a model-chosen clip: mostly the model's judgement, plus what was measured.
+
+    The English keyword, hook-pattern and emotion-word scores are left out of the
+    ranking on purpose. They carried 45% of the old composite and read nothing in a
+    Greek transcript, so on Greek video the order was noise. What remains beside the
+    model is language-independent: loudness variation, speech coverage, on-screen
+    events.
+    """
+    model = float(clip.get("llm_score_raw", 0.75))
+    judge = clip.get("judge_score")
+    if judge is not None:
+        model = 0.4 * model + 0.6 * float(judge)
+    score = (
+        model * 0.75 +
+        float(clip.get("audio_dynamics", 0.5)) * 0.10 +
+        float(clip.get("pacing_score", 0.5)) * 0.10 +
+        float(clip.get("visual_event_density", 0.5)) * 0.05
+    )
+    return round(min(1.0, score), 4)
+
+
 # High-arousal emotion words (drive sharing per Journal of Consumer Psychology 2024)
 HIGH_AROUSAL_EMOTIONS = [
     # Awe/Wonder
@@ -352,7 +758,12 @@ def _composite_score_v2(clip: dict) -> float:
 
 async def select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None) -> list:
     """
-    Select the best clips from a video using AI.
+    Select the best clips from a video using AI, in two passes.
+
+    Pass 1 asks for about twice as many candidate moments as will ship. Each is put
+    on transcript boundaries and inside the length rule by code. Pass 2 shows the
+    model only the words inside each final window and has it score them the way a
+    stranger in the feed would. The best non-overlapping num_clips are returned.
 
     Args:
         segments_file: Path to segments.json
@@ -361,103 +772,21 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
         temporal_events: Optional visual event timeline from temporal_localization
 
     Returns:
-        List of selected clips
+        List of selected clips; each carries "selection_path" naming where it came
+        from ("claude"/"ai" for a model pick, "heuristic" or "grid" otherwise).
     """
     with open(segments_file, "r", encoding="utf-8") as f:
         segments = json.load(f)
 
-    # Create transcript for prompt
-    transcript_text = ""
-    for seg in segments:
-        transcript_text += f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}\n"
-
     story_plan = await analyze_story_segments(segments, video_title=video_title)
 
-    title_context = f"\n    - Source Video Title / Main Theme: \"{video_title}\"" if video_title else ""
-
-    visual_events_block = ""
-    if temporal_events:
-        from services.temporal_localization import format_events_for_prompt
-        visual_events_block = format_events_for_prompt(temporal_events)
-
-    visual_events_section = f"""
-    {visual_events_block}
-
-    Use the visual events to identify moments where something interesting HAPPENS on screen
-    (new objects appear, people enter, scene changes), not just where the transcript is engaging.
-    Clips that combine compelling speech WITH visual events score higher.
-""" if visual_events_block else ""
-
-    prompt = f"""
-    You are a world-class TikTok/Shorts viral video producer (OpusClip AI Director).
-    Analyze the following transcript and extract the top {num_clips} highest-converting viral moments.
-
-    Story Plan:{title_context}
-    - Summary: {story_plan.get('story_summary', '')}
-    - Overall Hook: {story_plan.get('hook', '')}
-    - Story Type: {story_plan.get('story_type', 'reaction')}
-    - Recommended Layout: {story_plan.get('recommended_layout', 'single_speaker')}
-    - CTA: {story_plan.get('cta', 'Follow for more.')}
-
-    Rules for Viral Title & Hook Selection:
-    - TITLE MUST BE THE ULTIMATE HIGH-STAKES VIRAL HOOK (High-CTR Magnet):
-      * NEVER use passive, bland, or low-stakes descriptions (e.g. NEVER write "comforting her stalker" or "discussing something").
-      * ALWAYS frame the title around the HIGHEST STAKES, emotional tension, shocking revelation, confrontation, or danger (e.g. "SHE CAUGHT HER STALKER INSIDE", "HE BROKE INTO HER HOUSE", "TRAPPED WITH HER STALKER", "THE MOMENT SHE REALIZED", "CAUGHT RED-HANDED").
-      * The title must trigger primal curiosity, suspense, or anxiety so the viewer MUST stop scrolling.
-      * Keep titles punchy, 3-6 words, uppercase (e.g. "CAUGHT INSIDE HER HOUSE", "HE DID THE UNTHINKABLE").
-    - First 3 seconds MUST have an irresistible HOOK or open loop (Curiosity Gap).
-    - Favor moments with revelations, contrarian statements, emotional peaks, or rapid explanations.
-    - Clip length must be between {settings.MIN_CLIP_SECONDS} and {settings.MAX_CLIP_SECONDS} seconds.
-    - Suggest suitable layout: 'single_speaker' (solo person), 'split_screen' (conversation/podcast), or 'fit_blur'.
-    - Suggest subtitle style preset: 'hormozi', 'capcut_aqua', 'mrbeast', 'cyber_neon', or 'clean_box'.
-    - Tone and Visual Popups:
-      * tone_category: 'humorous_entertainment', 'casual_podcast', 'tech_educational', 'business_strategy', 'documentary_serious', or 'somber_tragic'.
-      * popup_eligible: false for serious/somber/tragic content, true for energetic/humorous/tech/business.
-      * popup_cues: 1-2 high-impact image/meme queries (e.g. 'bitcoin logo', 'mind blown meme', 'robot ai'). start_offset between 2.0 and duration-2.5s.
-
-    Transcript:
-    {transcript_text}
-    {visual_events_section}
-    Return ONLY valid JSON matching this schema:
-    {{
-        "clips": [
-            {{
-                "start": float,
-                "end": float,
-                "title": "string",
-                "hook": "string",
-                "virality_score": float between 0.0 and 1.0,
-                "hook_score": float,
-                "coherence_score": float,
-                "connection_score": float,
-                "trend_score": float,
-                "story_type": "question_answer|reveal|challenge|emotion|lesson|reaction",
-                "layout": "single_speaker|split_screen|fit_blur",
-                "caption_style": "hormozi|capcut_aqua|mrbeast|cyber_neon|clean_box",
-                "tone_category": "humorous_entertainment|casual_podcast|tech_educational|business_strategy|documentary_serious|somber_tragic",
-                "popup_eligible": boolean,
-                "style_profile": "meme_bouncy|stock_minimal|none",
-                "popup_cues": [
-                    {{
-                        "query": "string (1-3 keywords)",
-                        "start_offset": float,
-                        "duration": float,
-                        "position": "upper_third|upper_right"
-                    }}
-                ],
-                "cta": "string"
-            }}
-        ]
-    }}
-    """
+    wanted = _candidates_wanted(num_clips)
+    prompt = _candidate_prompt(segments, story_plan, wanted, num_clips, video_title, temporal_events)
+    source = "ai"
 
     try:
-        response_text = await call_llm_json(
-            prompt=prompt,
-            system="You are an expert viral Shorts director. Extract top-performing clips.",
-            model=settings.OLLAMA_MODEL if settings.AI_PROVIDER == "ollama" else settings.OMNIROUTE_MODEL,
-            temperature=0.35,
-            max_tokens=max(2000, num_clips * CLIP_OUTPUT_TOKENS),
+        response_text, source = await _selection_model_json(
+            prompt, _CANDIDATE_SCHEMA, max_tokens=max(2000, wanted * CLIP_OUTPUT_TOKENS)
         )
 
         response_text = response_text.replace("```json", "").replace("```", "").strip()
@@ -466,17 +795,19 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
 
         valid_clips = []
         for clip in clips:
-            if clip.get("start") is None or clip.get("end") is None:
+            if not isinstance(clip, dict):
                 continue
-            if float(clip["start"]) < 0 or float(clip["end"]) > segments[-1]["end"]:
+            try:
+                raw_start, raw_end = float(clip.get("start")), float(clip.get("end"))
+            except (TypeError, ValueError):
                 continue
-            if (float(clip["end"]) - float(clip["start"])) < (settings.MIN_CLIP_SECONDS * 0.8):
+            # The LLM is not trusted to respect the range or to land on a sentence
+            # edge; the code places the window.
+            window = _fit_window(raw_start, raw_end, segments)
+            if window is None:
                 continue
-            # The LLM is not trusted to respect the range; the code enforces it.
-            # A 45-second clip from a 10-minute source is what the old pipeline shipped;
-            # the new one trims it to MAX_CLIP_SECONDS so completion rate stays high.
-            if (float(clip["end"]) - float(clip["start"])) > settings.MAX_CLIP_SECONDS:
-                clip["end"] = float(clip["start"]) + settings.MAX_CLIP_SECONDS
+            clip["start"], clip["end"] = window
+            clip["selection_path"] = source
 
             clip["virality_score"] = _normalise_llm_score(clip.get("virality_score"))
 
@@ -489,46 +820,32 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             clip.setdefault("connection_score", clip.get("virality_score", 0.84))
             clip.setdefault("trend_score", clip.get("virality_score", 0.82))
 
-            # Compute all signals from overlapping transcript segments
+            # Compute all signals from the transcript segments inside the window
             clip_start = float(clip["start"])
             clip_end = float(clip["end"])
-            clip_text_parts = []
-            segments_in_clip = []
-            for seg in segments:
-                if seg['end'] < clip_start or seg['start'] > clip_end:
-                    continue
-                clip_text_parts.append(seg.get('text', ''))
-                segments_in_clip.append(seg)
-            clip_text = " ".join(clip_text_parts)
+            segments_in_clip = _segments_in_window(segments, clip_start, clip_end)
+            clip_text = " ".join(seg.get('text', '') for seg in segments_in_clip)
             clip_segment = {
                 'start': clip_start,
                 'end': clip_end,
                 'text': clip_text
             }
 
-            # Legacy signals (kept for backward compat)
+            # Informational signals: shown in the breakdown, not used to rank
+            # (they are English-only, see _selection_score).
             clip["semantic_density"] = _semantic_density_score(clip_segment)
             clip["keyword_score"] = _keyword_score(clip_text)
             clip["structural_score"] = _structural_completeness(segments_in_clip)
-            clip.setdefault("audio_energy_score", 0.5)
-
-            # If the audio pre-pass enriched the segments, use the real energy average
-            if segments_in_clip and any("audio_energy" in s for s in segments_in_clip):
-                energies = [float(s["audio_energy"]) for s in segments_in_clip if "audio_energy" in s]
-                if energies:
-                    clip["audio_energy_score"] = round(sum(energies) / len(energies), 4)
-
-            # NEW: Research-backed viral signals (v2)
-            # Hook strength: first 3 seconds of the clip
             clip["hook_strength"] = _hook_strength_score(clip_text)
-
-            # Emotional intensity: high-arousal emotion density
             clip["emotional_intensity"] = _emotional_intensity_score(clip_text)
+            clip["narrative_completeness"] = _narrative_completeness_score(clip_text)
 
-            # Audio dynamics: energy variation (dB spikes), not just average
-            if segments_in_clip and any("audio_energy" in s for s in segments_in_clip):
-                energies = [float(s["audio_energy"]) for s in segments_in_clip if "audio_energy" in s]
-                clip["audio_dynamics"] = _audio_dynamics_score(energies) if energies else 0.5
+            # Audio: average energy and its variation, when the pre-pass enriched the segments
+            clip.setdefault("audio_energy_score", 0.5)
+            energies = [float(s["audio_energy"]) for s in segments_in_clip if "audio_energy" in s]
+            if energies:
+                clip["audio_energy_score"] = round(sum(energies) / len(energies), 4)
+                clip["audio_dynamics"] = _audio_dynamics_score(energies)
             else:
                 clip["audio_dynamics"] = 0.5
 
@@ -546,13 +863,8 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             # Pacing: coverage of clip by speech segments (no dead air)
             clip["pacing_score"] = _pacing_score(segments_in_clip, clip_start, clip_end)
 
-            # Narrative completeness: stands alone without context
-            clip["narrative_completeness"] = _narrative_completeness_score(clip_text)
-
-            # Composite Virality Score v2 — research-backed weights.
-            # Keep the raw LLM signal so the UI can show a truthful breakdown.
+            # Keep the model's own rating so the UI can show a truthful breakdown.
             clip["llm_score_raw"] = float(clip.get("virality_score", 0.75))
-            clip["virality_score"] = _composite_score_v2({**clip})
 
             # Tone & Context Gating
             clip_txt = f"{clip.get('title', '')} {clip.get('hook', '')}"
@@ -569,9 +881,18 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
 
             valid_clips.append(clip)
 
-        valid_clips.sort(key=lambda x: x.get("virality_score", 0.0), reverse=True)
+        candidate_count = len(valid_clips)
+        judged = candidate_count > 1 and await _judge_candidates(valid_clips, segments, num_clips)
+        for clip in valid_clips:
+            clip["virality_score"] = _selection_score(clip)
+
+        # Strongest first, and two picks of the same moment collapse into the better one.
+        valid_clips = _dedupe_overlapping_clips(valid_clips)
         if len(valid_clips) >= num_clips:
-            logger.info(f"Clip selection path=ai: {num_clips} of {len(valid_clips)} scored AI windows")
+            logger.info(
+                f"Clip selection path={source}: {num_clips} of {candidate_count} candidate windows "
+                f"({'ranked by second pass' if judged else 'first-pass scores only'})"
+            )
             return valid_clips[:num_clips]
 
         # Fill with heuristic moments if LLM returned fewer clips than requested
@@ -643,6 +964,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 "popup_eligible": tone_info["popup_eligible"],
                 "style_profile": tone_info["style_profile"],
                 "popup_cues": [],
+                "selection_path": "heuristic",
             })
 
         # The AI windows are the answer; heuristics only fill the shortfall. Sorting
@@ -662,7 +984,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             taken.append((start, end))
 
         logger.info(
-            f"Clip selection path=ai+heuristic: {len(valid_clips)} scored AI windows kept, "
+            f"Clip selection path={source}+heuristic: {len(valid_clips)} model windows kept, "
             f"{len(selected) - len(valid_clips)} filled from transcript heuristics"
         )
         return selected
@@ -723,6 +1045,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 "layout": "single_speaker",
                 "caption_style": "mrbeast",
                 "cta": "Follow for more.",
+                "selection_path": "grid",
             })
         return fallback_clips
 

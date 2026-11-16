@@ -36,27 +36,37 @@ class Settings(BaseSettings):
         default=None,
         description="OmniRoute API key"
     )
-    # Not an `auto/*` combo: it re-resolves upstream per call, and one resolution
-    # answered clip selection with a thinking block instead of a string.
+    # free/shorts: the free-only priority combo built for this job on the local
+    # OmniRoute (2026-11-16), from a benchmark of 38 models on job 111's real
+    # prompts. Order: Claude Opus/Sonnet via Antigravity (best picks seen; weekly
+    # quota), agnes-3.0-flash, ernie-5.5-flash, nemotron-3-ultra, gemma-4, the
+    # pinned gemini ids, laguna, codestral. Pinned single models went dead together
+    # (429 until 11-21) and the selector shipped its grid; a priority combo falls
+    # through server-side. Not an `auto/*` combo: auto/best-free timed out on the
+    # same prompt, and an `auto/*` resolution once answered with a thinking block.
     OMNIROUTE_MODEL: str = Field(
-        default="agy/gemini-3-flash",
+        default="free/shorts",
         description="OmniRoute model id for clip selection and metadata generation"
     )
     # Ordered, comma-separated OmniRoute ids tried after OMNIROUTE_MODEL when a leg
     # times out twice or answers with no JSON at all. Free models go dead without
     # warning - quota spent, upstream down - and with nowhere to go the router fell
     # through to an Ollama that is not running, so the selector shipped its grid.
-    # These three are every free id that answers the production selection prompt
-    # (job 110's source, 10 clips) with the schema filled, all 10 clip lengths
-    # inside the 20-30 s rule, and a reply in 8-16 s: 8.1s, 11.8s, 13.1s. The order
-    # is latency. Dropped: nvidia/poolside/laguna-xs-2.1 answered in 45-116 s, most
-    # of the 120 s timeout budget, with only 2 of 10 clips in the length rule;
-    # agy/gemini-3.6-flash-low and antigravity/gemini-3.1-flash-image were refused
-    # with HTTP 400 on every attempt. Combos (free/*, auto/*) are excluded by the
-    # rule above - they re-resolve upstream per call, so they are not a model.
+    # free/best: the general free-only chain (34 members); on job 111 it returned
+    # 5 model-picked clips in 70 s. Tried only when free/shorts fails as a whole.
     OMNIROUTE_MODEL_FALLBACKS: str = Field(
-        default="agy/gemini-3.1-flash-lite,antigravity/gemini-3.1-flash-lite",
+        default="free/best",
         description="Comma-separated OmniRoute model ids to try after OMNIROUTE_MODEL"
+    )
+    # Claude is used for clip selection only, and only when a key is set; with no
+    # key the selector stays on the OmniRoute chain above.
+    ANTHROPIC_API_KEY: Optional[str] = Field(
+        default=None,
+        description="Anthropic API key. When set, clip selection can use Claude."
+    )
+    CLAUDE_SELECTION_MODEL: str = Field(
+        default="claude-opus-5-5",
+        description="Claude model id for clip selection"
     )
     TRANSCRIPTION_PROVIDER: str = Field(
         default="groq",
@@ -172,10 +182,11 @@ class Settings(BaseSettings):
     # CAPTIONS
     # ====================
     CAPTION_GROUP_SIZE: int = Field(
-        default=5,
+        default=3,
         ge=1,
         le=8,
-        description="Number of words per caption burst (4-5 words easy-to-read TikTok-style chunks)"
+        description="Max words per caption burst. Three large words read at a glance; "
+                    "five had to be set small to fit the frame."
     )
 
     # ====================

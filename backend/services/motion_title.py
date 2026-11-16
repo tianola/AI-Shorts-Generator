@@ -53,9 +53,21 @@ def _find_font(bold: bool = True) -> str:
     return ""
 
 
+def _headline_upper(text: str) -> str:
+    """Uppercase the way Greek is set in capitals: without the tonos.
+
+    str.upper() turns "ερώτηση" into "ΕΡΏΤΗΣΗ"; capitals do not carry the accent,
+    and on a headline the stray mark reads as a typo. The dialytika is kept.
+    """
+    import unicodedata
+
+    decomposed = unicodedata.normalize("NFD", text.upper())
+    return unicodedata.normalize("NFC", decomposed.replace("́", ""))
+
+
 def _wrap_title(title: str, max_chars: int = 22, max_lines: int = 2) -> list:
     """Wrap + truncate a title into at most `max_lines` clean uppercase lines."""
-    words = str(title or "Viral Moment").strip().upper().split()
+    words = _headline_upper(str(title or "Viral Moment").strip()).split()
     if not words:
         words = ["VIRAL", "MOMENT"]
     lines, current = [], []
@@ -84,6 +96,79 @@ def _wrap_title(title: str, max_chars: int = 22, max_lines: int = 2) -> list:
     if not lines:
         lines = ["VIRAL MOMENT"]
     return lines
+
+
+# Headline type: point sizes at 1080 px width, and the colour of the tease word.
+HEADLINE_MAX_PT = 92
+HEADLINE_MIN_PT = 46
+HEADLINE_HIGHLIGHT = (255, 229, 0)
+
+# Heavy display faces, first hit wins. The bundled Montserrat has no Greek
+# glyphs and PIL does not fall back, so it is only offered to a Latin headline;
+# the Windows faces after it all carry Greek.
+_HEADLINE_FONTS_LATIN_ONLY = [
+    os.path.join(os.path.dirname(__file__), "..", "fonts", "Montserrat-ExtraBold.ttf"),
+    "/usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf",
+]
+_HEADLINE_FONTS = [
+    r"C:\Windows\Fonts\seguibl.ttf",   # Segoe UI Black
+    r"C:\Windows\Fontsriblk.ttf",    # Arial Black
+    r"C:\Windows\Fonts\impact.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+]
+
+
+def _headline_font_path(text: str) -> str:
+    """The heaviest available face that can actually draw this headline."""
+    latin_only = all(ord(ch) < 0x250 for ch in text)
+    candidates = (_HEADLINE_FONTS_LATIN_ONLY if latin_only else []) + _HEADLINE_FONTS
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _widest_line(lines: list, font, space_w: float) -> float:
+    return max(
+        sum(font.getlength(word) for word in line) + space_w * (len(line) - 1)
+        for line in lines
+    )
+
+
+def _balanced_lines(words: list, line_count: int, font, space_w: float) -> list:
+    """Split words into `line_count` lines whose widest line is as narrow as possible.
+
+    Greedy wrapping fills the first lines and leaves whatever is left on the
+    last, which is how "THINK IF YOU / REALLY THINK ABOUT / IT" happened. Trying
+    every break position (a headline is under a dozen words) gives lines of
+    even length instead.
+    """
+    from itertools import combinations
+
+    line_count = max(1, min(line_count, len(words)))
+    if line_count == 1:
+        return [list(words)]
+    best, best_width = None, None
+    for breaks in combinations(range(1, len(words)), line_count - 1):
+        edges = (0,) + breaks + (len(words),)
+        candidate = [words[edges[i]:edges[i + 1]] for i in range(line_count)]
+        width = _widest_line(candidate, font, space_w)
+        if best_width is None or width < best_width:
+            best, best_width = candidate, width
+    return best
+
+
+def _highlight_words(words: list) -> set:
+    """The word(s) drawn in the accent colour: the concrete thing being teased.
+
+    A number is the hook of a headline that has one ("40,000", "3", "90%").
+    Without a number the longest word is the best cheap guess at the subject.
+    """
+    numbers = {word for word in words if any(ch.isdigit() for ch in word)}
+    if numbers:
+        return numbers
+    longest = max(words, key=len, default="")
+    return {longest} if len(longest) >= 5 else set()
 
 
 def _make_backdrop(size=(1080, 1920)) -> Image.Image:
@@ -118,105 +203,72 @@ def render_title_frame(
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    font_path = _find_font(bold=True)
-    fs = int(74 * scale)
-    try:
-        font = ImageFont.truetype(font_path, fs)
-    except Exception:
-        font = ImageFont.load_default()
+    # The wrap budget (18 chars, three lines) still decides what is shown and
+    # marks a cut with "..."; the line breaks themselves are then rebalanced
+    # below so a headline never ends on a one-word orphan line.
+    words = " ".join(_wrap_title(title, max_chars=18, max_lines=3)).split()
+    font_path = _headline_font_path(" ".join(words)) or _find_font(bold=True)
+    max_text_w = int(W * 0.90)
 
-    # 18 chars/line instead of 22: the wrap is what decided how large the
-    # headline could get, and at 22 every title shrank itself to fit. Three
-    # lines so a 60-character title lands whole instead of losing its last word.
-    lines = _wrap_title(title, max_chars=18, max_lines=3)
-    max_text_w = int(W * 0.88)
-    while fs > 28 * scale:
+    font = ImageFont.load_default()
+    lines = [words]
+    fs = int(HEADLINE_MAX_PT * scale)
+    # Largest type that fits, using more lines before giving up size: a headline
+    # is read in the first second, so it is as big as the frame allows.
+    while True:
         try:
             font = ImageFont.truetype(font_path, fs)
         except Exception:
             break
-        widest = max(draw.textbbox((0, 0), ln, font=font)[2] - draw.textbbox((0, 0), ln, font=font)[0] for ln in lines)
-        if widest <= max_text_w:
+        space_w = font.getlength(" ")
+        fitted = None
+        for line_count in range(1, min(3, len(words)) + 1):
+            candidate = _balanced_lines(words, line_count, font, space_w)
+            if _widest_line(candidate, font, space_w) <= max_text_w:
+                fitted = candidate
+                break
+        if fitted is not None or fs <= HEADLINE_MIN_PT * scale:
+            lines = fitted or _balanced_lines(words, min(3, len(words)), font, space_w)
             break
         fs -= int(4 * scale)
 
-    line_h = int(fs * 1.25)
-    y0 = int(H * 0.11)  # High upper frame (~11% from top) — prominent, larger, cleanly below top bezel
+    space_w = font.getlength(" ") if hasattr(font, "getlength") else fs * 0.3
+    line_h = int(fs * 1.16)
+    y0 = int(H * 0.085)
+    stroke_w = max(2, int(fs * 0.085))
+    highlight = _highlight_words(words)
 
-    # Soft drop shadow pass
+    def _line_positions(line):
+        """(word, x) for one centred line."""
+        width = sum(font.getlength(word) for word in line) + space_w * (len(line) - 1)
+        x = (W - width) / 2.0
+        placed = []
+        for word in line:
+            placed.append((word, x))
+            x += font.getlength(word) + space_w
+        return placed
+
+    # Soft drop shadow under the whole block, so the type lifts off bright footage.
     shadow_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     sd = ImageDraw.Draw(shadow_layer)
     y_curr = y0
-    for ln in lines:
-        bb = draw.textbbox((0, 0), ln, font=font)
-        tw = bb[2] - bb[0]
-        x = (W - tw) // 2
-        sd.text((x + int(4 * scale), y_curr + int(4 * scale)), ln, font=font, fill=(0, 0, 0, 210))
+    for line in lines:
+        for word, x in _line_positions(line):
+            sd.text((x + int(3 * scale), y_curr + int(5 * scale)), word, font=font,
+                    fill=(0, 0, 0, 200), stroke_width=stroke_w, stroke_fill=(0, 0, 0, 200))
         y_curr += line_h
-    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=int(6 * scale)))
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=int(7 * scale)))
     img.alpha_composite(shadow_layer)
 
-    # Black outline for legibility, and a yellow rim outside it so the headline
-    # separates from bright footage the way a sticker does.
-    outline_w = int(6 * scale)
-    rim_w = int(11 * scale)
-    accent_rim = (255, 229, 0, 255)
+    # White extra-bold type with a heavy black stroke; the one word that carries
+    # the tease is yellow. No rim, no rules, no ornament - the words are the design.
     y_curr = y0
-    for ln in lines:
-        bb = draw.textbbox((0, 0), ln, font=font)
-        tw = bb[2] - bb[0]
-        x = (W - tw) // 2
-        for dx in range(-rim_w, rim_w + 1, 2):
-            for dy in range(-rim_w, rim_w + 1, 2):
-                r2 = dx * dx + dy * dy
-                if r2 > outline_w * outline_w and r2 <= rim_w * rim_w:
-                    draw.text((x + dx, y_curr + dy), ln, font=font, fill=accent_rim)
-        for dx in range(-outline_w, outline_w + 1, 2):
-            for dy in range(-outline_w, outline_w + 1, 2):
-                if dx * dx + dy * dy <= outline_w * outline_w:
-                    draw.text((x + dx, y_curr + dy), ln, font=font, fill=(0, 0, 0, 255))
-        draw.text((x, y_curr), ln, font=font, fill=(*text_color, 255))
+    for line in lines:
+        for word, x in _line_positions(line):
+            fill = HEADLINE_HIGHLIGHT if word in highlight else text_color
+            draw.text((x, y_curr), word, font=font, fill=(*fill, 255),
+                      stroke_width=stroke_w, stroke_fill=(0, 0, 0, 255))
         y_curr += line_h
-
-    # Two minimal neon green fading accent lines from center outward
-    cx = W // 2
-    accent_y = y_curr + int(6 * scale)
-    gap = int(12 * scale)
-    line_len = int(140 * scale)
-    line_th = max(2, int(2.5 * scale))
-
-    # Refined minimal neon green (#22C55E / Emerald Neon, balanced & aesthetic)
-    neon_green = (34, 197, 94)
-
-    # Accent lines layer
-    accent_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    adraw = ImageDraw.Draw(accent_layer)
-
-    for d in range(line_len):
-        prog = d / float(line_len)
-        alpha = int(190 * max(0.0, 1.0 - (prog ** 1.25)))
-        col = (*neon_green, alpha)
-
-        lx = cx - gap - d
-        adraw.line([(lx, accent_y), (lx, accent_y + line_th)], fill=col, width=1)
-
-        rx = cx + gap + d
-        adraw.line([(rx, accent_y), (rx, accent_y + line_th)], fill=col, width=1)
-
-    line_shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    lsdraw = ImageDraw.Draw(line_shadow)
-    for d in range(line_len):
-        prog = d / float(line_len)
-        alpha = int(130 * max(0.0, 1.0 - (prog ** 1.25)))
-        col = (0, 0, 0, alpha)
-        lx = cx - gap - d
-        rx = cx + gap + d
-        lsdraw.line([(lx, accent_y + int(2 * scale)), (lx, accent_y + line_th + int(2 * scale))], fill=col, width=1)
-        lsdraw.line([(rx, accent_y + int(2 * scale)), (rx, accent_y + line_th + int(2 * scale))], fill=col, width=1)
-
-    line_shadow = line_shadow.filter(ImageFilter.GaussianBlur(radius=int(3 * scale)))
-    img.alpha_composite(line_shadow)
-    img.alpha_composite(accent_layer)
 
     # -----------------------------------------------------------------------
     # PRO CENTERED WATERMARK & BRANDING PILL (settings.WATERMARK_HANDLE + Logo Avatar)

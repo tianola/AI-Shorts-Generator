@@ -308,7 +308,7 @@ def burn_captions(
 
     # Build subtitle filter — normalize path for ffmpeg and escape single quotes
     captions_escaped = captions_path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
-    subtitle_filter = f"subtitles='{captions_escaped}'"
+    subtitle_filter = f"subtitles='{captions_escaped}'{_fontsdir_option()}"
 
     # FFmpeg command with settings from config
     cmd = [
@@ -358,6 +358,19 @@ def burn_captions(
 # ---------------------------------------------------------------------------
 # Single-pass unified render pipeline (Task D)
 # ---------------------------------------------------------------------------
+def _fontsdir_option() -> str:
+    """`:fontsdir='...'` for the subtitles filter, or "" when the folder is missing.
+
+    The caption styles name the bundled Montserrat ExtraBold. Without this libass
+    only searches the system fonts, does not find the family, and silently draws
+    every caption in a regular-weight fallback.
+    """
+    from services.captions import FONTS_DIR
+    if not os.path.isdir(FONTS_DIR):
+        return ""
+    return ":fontsdir='" + _esc_filter_path(FONTS_DIR) + "'"
+
+
 def _esc_filter_path(path: str) -> str:
     """Escape a filesystem path for use inside an ffmpeg filter argument."""
     return path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
@@ -449,7 +462,7 @@ def build_single_pass_filter(
     # ---- Stage 2: captions (optional) ----
     if captions_path:
         cap_esc = _esc_filter_path(captions_path)
-        fc_parts.append(cur_v + "subtitles='" + cap_esc + "'[vsub]")
+        fc_parts.append(cur_v + "subtitles='" + cap_esc + "'" + _fontsdir_option() + "[vsub]")
         cur_v = "[vsub]"
 
     # ---- Stage 3: Contextual visual popup card overlay (optional) ----
