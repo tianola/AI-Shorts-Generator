@@ -4,10 +4,12 @@ OpusClip-grade virality scoring, curiosity-gap hooks, and layout recommendations
 Research-backed signals: hook strength, emotional intensity, audio dynamics, visual events, pacing, narrative completeness.
 """
 import json
+import os
 import re
 import string
 from loguru import logger
 from config import settings
+from services.clip_bounds import load_words, snap_to_sentences
 from services.llm_router import call_llm_json, salvage_incomplete_json
 from services.metadata import derive_title_from_text
 from services.story_analysis import analyze_story_segments
@@ -224,6 +226,26 @@ def _fit_window(start: float, end: float, segments: list, tolerance: float = 1.0
     return round(start, 2), round(end, 2)
 
 
+def _place_window(start: float, end: float, segments: list, words: list):
+    """Sentence edges from word timing when there is any, else segment edges."""
+    if words:
+        window = snap_to_sentences(start, end, words,
+                                   settings.MIN_CLIP_SECONDS * 0.8,
+                                   float(settings.MAX_CLIP_SECONDS))
+        if window is not None:
+            return window
+    return _fit_window(start, end, segments)
+
+
+def _snap_filler(clips: list, segments: list, words: list) -> list:
+    """Heuristic and grid windows get the same sentence edges as model picks."""
+    for clip in clips:
+        window = _place_window(float(clip["start"]), float(clip["end"]), segments, words)
+        if window is not None:
+            clip["start"], clip["end"] = window
+    return clips
+
+
 def _segments_in_window(segments: list, start: float, end: float) -> list:
     """Segments that really overlap the window.
 
@@ -299,8 +321,12 @@ What makes a moment worth picking:
 - Something is at stake: emotion, disagreement, money, risk, a strong opinion, a funny
   or shocking turn. A calm explanation with no turn in it is a weak pick.
 
-Length: between {settings.MIN_CLIP_SECONDS} and {settings.MAX_CLIP_SECONDS} seconds.
-Use the transcript's own timestamps and start and end on the segment boundaries shown.
+Length: between {settings.MIN_CLIP_SECONDS} and {settings.MAX_CLIP_SECONDS} seconds. Most strong
+moments land in 25-45 seconds; use the longer end only when the story needs it to pay
+off. Never shorten a moment by cutting the last sentence: "end" is the moment the
+speaker finishes the sentence where the payoff lands, not where a line of the
+transcript happens to stop (a line can break mid-sentence).
+Use the transcript's own timestamps.
 
 For each candidate:
 - title: the headline burned onto the video and used as the published title. Its job is
@@ -777,6 +803,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
     """
     with open(segments_file, "r", encoding="utf-8") as f:
         segments = json.load(f)
+    words = load_words(os.path.join(os.path.dirname(segments_file), "words.json"))
 
     story_plan = await analyze_story_segments(segments, video_title=video_title)
 
@@ -803,7 +830,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 continue
             # The LLM is not trusted to respect the range or to land on a sentence
             # edge; the code places the window.
-            window = _fit_window(raw_start, raw_end, segments)
+            window = _place_window(raw_start, raw_end, segments, words)
             if window is None:
                 continue
             clip["start"], clip["end"] = window
@@ -973,6 +1000,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
         # so 120 fillers outranked 7 real picks and left the top-10 slice with none.
         selected = list(valid_clips[:num_clips])
         taken = [(float(c["start"]), float(c["end"])) for c in selected]
+        _snap_filler(heuristic_clips, segments, words)
         heuristic_clips.sort(key=lambda x: x.get("virality_score", 0.0), reverse=True)
         for clip in heuristic_clips:
             if len(selected) >= num_clips:
@@ -1009,7 +1037,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             title = derive_title_from_text(window_text)
             if not title:
                 continue
-            words = len(window_text.split())
+            word_count = len(window_text.split())
 
             # Compute new viral signals for fallback clips too
             f_hook = _hook_strength_score(window_text)
@@ -1018,7 +1046,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             f_pacing = 0.7  # assume decent pacing for fallback
 
             f_composite = _composite_score_v2({
-                "virality_score": round(0.45 + min(0.25, words / 60.0), 2),
+                "virality_score": round(0.45 + min(0.25, word_count / 60.0), 2),
                 "hook_strength": f_hook,
                 "emotional_intensity": f_emotion,
                 "audio_dynamics": 0.5,  # no audio data in fallback
@@ -1047,7 +1075,7 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 "cta": "Follow for more.",
                 "selection_path": "grid",
             })
-        return fallback_clips
+        return _snap_filler(fallback_clips, segments, words)
 
 
 # Backward-compatibility alias — old callers used select_best_clips

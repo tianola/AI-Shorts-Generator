@@ -1,10 +1,10 @@
-"""Clip length redesign: 20-30 second clips, not 20-75.
+"""Clip length: 20 s floor, 60 s ceiling (it was 30 until job 113 cut mid-sentence).
 
-YouTube Shorts completion rate beats absolute watch time. A 60-second clip
-loses viewers before the end; a 25-second clip that loops is worth more.
-These tests pin the three guards that enforce the new range:
+YouTube Shorts completion rate beats absolute watch time, so the prompt aims at
+25-45 s, but a clip may run to a minute rather than lose its last sentence.
+These tests pin the guards that enforce the range:
 
-1. The shipped config defaults target 20-30s clips.
+1. The shipped config defaults allow 20-60 s clips.
 2. The LLM is not trusted to respect the range — clips longer than MAX
    get trimmed to MAX by the code.
 3. The validation floor is 80% of MIN (16s), not the old 60% (12s).
@@ -30,9 +30,11 @@ def pin_clip_range(monkeypatch):
     monkeypatch.setattr(settings, "NUM_CLIPS", 3, raising=False)
 
 
-def test_the_shipped_defaults_target_twenty_to_thirty_second_clips():
+def test_the_shipped_defaults_allow_a_story_up_to_a_minute():
+    """30 s cut half of job 113's clips mid-sentence; 60 s is a ceiling, and the
+    prompt still aims at 25-45 s."""
     assert settings.MIN_CLIP_SECONDS == 20
-    assert settings.MAX_CLIP_SECONDS == 30
+    assert settings.MAX_CLIP_SECONDS == 60
 
 
 @pytest.mark.asyncio

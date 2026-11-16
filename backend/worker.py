@@ -457,6 +457,17 @@ def load_clip_diarization(job_dir, clip_start: float, clip_end: float) -> list:
         return []
 
 
+CLIP_FADE_IN = 0.04
+CLIP_FADE_OUT = 0.25
+
+
+def clip_audio_fades(duration: float) -> str:
+    """afade chain for a cut of `duration` seconds: a click-free in and a soft out."""
+    fade_out = min(CLIP_FADE_OUT, max(0.0, duration / 4))
+    return (f"afade=t=in:st=0:d={CLIP_FADE_IN},"
+            f"afade=t=out:st={max(0.0, duration - fade_out):.3f}:d={fade_out:.3f}")
+
+
 def cut_clip(
     source_video: str,
     start: float,
@@ -488,6 +499,9 @@ def cut_clip(
         "-fps_mode", "cfr",
         "-preset", settings.FFMPEG_PRESET,
         "-crf", str(settings.FFMPEG_CRF),
+        # A hard cut on a waveform clicks and sounds chopped even when it falls
+        # in a pause; a few tens of milliseconds of fade is inaudible as a fade.
+        "-af", clip_audio_fades(duration),
         "-c:a", "aac",
         "-b:a", "128k",
         output
@@ -982,7 +996,8 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         if ensure_derived(job_id, short_path, "clip_cut",
                           lambda: cut_clip(video_path, clip_start, clip_end, short_path),
                           {"source": derived_cache.source_fingerprint(job_dir, video_path),
-                           "window": clip_window}):
+                           "window": clip_window,
+                           "audio": clip_audio_fades(clip_window[1] - clip_window[0])}):
             job_info(job_id, f"Clip cut: {short_path}")
         else:
             job_info(job_id, f"Clip already exists for [{clip_window[0]:.1f}s - "

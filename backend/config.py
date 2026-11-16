@@ -185,10 +185,12 @@ class Settings(BaseSettings):
         description="Minimum clip duration in seconds"
     )
     MAX_CLIP_SECONDS: int = Field(
-        default=30,
+        default=60,
         ge=10,
         le=180,
-        description="Maximum clip duration in seconds"
+        description="Maximum clip duration in seconds. A ceiling, not a target: the "
+                    "window ends where the last sentence ends, and at 30 s half of "
+                    "job 113's clips were cut mid-sentence to fit."
     )
 
     # ====================

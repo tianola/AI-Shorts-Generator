@@ -32,6 +32,11 @@
 - `sample_frames` seeks when interval >= 2 s (temporal sweep decoded all frames: ~11 of 16 min).
 - Tests 806 passed, ruff clean.
 
+## Done 2026-11-16 (evening)
+- Committed 65e5a87 (afternoon fixes). Services restarted by user 15:23. Deleted jobs 70 and 111 (DB rows + folders; backups `storage/app.db.bak-before-job{70,111}-delete`); unique clip index now created. YouTube still has job 111's QxSMPyB6CBU, LY-o5HuPgPQ.
+- Publish: job 113 queued public, 3/day at 06/13/20 UTC (reslotted by hand); `.env` `PUBLISH_SCHEDULE_GAP_SECONDS=25200` (needs worker restart for new jobs).
+- Clip ends (uncommitted): new `services/clip_bounds.py` snaps windows to sentence ends from words.json (punctuation first, pauses only as fallback, +0.35 s tail, start on sentence start), extends to finish the thought; `MAX_CLIP_SECONDS` 30 -> 60; prompt aims 25-45 s; heuristic/grid windows snapped too; `cut_clip` adds afade in 0.04 / out 0.25 (part of clip_cut cache key). Job 113 recheck: 10/10 end on a full sentence (5 cut mid-sentence before). Tests 814 passed.
+
 ## Known state
 - Free OmniRoute models are in 429 cooldown until ~2026-11-21 → job 111 got grid clips and transcript-derived titles. Root cause of "bad titles".
 - `ANTHROPIC_API_KEY` not set in `backend/.env` yet. No real Claude call has been made.
