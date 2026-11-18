@@ -11,7 +11,7 @@ from loguru import logger
 from config import settings
 from services.clip_bounds import load_words, snap_to_sentences
 from services.clip_judging import (
-    JUDGE_SCHEMA, apply_penalties, dimension_score, fit_to_topic, judge_instructions,
+    AUTO, JUDGE_SCHEMA, apply_penalties, dimension_score, fit_to_topic, infer_mode, judge_instructions,
     mode_guidance, normalise_mode, parse_judgement, topic_boundaries,
 )
 from services.llm_router import call_llm_json, pick_model, salvage_incomplete_json
@@ -756,6 +756,24 @@ def _composite_score_v2(clip: dict) -> float:
 
 async def select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None,
                        mode: str = "viral") -> list:
+    """Select clips (see _select_clips). mode="auto" reads the video and picks the mode;
+    every clip carries the mode that was used as "edit_mode"."""
+    mode = normalise_mode(mode)
+    if mode == AUTO:
+        try:
+            with open(segments_file, "r", encoding="utf-8") as fh:
+                mode = await infer_mode(video_title, json.load(fh))
+        except (OSError, ValueError):
+            mode = "viral"
+        logger.info(f"Editing mode picked for this video: {mode}")
+    clips = await _select_clips(segments_file, num_clips, video_title, temporal_events, mode)
+    for clip in clips:
+        clip["edit_mode"] = mode
+    return clips
+
+
+async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None,
+                        mode: str = "viral") -> list:
     """
     Select the best clips from a video using AI, in two passes.
 
@@ -779,7 +797,6 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
     words = load_words(os.path.join(os.path.dirname(segments_file), "words.json"))
 
     story_plan = await analyze_story_segments(segments, video_title=video_title)
-    mode = normalise_mode(mode)
     topic_breaks = topic_boundaries(segments)
 
     wanted = _candidates_wanted(num_clips)

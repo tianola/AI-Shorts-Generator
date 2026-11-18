@@ -55,9 +55,10 @@ def test_reject_and_context_dependence_cost_score_and_preferred_length_earns_som
     assert cj.apply_penalties(0.7, dims, "keep", 20) < base
 
 
-def test_modes_fall_back_to_viral():
+def test_unknown_modes_mean_auto_and_auto_guidance_is_viral():
     assert cj.normalise_mode("GAMING") == "gaming"
-    assert cj.normalise_mode("nonsense") == "viral"
+    assert cj.normalise_mode("nonsense") == "auto" and cj.normalise_mode(None) == "auto"
+    assert "viral" in cj.mode_guidance("auto").lower()
     assert "funny" in cj.mode_guidance("funny").lower()
 
 
@@ -129,3 +130,52 @@ async def test_rejected_candidates_never_ship_and_all_rejected_means_no_short(mo
     verdict["decision"] = "keep"
     kept = await clip_selector.select_clips(str(path), num_clips=2)
     assert len(kept) == 2 and all(c["judge_decision"] == "keep" for c in kept)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply,expected", [
+    ('{"mode": "gaming"}', "gaming"), ('{"mode": "FUNNY"}', "funny"),
+    ('{"mode": "cooking"}', "viral"), ("not json", "viral"),
+])
+async def test_the_mode_is_read_from_the_video(monkeypatch, reply, expected):
+    import services.llm_router as router
+
+    async def fake(**_kw):
+        return reply
+    monkeypatch.setattr(router, "call_llm_json", fake)
+    segs = [{"start": 0, "end": 5, "text": "welcome back to the stream"}] * 6
+    assert await cj.infer_mode("Ranked grind", segs) == expected
+
+
+@pytest.mark.asyncio
+async def test_a_failing_model_or_empty_transcript_means_viral(monkeypatch):
+    import services.llm_router as router
+
+    async def boom(**_kw):
+        raise RuntimeError("down")
+    monkeypatch.setattr(router, "call_llm_json", boom)
+    assert await cj.infer_mode("t", [{"text": "hello there"}]) == "viral"
+    assert await cj.infer_mode("t", []) == "viral"
+
+
+@pytest.mark.asyncio
+async def test_auto_picks_a_mode_and_tags_every_clip(monkeypatch, tmp_path):
+    from services import clip_selector
+
+    seen = {}
+
+    async def fake_infer(title, segments):
+        return "gaming"
+
+    async def fake_inner(path, num, title, events, mode):
+        seen["mode"] = mode
+        return [{"start": 0.0, "end": 30.0}]
+    monkeypatch.setattr(clip_selector, "infer_mode", fake_infer)
+    monkeypatch.setattr(clip_selector, "_select_clips", fake_inner)
+    path = tmp_path / "segments.json"
+    path.write_text(json.dumps([{"start": 0, "end": 5, "text": "hi"}]), encoding="utf-8")
+
+    clips = await clip_selector.select_clips(str(path), 1, mode="auto")
+    assert seen["mode"] == "gaming" and clips[0]["edit_mode"] == "gaming"
+    clips = await clip_selector.select_clips(str(path), 1, mode="funny")
+    assert seen["mode"] == "funny" and clips[0]["edit_mode"] == "funny"

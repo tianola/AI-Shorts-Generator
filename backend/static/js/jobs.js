@@ -366,7 +366,7 @@ export async function createJob(event) {
   const whisperModel = els.whisperModel ? els.whisperModel.value : 'tiny';
   const captionStyle = els.captionStyle ? els.captionStyle.value : 'mrbeast';
   const layoutMode = els.layoutMode ? els.layoutMode.value : 'auto';
-  const clipMode = els.clipMode ? els.clipMode.value : 'viral';
+  const clipMode = els.clipMode ? els.clipMode.value : 'auto';
   const targetClips = els.clipCountInput ? (parseInt(els.clipCountInput.value, 10) || 10) : 10;
   const autoUpload = document.getElementById('autoUploadCheck') ? document.getElementById('autoUploadCheck').checked : true;
   const llmTranslate = document.getElementById('llmTranslateCheck')?.checked || false;

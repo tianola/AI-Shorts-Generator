@@ -62,13 +62,49 @@ EDIT_MODES: Dict[str, str] = {
 }
 
 
+AUTO = "auto"   # let the system read the video and pick the mode
+
+
 def normalise_mode(value: Optional[str]) -> str:
+    """A known editing mode, or "auto" (decided per video); anything else is auto too."""
     mode = str(value or "").strip().lower()
-    return mode if mode in EDIT_MODES else DEFAULT_MODE
+    return mode if mode in EDIT_MODES else AUTO
+
+
+async def infer_mode(video_title: str, segments: list) -> str:
+    """Read the video and pick the editing mode that fits it. Falls back to viral.
+
+    One short model call on the title plus the opening, middle and end of the talk. The
+    answer must be one of EDIT_MODES; anything else, or any failure, is viral.
+    """
+    from services.llm_router import call_llm_json, pick_model
+
+    texts = [str(seg.get("text") or "").strip() for seg in segments]
+    if not any(texts):
+        return DEFAULT_MODE
+    third = max(1, len(texts) // 3)
+    sample = " ... ".join(" ".join(texts[i:i + 12])[:700] for i in (0, third, 2 * third))
+    modes = "\n".join(f"- {name}: {text}" for name, text in EDIT_MODES.items())
+    prompt = (
+        f'Video title: "{video_title}"\nTranscript excerpts: {sample}\n\n'
+        f"Which editing mode fits this video best when cutting short clips from it?\n{modes}\n"
+        'Pick "gaming" only for a video of someone playing a video game. If nothing stands out, '
+        'pick "viral".\nReturn JSON only: {"mode": "one of the names above"}'
+    )
+    try:
+        raw = await call_llm_json(prompt=prompt, system="You classify videos. JSON only.",
+                                  model=pick_model(), temperature=0.1, max_tokens=300)
+        import json as _json
+        chosen = str(_json.loads(raw).get("mode", "")).strip().lower()
+    except Exception:
+        return DEFAULT_MODE
+    return chosen if chosen in EDIT_MODES else DEFAULT_MODE
 
 
 def mode_guidance(mode: Optional[str]) -> str:
     mode = normalise_mode(mode)
+    if mode == AUTO:
+        mode = DEFAULT_MODE
     return f"Editing mode: {mode}. {EDIT_MODES[mode]}"
 
 

@@ -940,7 +940,7 @@ async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_t
     
     num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else settings.NUM_CLIPS
     clips = await select_clips(segments_file, num_target_clips, video_title=source_title, temporal_events=temporal_events,
-                               mode=getattr(job, "clip_mode", None) or "viral")
+                               mode=getattr(job, "clip_mode", None) or "auto")
     job_info(job_id, f"Selected {len(clips)} clips")
     update_progress(f"Selected {len(clips)} clips", 56)
     
@@ -1009,7 +1009,9 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # =====================
         # User's chosen preset on the job ALWAYS takes precedence to keep all clips consistent
         layout_choice = getattr(job, "default_layout_mode", None) or clip.get("layout") or "auto"
-        if getattr(job, "clip_mode", None) == "gaming" and layout_choice in ("auto", "adaptive", None, ""):
+        # The mode is the job's, or - when it was left on auto - the one picked from the video.
+        _edit_mode = clip.get("edit_mode") or getattr(job, "clip_mode", None)
+        if _edit_mode == "gaming" and layout_choice in ("auto", "adaptive", None, ""):
             layout_choice = "gaming"  # gameplay + facecam panels; the mode implies the layout
         caption_style = getattr(job, "default_caption_style", None) or clip.get("caption_style") or "mrbeast"
 
