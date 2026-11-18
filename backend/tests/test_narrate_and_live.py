@@ -126,7 +126,8 @@ async def test_an_llm_verdict_becomes_a_highlight_or_nothing(monkeypatch):
     first = await live.llm_highlight("he fell", 0, 20)
     assert first.title == "He fell off the chair" and first.score == 8
     assert await live.llm_highlight("nothing", 0, 20) is None
-    assert await live.llm_highlight("garbage", 0, 20) is None
+    with pytest.raises(ValueError):          # unreadable: the caller falls back to keywords
+        await live.llm_highlight("garbage", 0, 20)
 
 
 @pytest.mark.skipif(not FFMPEG, reason="ffmpeg not installed")
@@ -147,3 +148,154 @@ def test_a_clip_is_cut_from_buffered_segments(tmp_path, monkeypatch):
     assert not session.delete_clip("../etc")
     with pytest.raises(RuntimeError):
         session.cut(900, 920)                 # nothing buffered there
+
+
+def test_captions_use_the_script_words_and_leave_no_gap_where_recognition_failed():
+    script = "On August 15, 1977, a dish in Ohio picked up a signal."
+    heard = [{"word": " On", "start": 0.0, "end": 0.3}, {"word": " August", "start": 0.3, "end": 0.66},
+             {"word": " 15,", "start": 0.66, "end": 1.28},
+             # "1977," came back with no length and "a dish" as "addition"
+             {"word": " 1977,", "start": 2.68, "end": 2.68}, {"word": " addition", "start": 3.54, "end": 3.86},
+             {"word": " in", "start": 3.86, "end": 4.0}, {"word": " Ohio", "start": 4.0, "end": 4.36},
+             {"word": " picked", "start": 4.36, "end": 4.64}, {"word": " up", "start": 4.64, "end": 4.9},
+             {"word": " a", "start": 4.9, "end": 5.02}, {"word": " signal.", "start": 5.02, "end": 5.5}]
+    out = narrate.align_script_to_words(script, heard, 5.8)
+    assert [w["word"].strip() for w in out] == script.split()           # the script's words, all of them
+    assert all(a["end"] <= b["start"] + 1e-6 for a, b in zip(out, out[1:]))
+    assert all(b["start"] - a["end"] < 0.6 for a, b in zip(out, out[1:])), "a stretch of speech lost its caption"
+    assert out[-1]["end"] <= 5.8
+
+
+def test_alignment_with_nothing_matching_still_covers_the_whole_voice():
+    out = narrate.align_script_to_words("one two three four", [{"word": " xyz", "start": 0.5, "end": 0.9}], 8.0)
+    assert [w["word"].strip() for w in out] == ["one", "two", "three", "four"]
+    assert out[0]["start"] == 0 and out[-1]["end"] <= 8.0
+
+
+# ------------------------------------------------------------- stock footage
+
+def test_keyword_fallback_prefers_frequent_long_words():
+    from services import stock_footage as sf
+    q = sf.fallback_queries("The telescope heard a signal. The signal came from the telescope array.", 2)
+    assert q == ["telescope", "signal"] and sf.fallback_queries("a an the", 2) == ["abstract background"]
+
+
+def test_the_sharpest_portrait_file_is_chosen():
+    from services import stock_footage as sf
+    video = {"video_files": [
+        {"link": "a", "width": 540, "height": 960, "file_type": "video/mp4"},
+        {"link": "b", "width": 1080, "height": 1920, "file_type": "video/mp4"},
+        {"link": "c", "width": 2160, "height": 3840, "file_type": "video/mp4"},   # wider than 1080
+        {"link": "d", "width": 1920, "height": 1080, "file_type": "video/mp4"}]}
+    assert sf.pick_file(video)["link"] == "b"
+    assert sf.pick_file({"video_files": []}) is None
+
+
+@pytest.mark.asyncio
+async def test_no_key_means_no_footage_and_no_network_call(monkeypatch, tmp_path):
+    from services import stock_footage as sf
+    monkeypatch.setattr(sf.settings, "PEXELS_API_KEY", None, raising=False)
+    called = []
+    monkeypatch.setattr(sf.httpx, "get", lambda *a, **k: called.append(1))
+    assert await sf.footage_for("any script", tmp_path) == [] and not called
+
+
+def test_a_found_video_is_downloaded_once_and_reused(monkeypatch, tmp_path):
+    from services import stock_footage as sf
+    monkeypatch.setattr(sf.settings, "PEXELS_API_KEY", "k", raising=False)
+
+    class Resp:
+        status_code = 200
+        def json(self):
+            return {"videos": [{"id": 7, "duration": 3, "video_files": []},          # too short
+                               {"id": 9, "duration": 20, "video_files": [
+                                   {"link": "http://x/v.mp4", "width": 1080, "height": 1920, "file_type": "video/mp4"}]}]}
+
+    class Stream:
+        status_code = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def iter_bytes(self, n): yield b"x" * 20000
+
+    downloads = []
+    monkeypatch.setattr(sf.httpx, "get", lambda *a, **k: Resp())
+    monkeypatch.setattr(sf.httpx, "stream", lambda *a, **k: downloads.append(1) or Stream())
+    first = sf.fetch("night sky", tmp_path)
+    again = sf.fetch("night sky", tmp_path)
+    assert first == again and first.name == "pexels_9.mp4" and len(downloads) == 1
+
+
+def test_a_youtube_live_with_separate_video_and_audio_gets_two_inputs(monkeypatch, tmp_path):
+    """The real Al Jazeera live offers video-only and audio-only HLS; yt-dlp prints two addresses."""
+    session = live.LiveSession(tmp_path / "live", "youtube", "https://youtube.com/@x/live")
+
+    class Done:
+        returncode = 0
+        stdout = "https://v.example/video.m3u8\nhttps://a.example/audio.m3u8\n"
+        stderr = ""
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return Done()
+    monkeypatch.setattr(live.subprocess, "run", fake_run)
+    args = session._stream_url()
+    assert args == ["-i", "https://v.example/video.m3u8", "-i", "https://a.example/audio.m3u8"]
+    assert "-m" in seen["cmd"] and "yt_dlp" in seen["cmd"] and "bv*[height<=720]+ba/b[height<=720]/b" in seen["cmd"]
+
+
+def test_a_refused_stream_reports_the_reason_not_a_wall_of_warnings(monkeypatch, tmp_path):
+    session = live.LiveSession(tmp_path / "live", "youtube", "https://youtube.com/@x/live")
+
+    class Fail:
+        returncode = 1
+        stdout = ""
+        stderr = "WARNING: lots of noise\nERROR: [youtube] abc: Requested format is not available"
+    monkeypatch.setattr(live.subprocess, "run", lambda *a, **k: Fail())
+    with pytest.raises(RuntimeError, match="Requested format is not available"):
+        session._stream_url()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="ffmpeg not installed")
+def test_a_segment_is_transcribed_from_decoded_samples(monkeypatch, tmp_path):
+    """faster-whisper's own file decoder breaks on some PyAV versions, so it gets samples."""
+    import services.whisper as w
+    seen = {}
+
+    class Model:
+        def transcribe(self, audio, **kw):
+            seen["type"] = type(audio).__name__
+            seen["language"] = kw.get("language")
+            return [type("S", (), {"text": " hello world "})()], None
+    monkeypatch.setattr(w, "get_whisper_model", lambda name=None: Model())
+    seg_path = tmp_path / "seg_000000.ts"
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=duration=3", "-f", "mpegts", str(seg_path)],
+                   check=True, capture_output=True)
+    session = live.LiveSession(tmp_path / "live", "obs", "")
+    assert session._transcribe(live.Segment(seg_path, 0, 0.0)) == "hello world"
+    assert seen == {"type": "ndarray", "language": "en"}
+
+
+@pytest.mark.asyncio
+async def test_the_stream_context_reaches_the_model_and_titles_are_complete(monkeypatch):
+    import services.llm_router as router
+    seen = {}
+
+    async def fake(**kw):
+        seen["prompt"] = kw["prompt"]
+        return ('{"is_highlight": true, "category": "excitement", "score": 8, '
+                '"title": "IShowSpeed reacts to his first GTA 6 gameplay", "description": "He is shocked."}')
+    monkeypatch.setattr(router, "call_llm_json", fake)
+    hit = await live.llm_highlight("no way this is real", 0, 20, "GTA 6 releases on November 19")
+    assert "GTA 6 releases on November 19" in seen["prompt"]
+    assert hit.title.startswith("IShowSpeed") and hit.description == "He is shocked."
+
+    async def cut_off(**_kw):
+        return '{"is_highlight": true, "score": 9, "title": "Well, Yall"}'
+    monkeypatch.setattr(router, "call_llm_json", cut_off)
+    assert await live.llm_highlight("x", 0, 20) is None          # two words is not a title
+
+
+def test_a_keyword_hit_is_named_after_the_stream_not_after_a_line_of_chatter():
+    hit = live.heuristic_highlight("OH MY GOD no way that was insane!!", 0, 20, "GTA 6 gameplay")
+    assert hit.title.startswith("GTA 6 gameplay:") and "OH MY GOD" not in hit.title.upper()

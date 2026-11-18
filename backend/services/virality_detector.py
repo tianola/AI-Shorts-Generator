@@ -87,7 +87,6 @@ def compute_composite_virality(
         "μυστικό", "λεφτά", "λάθος", "αλήθεια", "τρελό", "προσοχή"
     }
     impact_count = sum(1 for w in words if any(kw in w for kw in high_impact_words))
-    transcript_boost = min(0.25, impact_count * 0.05)
 
     base_score = llm_score if llm_score else 0.80
     visual_score = visual_stats.get("intensity_score", 0.5)
@@ -96,7 +95,7 @@ def compute_composite_virality(
     # the number; picture activity is a small correction. It used to weigh 35% and the
     # keyword boost 15%, and the result was floored at 50: a talk-over-diagrams video
     # has no faces or motion, so every clip scored below 50 and showed exactly 50.
-    # transcript_boost stays out of the score: its word list is English-only.
+    # The keyword count stays out of the score: its word list is English-only.
     final_virality = (base_score * 0.85) + (visual_score * 0.15)
     final_virality_100 = round(min(99.0, max(1.0, final_virality * 100.0)), 1)
 

@@ -14,6 +14,7 @@ fallback); a hit, or the operator's "clip that", is cut from the buffered segmen
 import json
 import re
 import shutil
+import sys
 import subprocess
 import threading
 import time
@@ -97,10 +98,20 @@ class Highlight:
     title: str
     score: float
     reason: str
+    description: str = ""
 
 
-def heuristic_highlight(text: str, start: float, end: float) -> Optional[Highlight]:
-    """Cheap offline detector: keyword families and exclamation density."""
+def _subject(context: str) -> str:
+    """A short name for what the stream is about, from its title/context (first words)."""
+    words = re.sub(r"[^\w\s'&.-]", " ", context or "").split()
+    return " ".join(words[:4]) if words else "Live"
+
+
+def heuristic_highlight(text: str, start: float, end: float, context: str = "") -> Optional[Highlight]:
+    """Cheap offline detector: keyword families and exclamation density.
+
+    Its title is generic on purpose: the first words of the speech make a cut-off, meaningless
+    title, so a hit found this way is named after the stream and the kind of moment."""
     best, weight = None, 0
     for category, pattern in _HEURISTICS.items():
         hits = len(pattern.findall(text))
@@ -111,37 +122,44 @@ def heuristic_highlight(text: str, start: float, end: float) -> Optional[Highlig
         best = best or "High-energy"
     if not best or weight < 2:
         return None
-    title = " ".join(text.split()[:6]).strip().title()
-    return Highlight(start, end, best, title or best, min(10.0, 5.0 + weight), "keyword match")
+    return Highlight(start, end, best, f"{_subject(context)}: {best.lower()} moment",
+                     min(10.0, 5.0 + weight), "keyword match")
 
 
-async def llm_highlight(text: str, start: float, end: float) -> Optional[Highlight]:
-    """Ask the model whether the recent speech is a clip-worthy moment."""
+async def llm_highlight(text: str, start: float, end: float, context: str = "") -> Optional[Highlight]:
+    """Ask the model whether the recent speech is a clip-worthy moment, and to name it.
+
+    `context` is what is known about the stream (its title, what is happening around it), so
+    the title can say what the clip is about instead of repeating a line of chatter."""
     from services.llm_router import call_llm_json
 
+    about = f"What is known about this stream: {context}\n" if context else ""
     prompt = (
-        "You clip live streams. Recent speech from the stream:\n"
+        "You clip live streams for YouTube Shorts.\n"
+        f"{about}Recent speech from the stream (automatic transcript, may contain mistakes):\n"
         f'"{text[-1800:]}"\n\n'
         "Is it an engaging moment worth a vertical short (funny, exciting, surprising, emotional, "
         "an announcement, a great play, an insight)? Reply JSON only: "
         '{"is_highlight": true/false, "category": "one word", "score": 1-10, '
-        '"title": "catchy 4-7 words in the spoken language", "reason": "short"}'
+        '"title": "natural English headline of 5-9 words that says what happens and, when it fits, '
+        'names the subject of the stream; a complete phrase, never cut off, no quotes, no clickbait '
+        'that the clip does not deliver", '
+        '"description": "one sentence for the video description", "reason": "short"}'
     )
     raw = await call_llm_json(prompt=prompt, system="You are a sharp live-stream clipper. JSON only.",
                               model=settings.OMNIROUTE_MODEL, temperature=0.3, max_tokens=600)
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return None
+    data = json.loads(raw)          # unreadable reply: raises, so the caller falls back
     if not data.get("is_highlight"):
-        return None
+        return None                 # the model's verdict: not worth a clip
     try:
         score = max(1.0, min(10.0, float(data.get("score", 7))))
     except (TypeError, ValueError):
         score = 7.0
-    return Highlight(start, end, str(data.get("category") or "Highlight")[:24],
-                     str(data.get("title") or "Live moment").strip()[:60], score,
-                     str(data.get("reason") or "")[:200])
+    title = str(data.get("title") or "").strip().strip('"')[:80]
+    if len(title.split()) < 3:        # nothing usable to publish under
+        return None
+    return Highlight(start, end, str(data.get("category") or "Highlight")[:24], title, score,
+                     str(data.get("reason") or "")[:200], str(data.get("description") or "")[:300])
 
 
 def threshold_for(sensitivity: int) -> float:
@@ -165,11 +183,14 @@ def validate_source(kind: str, url: str) -> Optional[str]:
 
 class LiveSession:
     def __init__(self, root: Path, kind: str, url: str, sensitivity: int = 5,
-                 buffer_minutes: int = 10, auto_clip: bool = True, min_gap: float = 30.0):
+                 buffer_minutes: int = 10, auto_clip: bool = True, min_gap: float = 30.0,
+                 layout: str = "auto", context: str = ""):
         self.root = Path(root)
         self.kind, self.url = kind.lower(), url.strip()
         self.sensitivity = max(1, min(10, sensitivity))
         self.auto_clip = auto_clip
+        self.layout = layout or "auto"      # vertical layout of the clips: auto, gaming, fit_blur...
+        self.context = context.strip()      # what the stream is about; the stream's own title is added
         self.min_gap = min_gap
         self.buffer = RollingBuffer(self.root / "buffer", max(3, min(30, buffer_minutes)) * 60)
         self.clips_dir = self.root / "clips"
@@ -203,19 +224,43 @@ class LiveSession:
 
     # -- capture
     def _stream_url(self) -> List[str]:
+        """ffmpeg input arguments for the stream. A YouTube live offers video and audio as
+        separate streams, so yt-dlp may print two addresses (video first, then audio)."""
         if self.kind == "obs":
             return ["-listen", "1", "-i", OBS_URL]
-        out = subprocess.run(["yt-dlp", "-g", "-f", "best[height<=1080]/best", self.url],
-                             capture_output=True, text=True, timeout=60)
-        lines = [ln for ln in out.stdout.splitlines() if ln.startswith("http")]
+        out = subprocess.run([sys.executable, "-m", "yt_dlp", "-g", "--no-warnings",
+                              "-f", "bv*[height<=720]+ba/b[height<=720]/b", self.url],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
+        lines = [ln.strip() for ln in out.stdout.splitlines() if ln.startswith("http")]
         if out.returncode or not lines:
-            raise RuntimeError((out.stderr or "yt-dlp could not open the stream").strip()[-300:])
-        return ["-i", lines[0]]
+            reason = [ln for ln in (out.stderr or "").splitlines() if ln.startswith("ERROR")]
+            raise RuntimeError((reason[-1] if reason else "yt-dlp could not open the stream")[:300])
+        args: List[str] = []
+        for address in lines[:2]:
+            args += ["-i", address]
+        return args
+
+    def _learn_stream_title(self) -> None:
+        """Add the stream's own title to the context the model names clips from."""
+        if self.kind != "youtube":
+            return
+        try:
+            out = subprocess.run([sys.executable, "-m", "yt_dlp", "--no-warnings", "--skip-download",
+                                  "--print", "%(title)s", self.url],
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+            title = (out.stdout or "").strip().splitlines()[-1:] or [""]
+            if title[0] and title[0] not in self.context:
+                self.context = f"{self.context} Stream title: {title[0]}".strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
     def _capture(self) -> None:
         try:
+            self._learn_stream_title()
             source = self._stream_url()
-            cmd = ["ffmpeg", "-y", *source, "-c", "copy", "-f", "segment", "-segment_time", str(SEGMENT_SECONDS),
+            inputs = source.count("-i")
+            maps = ["-map", "0:v:0?", "-map", "1:a:0?"] if inputs == 2 else ["-map", "0:v:0?", "-map", "0:a:0?"]
+            cmd = ["ffmpeg", "-y", *source, *maps, "-c", "copy", "-f", "segment", "-segment_time", str(SEGMENT_SECONDS),
                    "-reset_timestamps", "1", str(self.buffer.folder / "seg_%06d.ts")]
             self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.status, self.detail = "live", "Recording the live buffer"
@@ -230,13 +275,23 @@ class LiveSession:
 
     # -- analysis
     def _transcribe(self, seg: Segment) -> str:
+        """The speech in one segment, or "" when there is none or recognition fails.
+
+        The audio is decoded here with ffmpeg and handed over as samples: faster-whisper's
+        own file decoder breaks against some PyAV versions."""
         try:
+            import numpy as np
             from services.whisper import get_whisper_model
+            raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(seg.path), "-vn", "-ac", "1", "-ar", "16000",
+                                  "-f", "s16le", "-"], capture_output=True, timeout=60).stdout
+            if len(raw) < 16000:   # under half a second of audio
+                return ""
+            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
             model = get_whisper_model("tiny")
-            segments, _info = model.transcribe(str(seg.path), vad_filter=True)
+            segments, _info = model.transcribe(samples, vad_filter=True, language="en")
             return " ".join(s.text.strip() for s in segments).strip()
         except Exception as exc:
-            logger.debug(f"Live transcription skipped: {exc}")
+            logger.warning(f"Live transcription failed: {type(exc).__name__}: {exc}")
             return ""
 
     def _analyse(self) -> None:
@@ -264,21 +319,24 @@ class LiveSession:
                     continue
                 if window[0]["start"] - self._last_hit < self.min_gap:
                     continue
+                # The keyword detector only stands in when the model could not answer. When
+                # the model answered "not a highlight" that is the verdict; second-guessing
+                # it produced clips with made-up generic titles.
                 try:
-                    hit = asyncio.run(llm_highlight(joined, window[0]["start"], window[-1]["end"]))
+                    hit = asyncio.run(llm_highlight(joined, window[0]["start"], window[-1]["end"], self.context))
                 except Exception:
-                    hit = None
-                hit = hit or heuristic_highlight(joined, window[0]["start"], window[-1]["end"])
+                    hit = heuristic_highlight(joined, window[0]["start"], window[-1]["end"], self.context)
                 if hit and hit.score >= threshold_for(self.sensitivity):
                     self._last_hit = hit.end
                     try:
-                        self.cut(max(0.0, hit.start - 2.0), hit.end + 3.0, hit.title, hit.category, hit.reason)
+                        self.cut(max(0.0, hit.start - 2.0), hit.end + 3.0, hit.title, hit.category, hit.reason,
+                                 hit.description)
                     except Exception as exc:
                         logger.warning(f"Live clip failed: {exc}")
 
     # -- clipping
     def cut(self, start: float, end: float, title: str = "Live moment", category: str = "",
-            reason: str = "") -> dict:
+            reason: str = "", description: str = "") -> dict:
         """Cut [start, end] (seconds since session start) from the buffer into a clip."""
         segs = self.buffer.covering(start, end)
         if not segs:
@@ -296,12 +354,12 @@ class LiveSession:
             raise RuntimeError(f"ffmpeg concat failed: {proc.stderr[-300:]}")
         try:
             from services.smart_crop import smart_crop_video
-            smart_crop_video(str(raw), str(vertical), mode="auto")
+            smart_crop_video(str(raw), str(vertical), mode=self.layout)
         except Exception as exc:
             logger.warning(f"Live clip kept horizontal ({exc})")
             shutil.copy2(raw, vertical)
         listing.unlink(missing_ok=True)
-        meta = {"id": clip_id, "title": title, "category": category, "reason": reason,
+        meta = {"id": clip_id, "title": title, "category": category, "reason": reason, "description": description,
                 "duration": round(sum(1 for _ in segs) * float(SEGMENT_SECONDS), 1),
                 "created_at": time.time(),
                 "path": str(vertical.relative_to(settings.STORAGE_ROOT)).replace("\\", "/")}

@@ -270,13 +270,71 @@ def even_words(script: str, duration: float) -> List[dict]:
     return out
 
 
+def _norm(token: str) -> str:
+    return re.sub(r"[\W_]+", "", token.lower())
+
+
+def align_script_to_words(script: str, heard: List[dict], duration: float) -> List[dict]:
+    """The script's own words, timed by what speech recognition heard.
+
+    Recognition mishears ("a dish" -> "addition") and drops short words, so its text is
+    not used for the captions: the script is exactly what was spoken. Words that match
+    take the recognised timing; each run of unmatched words is spread by length between
+    the nearest matched neighbours, so there is never a stretch of speech without a caption.
+    """
+    import difflib
+
+    tokens = script.split()
+    if not tokens:
+        return []
+    # A recognised word with no length is a timing the recogniser made up; it is not an anchor.
+    heard = [w for w in heard if _norm(str(w.get("word", ""))) and float(w["end"]) - float(w["start"]) >= 0.05]
+    a = [_norm(t) for t in tokens]
+    b = [_norm(str(w["word"])) for w in heard]
+    timing: List[Optional[tuple]] = [None] * len(tokens)
+    for block in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+        for k in range(block.size):
+            src = heard[block.b + k]
+            timing[block.a + k] = (float(src["start"]), float(src["end"]))
+
+    out: List[dict] = []
+    i = 0
+    cursor = 0.0
+    while i < len(tokens):
+        if timing[i] is not None:
+            start, end = timing[i]
+            start = max(start, cursor)
+            end = max(end, start + 0.12)
+            out.append({"word": " " + tokens[i], "start": round(start, 3), "end": round(end, 3)})
+            cursor = end
+            i += 1
+            continue
+        j = i
+        while j < len(tokens) and timing[j] is None:
+            j += 1
+        right = timing[j][0] if j < len(tokens) else duration
+        right = max(right, cursor + 0.12 * (j - i))
+        weights = [len(t) + 1 for t in tokens[i:j]]
+        span = (right - cursor) / sum(weights)
+        for token, weight in zip(tokens[i:j], weights):
+            out.append({"word": " " + token, "start": round(cursor, 3),
+                        "end": round(cursor + span * weight * 0.92, 3)})
+            cursor += span * weight
+        i = j
+    return out
+
+
 def _word_timings(audio: Path, script: str, duration: float, job_dir: Path) -> Path:
     words_file = job_dir / "words.json"
     try:
         from services.whisper import transcribe_audio_file
         _segments, words_path = transcribe_audio_file(str(audio), str(job_dir), whisper_model="tiny")
-        if words_path and os.path.isfile(words_path) and json.loads(Path(words_path).read_text(encoding="utf-8")):
-            return Path(words_path)
+        if words_path and os.path.isfile(words_path):
+            heard = json.loads(Path(words_path).read_text(encoding="utf-8"))
+            if heard:
+                words_file.write_text(json.dumps(align_script_to_words(script, heard, duration)),
+                                      encoding="utf-8")
+                return words_file
     except Exception as exc:  # recognition is a nicety; the captions must still appear
         logger.warning(f"Narrate: word alignment failed ({type(exc).__name__}: {exc}); spreading words by length")
     words_file.write_text(json.dumps(even_words(script, duration)), encoding="utf-8")
@@ -290,10 +348,55 @@ def _ffmpeg(args: List[str], what: str) -> None:
         raise NarrateError(f"ffmpeg failed while {what}: {proc.stderr[-400:]}")
 
 
+def _pick_sources(script: str, background: Optional[str]) -> List[Path]:
+    """The footage to use: the chosen library file, else stock found for this script, else
+    whatever is in the library, else nothing (a plain gradient is drawn)."""
+    if background:
+        return [safe_library_file(background)]
+    try:
+        import asyncio
+        from services import stock_footage
+        found = asyncio.run(stock_footage.footage_for(script, library_dir()))
+    except Exception as exc:  # no key, no network: carry on with what we have
+        logger.warning(f"Narrate: no stock footage ({type(exc).__name__}: {exc})")
+        found = []
+    if found:
+        return found
+    own = [library_dir() / item["name"] for item in list_library()]
+    return random.sample(own, min(3, len(own))) if own else []
+
+
+def _build_background(sources: List[Path], length: float, job_dir: Path) -> Path:
+    """A 1080x1920 30 fps video of exactly `length` seconds, cut from the sources in turn
+    (each looped if shorter than its share), or a gradient when there are none."""
+    out = job_dir / "background.mp4"
+    vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p"
+    enc = ["-an", "-c:v", "libx264", "-preset", settings.FFMPEG_PRESET, "-crf", str(settings.FFMPEG_CRF)]
+    if not sources:
+        _ffmpeg(["-f", "lavfi", "-i", f"gradients=s=1080x1920:d={length + 1:.2f}:speed=0.01:c0=0x1b1f3b:c1=0x7a3cff:rate=30",
+                 "-t", f"{length:.2f}", *enc, str(out)], "drawing the gradient")
+        return out
+    share = length / len(sources)
+    parts = []
+    for i, src in enumerate(sources):
+        src_len = _duration(src)
+        offset = random.uniform(0, max(0.0, src_len - share - 1)) if src_len > share + 1 else 0.0
+        part = job_dir / f"bg_{i}.mp4"
+        _ffmpeg(["-stream_loop", "-1", "-ss", f"{offset:.2f}", "-i", str(src), "-t", f"{share:.2f}",
+                 "-vf", vf, *enc, str(part)], f"cutting footage {i + 1}")
+        parts.append(part)
+    if len(parts) == 1:
+        return parts[0]
+    listing = job_dir / "bg_parts.txt"
+    listing.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts), encoding="utf-8")
+    _ffmpeg(["-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy", str(out)], "joining the footage")
+    return out
+
+
 def render(job_dir: Path, script: str, voice: str, background: Optional[str] = None,
            rate: int = 0, caption_style: str = "mrbeast",
            progress: Callable[[str, int], None] = lambda _m, _p: None) -> Path:
-    """Narrated Short -> job_dir/final.mp4. `background` is a library file name or None (random)."""
+    """Narrated Short -> job_dir/final.mp4. `background` is a library file name, or None to find stock footage that fits the script."""
     job_dir.mkdir(parents=True, exist_ok=True)
     script = clean_script(script)
     if len(script.split()) < 3:
@@ -313,22 +416,14 @@ def render(job_dir: Path, script: str, voice: str, background: Optional[str] = N
     captions = job_dir / "captions.ass"
     create_captions(str(words_file), str(captions), style_name=caption_style)
 
-    progress("Preparing the footage", 60)
+    progress("Finding footage", 55)
+    sources = _pick_sources(script, background)
+    progress("Preparing the footage", 62)
     base = job_dir / "base.mp4"
-    clips = [safe_library_file(background)] if background else [
-        library_dir() / item["name"] for item in list_library()]
-    if clips:
-        src = random.choice(clips)
-        src_len = _duration(src)
-        offset = random.uniform(0, max(0.0, src_len - length - 1)) if src_len > length + 1 else 0.0
-        video_in = ["-stream_loop", "-1", "-ss", f"{offset:.2f}", "-i", str(src)]
-    else:  # no library yet: a calm gradient so the tool still produces a video
-        video_in = ["-f", "lavfi", "-i", f"gradients=s=1080x1920:d={length + 1:.2f}:speed=0.01:c0=0x1b1f3b:c1=0x7a3cff:rate=30"]
-    _ffmpeg([*video_in, "-i", str(audio), "-t", f"{length:.2f}",
-             "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p",
-             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", settings.FFMPEG_PRESET,
-             "-crf", str(settings.FFMPEG_CRF), "-c:a", "aac", "-b:a", "160k", "-shortest", str(base)],
-            "building the background")
+    video_only = _build_background(sources, length, job_dir)
+    _ffmpeg(["-i", str(video_only), "-i", str(audio), "-t", f"{length:.2f}", "-map", "0:v:0", "-map", "1:a:0",
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest", str(base)],
+            "adding the voice")
 
     progress("Burning captions", 80)
     from services.render import burn_captions

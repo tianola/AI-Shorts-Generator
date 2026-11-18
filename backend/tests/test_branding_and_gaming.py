@@ -62,6 +62,9 @@ def test_a_corner_face_is_a_facecam_and_a_centre_face_is_not():
     assert gl.corner_of((100, 40, 250, 250), 1920, 1080) == "top-left"
     assert gl.corner_of((800, 400, 300, 300), 1920, 1080) is None       # centre
     assert gl.corner_of((0, 0, 1200, 700), 1920, 1080) is None           # too wide
+    # IShowSpeed's overlay: a 56 px face on the left edge, half-way down a 1280x720 stream
+    assert gl.corner_of((85, 355, 56, 56), 1280, 720) == "left-edge"
+    assert gl.corner_of((300, 300, 280, 280), 1920, 1080) is None       # a big face on the side is a speaker
 
 
 def test_the_facecam_must_hold_its_corner_on_most_frames():
@@ -103,3 +106,12 @@ def test_branding_burns_a_text_watermark_into_a_real_video(tmp_path):
     dst = tmp_path / "branded.mp4"
     assert branding.apply_branding(str(src), str(dst), {"text_enabled": True, "text": "@mychannel"})
     assert dst.stat().st_size > 1024
+
+
+def test_a_small_overlay_facecam_gets_a_panel_shaped_window_inside_the_frame():
+    rect = gl.pick_facecam([[(85, 355, 56, 56)]] * 8, 1280, 720)
+    x, y, w, h = rect
+    assert x >= 0 and y >= 0 and x + w <= 1280 and y + h <= 720
+    assert abs(w / h - gl.PANEL_ASPECT) < 0.05
+    assert x <= 85 and x + w >= 85 + 56 and y <= 355 and y + h >= 355 + 56      # the face is inside it
+    assert w >= 56 * 3                                                             # and room around it

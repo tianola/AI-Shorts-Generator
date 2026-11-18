@@ -34,7 +34,13 @@
 		</div>
 	  </header>
 
-	  <main class="layout">
+	  <nav class="view-tabs" id="viewTabs">
+		<button class="view-tab active" type="button" data-view="viewClips">Clips</button>
+		<button class="view-tab" type="button" data-view="viewNarrate">Narrate Studio</button>
+		<button class="view-tab" type="button" data-view="viewLive">Live Studio</button>
+	  </nav>
+
+	  <main class="layout" id="viewClips">
 		<aside class="panel composer-panel">
 		  <div class="panel-header">
 			<span class="kicker">Generator</span>
@@ -232,6 +238,71 @@
 			  📂 Show All Jobs
 			</button>
 		  </section>
+		</section>
+	  </main>
+
+	  <!-- Narrate Studio: a faceless short from an idea -->
+	  <main class="studio-view" id="viewNarrate" hidden>
+		<section class="panel studio-card">
+		  <div class="panel-header"><span class="kicker">Narrate Studio</span><h2>Faceless short from an idea</h2></div>
+		  <label class="field-label" for="nrIdea">Idea</label>
+		  <textarea id="nrIdea" rows="3" placeholder="e.g. A house that has no door, and what the family found inside"></textarea>
+		  <div class="field-row">
+			<div><label class="field-label" for="nrStyle">Style</label>
+			  <select id="nrStyle"><option value="story">Story</option><option value="facts">Surprising facts</option><option value="motivation">Motivation</option><option value="horror">Horror</option><option value="explainer">Explainer</option></select></div>
+			<div><label class="field-label" for="nrSeconds">Length</label>
+			  <select id="nrSeconds"><option value="20">~20 s</option><option value="30">~30 s</option><option value="45" selected>~45 s</option><option value="60">~60 s</option></select></div>
+			<div><label class="field-label" for="nrLang">Language</label>
+			  <input id="nrLang" value="English" placeholder="English" /></div>
+		  </div>
+		  <button class="primary-btn" id="nrWriteBtn" type="button">Write the script</button>
+		  <label class="field-label" for="nrScript">Script (edit it freely)</label>
+		  <textarea id="nrScript" rows="8" placeholder="The narration appears here"></textarea>
+		  <div class="field-row">
+			<div><label class="field-label" for="nrVoice">Voice</label><select id="nrVoice"><option value="">Loading voices...</option></select></div>
+			<div><label class="field-label" for="nrBackground">Background footage</label><select id="nrBackground"><option value="">Automatic (stock footage that fits the story)</option></select></div>
+			<div><label class="field-label" for="nrCaption">Captions</label>
+			  <select id="nrCaption"><option value="mrbeast">MrBeast</option><option value="hormozi">Hormozi</option><option value="capcut_aqua">CapCut Aqua</option><option value="cyber_neon">Cyber Neon</option><option value="clean_box">Clean Box</option><option value="underline_wave">Underline Wave</option></select></div>
+		  </div>
+		  <div class="studio-actions">
+			<label class="ghost-btn file-btn">Add background video<input id="nrUpload" type="file" accept="video/*" hidden /></label>
+			<button class="primary-btn" id="nrRenderBtn" type="button">Make the video</button>
+		  </div>
+		  <p class="studio-note" id="nrNote"></p>
+		  <div class="studio-progress" id="nrProgress" hidden><div class="studio-bar"><span id="nrBar"></span></div><small id="nrMsg"></small></div>
+		  <video id="nrVideo" class="studio-video" controls hidden></video>
+		  <a id="nrDownload" class="ghost-btn" hidden download>Download</a>
+		</section>
+	  </main>
+
+	  <!-- Live Studio: highlights from a live stream -->
+	  <main class="studio-view" id="viewLive" hidden>
+		<section class="panel studio-card">
+		  <div class="panel-header"><span class="kicker">Live Studio</span><h2>Clip the best moments of a live stream</h2></div>
+		  <div class="field-row">
+			<div><label class="field-label" for="lvSource">Source</label>
+			  <select id="lvSource"><option value="youtube">YouTube live</option><option value="tiktok">TikTok live</option><option value="obs">OBS (my own stream)</option></select></div>
+			<div id="lvUrlWrap"><label class="field-label" for="lvUrl">Live link</label><input id="lvUrl" placeholder="https://youtube.com/watch?v=..." /></div>
+		  </div>
+		  <p class="studio-note" id="lvObs" hidden>In OBS: Settings, Stream, Service Custom. Server <b>rtmp://127.0.0.1:1935/live</b>, Stream Key <b>stream</b>, then Start Streaming, then press Connect here.</p>
+		  <div class="field-row">
+			<div><label class="field-label" for="lvSens">Sensitivity: <span id="lvSensVal">5</span> (higher = more clips)</label><input id="lvSens" type="range" min="1" max="10" value="5" /></div>
+			<div><label class="field-label" for="lvBuffer">Remember the last</label>
+			  <select id="lvBuffer"><option value="5">5 minutes</option><option value="10" selected>10 minutes</option><option value="20">20 minutes</option></select></div>
+			<div><label class="field-label" for="lvAuto">Automatic clipping</label>
+			  <select id="lvAuto"><option value="1" selected>On</option><option value="0">Off (manual only)</option></select></div>
+		  </div>
+		  <div class="studio-actions">
+			<button class="primary-btn" id="lvConnectBtn" type="button">Connect</button>
+			<button class="ghost-btn" id="lvStopBtn" type="button">Disconnect</button>
+			<button class="ghost-btn" id="lvInstantBtn" type="button">Clip the last 30 seconds</button>
+			<span class="studio-badge" id="lvStatus">idle</span>
+		  </div>
+		  <p class="studio-note" id="lvNote"></p>
+		  <h3 class="studio-sub">Live transcript</h3>
+		  <div class="studio-transcript" id="lvTranscript"><em>Nothing yet</em></div>
+		  <h3 class="studio-sub">Clips</h3>
+		  <div class="studio-grid" id="lvClips"><em>No clips yet</em></div>
 		</section>
 	  </main>
 

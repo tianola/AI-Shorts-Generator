@@ -17,19 +17,34 @@ CORNER_FRACTION = 0.38      # a facecam's centre lies in this outer share of bot
 MAX_CAM_WIDTH = 0.34        # ...and it is narrower than this share of the frame
 MIN_HIT_RATE = 0.5          # faces must be seen in the same corner on this share of samples
 PAD = 0.45                  # grow the face box by this much of its size for hair/shoulders
+EDGE_MAX_WIDTH = 0.12       # a face this narrow on a side edge is an overlay, not a speaker
+EDGE_ZONE = 0.22            # ...and its centre is within this share of the frame from that edge
+CAM_FACE_SPAN = 4.0         # the facecam window is about this many face-widths wide
+PANEL_ASPECT = 1080 / 672   # facecam panel shape (width / height) in the output
 
 Box = Tuple[int, int, int, int]
 
 
 def corner_of(box: Box, src_w: int, src_h: int) -> Optional[str]:
-    """"top-left" ... "bottom-right" when the box looks like a corner facecam, else None."""
+    """Where a facecam sits ("top-left", "bottom-right", "left-edge", ...), or None.
+
+    A face in a corner is a facecam. So is a small face on a side edge at any height: the
+    overlay is often placed mid-left, above the minimap (IShowSpeed's GTA 6 stream). Small
+    means narrower than EDGE_MAX_WIDTH of the frame, which a person on camera is not."""
     x, y, w, h = box
     if src_w <= 0 or src_h <= 0 or w <= 0 or h <= 0 or w > src_w * MAX_CAM_WIDTH:
         return None
     cx, cy = (x + w / 2) / src_w, (y + h / 2) / src_h
     horizontal = "left" if cx <= CORNER_FRACTION else "right" if cx >= 1 - CORNER_FRACTION else None
     vertical = "top" if cy <= CORNER_FRACTION else "bottom" if cy >= 1 - CORNER_FRACTION else None
-    return f"{vertical}-{horizontal}" if horizontal and vertical else None
+    if horizontal and vertical:
+        return f"{vertical}-{horizontal}"
+    if w <= src_w * EDGE_MAX_WIDTH:
+        if cx <= EDGE_ZONE:
+            return "left-edge"
+        if cx >= 1 - EDGE_ZONE:
+            return "right-edge"
+    return None
 
 
 def pick_facecam(samples: List[List[Box]], src_w: int, src_h: int) -> Optional[Box]:
@@ -63,10 +78,16 @@ def pick_facecam(samples: List[List[Box]], src_w: int, src_h: int) -> Optional[B
     y = median(b[1] for b in boxes)
     w = median(b[2] for b in boxes)
     h = median(b[3] for b in boxes)
-    grow_x, grow_y = int(w * PAD), int(h * PAD)
-    left, top = max(0, x - grow_x), max(0, y - grow_y)
-    right, bottom = min(src_w, x + w + grow_x), min(src_h, y + h + grow_y)
-    return left, top, right - left, bottom - top
+    # The overlay window is much bigger than the face. Take a panel-shaped rectangle
+    # centred on the face, wide enough to show the person and their surroundings, and
+    # slide it back inside the frame if it overhangs.
+    width = max(int(w * (1 + 2 * PAD)), int(w * CAM_FACE_SPAN)) if w < src_w * EDGE_MAX_WIDTH else int(w * (1 + 2 * PAD))
+    width = min(width, src_w)
+    height = min(int(width / PANEL_ASPECT), src_h)
+    width = min(width, int(height * PANEL_ASPECT))
+    left = min(max(0, x + w // 2 - width // 2), src_w - width)
+    top = min(max(0, y + h // 2 - height // 2), src_h - height)
+    return left, top, width, height
 
 
 def detect_facecam(video_path: str, samples: int = 10) -> Optional[Box]:
