@@ -92,14 +92,19 @@ def compute_composite_virality(
     base_score = llm_score if llm_score else 0.80
     visual_score = visual_stats.get("intensity_score", 0.5)
 
-    final_virality = (base_score * 0.50) + (visual_score * 0.35) + (transcript_boost * 0.15)
-    final_virality_100 = round(min(99.0, max(50.0, final_virality * 100.0)), 1)
+    # The selector's own score (the editor's verdict on what the viewer hears) carries
+    # the number; picture activity is a small correction. It used to weigh 35% and the
+    # keyword boost 15%, and the result was floored at 50: a talk-over-diagrams video
+    # has no faces or motion, so every clip scored below 50 and showed exactly 50.
+    # transcript_boost stays out of the score: its word list is English-only.
+    final_virality = (base_score * 0.85) + (visual_score * 0.15)
+    final_virality_100 = round(min(99.0, max(1.0, final_virality * 100.0)), 1)
 
     # Generate clear OpusClip-style explainer
-    if final_virality_100 >= 90:
+    if final_virality_100 >= 85:
         tier = "God-Tier Viral Potential"
         explanation = f"Exceptional hook strength with immediate curiosity trigger ({impact_count} power keywords) and continuous dynamic pacing."
-    elif final_virality_100 >= 80:
+    elif final_virality_100 >= 70:
         tier = "High Virality Candidate"
         explanation = "Solid retention structure with clear topic focus, good conversational energy, and strong TikTok keyword density."
     else:

@@ -49,3 +49,13 @@ def test_resolve_virality_stats_falls_back_to_neutral_when_no_selector_score(mon
     # No signal at all -> the neutral base (0.8) scaled, still derived not the 85 literal.
     assert out["virality_score_100"] == 80.0
     assert out["fallback"] is True
+
+
+def test_a_faceless_video_is_not_floored_at_fifty(monkeypatch):
+    """Job 115 (diagrams, no faces): every clip showed exactly 50 because of a floor."""
+    monkeypatch.setattr(virality_detector, "detect_visual_activity",
+                        lambda path: {"intensity_score": 0.05, "motion_score": 0.1, "face_presence": 0.0})
+    strong = virality_detector.compute_composite_virality(0.9, "plain words", "clip.mp4")
+    weak = virality_detector.compute_composite_virality(0.6, "plain words", "clip.mp4")
+    assert strong["virality_score_100"] > weak["virality_score_100"] + 20
+    assert weak["virality_score_100"] < 60 and strong["virality_score_100"] > 70
