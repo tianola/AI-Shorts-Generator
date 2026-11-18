@@ -87,6 +87,26 @@ def smart_crop_video(
         except Exception as e:
             job_error(0, f"Split-screen fallback to face_tracked: {e}")
 
+    elif mode == "gaming":
+        try:
+            from services.gaming_layout import build_gaming_filter, detect_facecam
+            cam = detect_facecam(input_file)
+            _cap = cv2.VideoCapture(input_file)
+            _src_w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if _cap.isOpened() else 1920
+            _src_h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) if _cap.isOpened() else 1080
+            _cap.release()
+            graph = (build_gaming_filter(_src_w, _src_h, cam, width, height) if cam
+                     else build_blurred_fit_filter(src_w=_src_w, src_h=_src_h, target_w=width, target_h=height))
+            cmd = ["ffmpeg", "-y", "-i", input_file, "-filter_complex", graph,
+                   "-map", "[outv]", "-map", "0:a?", "-c:v", "libx264",
+                   "-preset", settings.FFMPEG_PRESET, "-crf", str(settings.FFMPEG_CRF),
+                   "-c:a", "copy", "-movflags", "+faststart", output_file]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=ENCODE_TIMEOUT_S)
+            job_info(0, f"Gaming layout ({'facecam' if cam else 'no facecam, blurred fit'}): {output_file}")
+            return output_file
+        except Exception as e:
+            job_error(0, f"Gaming layout fallback to static: {e}")
+
     elif mode == "fit_blur":
         try:
             filtergraph = build_blurred_fit_filter(src_w=1920, src_h=1080, target_w=width, target_h=height)

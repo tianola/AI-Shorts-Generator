@@ -27,13 +27,20 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import settings  # noqa: E402
-from services import clip_selector  # noqa: E402
+from services import clip_judging, clip_selector  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _clip_range(monkeypatch):
     monkeypatch.setattr(settings, "MIN_CLIP_SECONDS", 20, raising=False)
     monkeypatch.setattr(settings, "MAX_CLIP_SECONDS", 30, raising=False)
+
+
+def _row(candidate_id, score, reason):
+    """A judge reply row: every dimension at `score`, decision keep."""
+    row = {"candidate_id": candidate_id, "decision": "keep", "reason": reason}
+    row.update({name: score for name in clip_judging.DIMENSIONS})
+    return row
 
 
 def _segments_file(tmp_path, segments):
@@ -99,9 +106,9 @@ async def test_the_ranking_pass_decides_which_candidates_ship(tmp_path, monkeypa
         _candidate(200.0, 230.0, "SECOND PASS FAVOURITE", 0.5),
     ]
     ranking = [
-        {"candidate_id": "c0", "score": 2.0, "reason": "opens on a greeting"},
-        {"candidate_id": "c1", "score": 5.0, "reason": "fine"},
-        {"candidate_id": "c2", "score": 9.5, "reason": "opens on the reveal"},
+        _row("c0", 2.0, "opens on a greeting"),
+        _row("c1", 5.0, "fine"),
+        _row("c2", 9.5, "opens on the reveal"),
     ]
     model = _TwoPassModel(candidates, ranking)
     _patch_models(monkeypatch, model)
@@ -119,7 +126,7 @@ async def test_the_ranking_pass_decides_which_candidates_ship(tmp_path, monkeypa
 async def test_the_ranking_prompt_shows_the_words_inside_each_window(tmp_path, monkeypatch):
     model = _TwoPassModel(
         [_candidate(20.0, 50.0, "A"), _candidate(100.0, 130.0, "B")],
-        [{"candidate_id": "c0", "score": 5, "reason": ""}, {"candidate_id": "c1", "score": 6, "reason": ""}],
+        [_row("c0", 5, ""), _row("c1", 6, "")],
     )
     _patch_models(monkeypatch, model)
 
@@ -237,8 +244,8 @@ async def test_claude_is_used_when_a_key_is_configured(tmp_path, monkeypatch):
     async def fake_claude(prompt, system, schema, model=None, max_tokens=16000, effort="medium"):
         seen.append(schema)
         if "ranked" in schema["properties"]:
-            return json.dumps({"ranked": [{"candidate_id": "c0", "score": 8, "reason": "r"},
-                                          {"candidate_id": "c1", "score": 3, "reason": "r"}]})
+            return json.dumps({"ranked": [_row("c0", 8, "r"),
+                                          _row("c1", 3, "r")]})
         return json.dumps({"clips": [_candidate(0.0, 30.0, "A", 0.5), _candidate(100.0, 130.0, "B", 0.5)]})
 
     async def never(*args, **kwargs):

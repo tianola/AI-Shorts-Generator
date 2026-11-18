@@ -23,6 +23,7 @@ export const els = {
   provider: document.getElementById('provider'),
   captionStyle: document.getElementById('captionStyle'),
   layoutMode: document.getElementById('layoutMode'),
+  clipMode: document.getElementById('clipMode'),
   whisperModel: document.getElementById('whisperModel'),
   hardwareInfo: document.getElementById('hardwareInfo'),
   transcriptionEstimate: document.getElementById('transcriptionEstimate'),

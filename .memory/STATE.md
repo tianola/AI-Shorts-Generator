@@ -45,3 +45,9 @@
 ## Next
 - User: add `ANTHROPIC_API_KEY`, restart `ShortsWorker` + `ShortsBackend`, run one job, review clips.
 - Not done: full end-to-end render with the new code; single-pass render failures on job 109 not investigated; split-screen for multi-camera edits (speakers never co-visible) is not possible, follow-crop handles those.
+
+## Done 2026-11-18 (uncommitted, services NOT restarted)
+- Commit ed8b1a7: clips ask for whole topic 35-55 s, MIN_CLIP_SECONDS 30.
+- Copied (own code) the Clipify AI ideas, user OK'd non-commercial use: `services/clip_judging.py` (11 dimensions, keep/reject final, penalties, 7 editing modes, topic segmentation + `fit_to_topic`), `Job.clip_mode` (API param `clip_mode`, UI select), `services/gaming_layout.py` (layout `gaming`: gameplay + corner facecam), `services/branding.py` + `api/branding.py` (logo/text, applied after SFX when `branding.json` enabled, `/api/clips/{id}/branding`), `services/narrate.py` + `api/narrate.py` (faceless shorts: script, SAPI/Kokoro/ElevenLabs voice, library footage, captions), `services/live_studio.py` + `api/live.py` (live buffer, highlights, instant clip). Credit in `backend/NOTICE-third-party-ideas.md`.
+- Behaviour change: judge reject is final; all rejected -> no clips; fewer good clips than asked is not padded with heuristic filler.
+- Tests 850 passed. NOT tried on a real video, not in the UI yet for branding/narrate/live (API only).

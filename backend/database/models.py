@@ -42,6 +42,8 @@ class Job(Base):
     # Content safety: smart blur of unsafe objects
     smart_blur_enabled = Column(Boolean, nullable=True, default=False)
     target_clips = Column(Integer, nullable=True, default=10)
+    # Editing mode steering clip selection: viral|funny|dramatic|educational|story|meme|gaming
+    clip_mode = Column(String, nullable=True, default="viral")
     # The API fills this from settings.DEFAULT_AUTO_UPLOAD, so the operator's
     # .env decides. The column itself still defaults to False: a Job row built
     # directly (a script, a test) is local until somebody asks for publishing.

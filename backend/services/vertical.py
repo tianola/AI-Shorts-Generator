@@ -264,6 +264,20 @@ def build_vertical_filter(
             target_w=target_width, target_h=target_height,
         ).replace("[outv]", "[vsingle]")
 
+    if mode == "gaming":
+        src_w, src_h = _probe_size(input_video)
+        try:
+            from services.gaming_layout import build_gaming_filter, detect_facecam
+            cam = detect_facecam(input_video)
+            if cam:
+                return build_gaming_filter(src_w, src_h, cam, target_width, target_height
+                                           ).replace("[outv]", "[vsingle]")
+            logger.info("gaming layout: no facecam found, showing the whole frame over a blur")
+        except Exception as e:
+            logger.warning(f"gaming layout unavailable, using the blurred fit: {e}")
+        return _build_blur(src_w=src_w, src_h=src_h, target_w=target_width,
+                           target_h=target_height).replace("[outv]", "[vsingle]")
+
     if mode == "split_screen":
         try:
             two_shot = analysis.get("two_shot")

@@ -10,6 +10,10 @@ import string
 from loguru import logger
 from config import settings
 from services.clip_bounds import load_words, snap_to_sentences
+from services.clip_judging import (
+    JUDGE_SCHEMA, apply_penalties, dimension_score, fit_to_topic, judge_instructions,
+    mode_guidance, normalise_mode, parse_judgement, topic_boundaries,
+)
 from services.llm_router import call_llm_json, salvage_incomplete_json
 from services.metadata import derive_title_from_text
 from services.story_analysis import analyze_story_segments
@@ -268,7 +272,8 @@ def _spoken_language_hint(segments: list) -> str:
 
 
 def _candidate_prompt(segments: list, story_plan: dict, wanted: int, num_clips: int,
-                      video_title: str, temporal_events) -> str:
+                      video_title: str, temporal_events, mode: str = "viral",
+                      topic_breaks=None) -> str:
     transcript_text = "".join(
         f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}\n" for seg in segments
     )
@@ -296,6 +301,14 @@ def _candidate_prompt(segments: list, story_plan: dict, wanted: int, num_clips: 
     language = _spoken_language_hint(segments)
     language_note = f" ({language})" if language else ""
     title_line = f'\nSource video title: "{video_title}"' if video_title else ""
+    mode_block = f"\n{mode_guidance(mode)}\n"
+    if topic_breaks:
+        stamps = ", ".join(f"{t:.0f}s" for t in topic_breaks[:80])
+        mode_block += (
+            f"\nThe subject of the talk changes at about: {stamps}. Prefer a moment that "
+            "stays inside one subject, from where it opens to where it closes, rather than "
+            "one that straddles a change.\n"
+        )
 
     return f"""
 You are choosing moments from a long video to publish as standalone vertical shorts
@@ -304,7 +317,7 @@ away, and most of them never saw the full video, so every pick has to work for a
 stranger with zero context.
 {title_line}
 What the video is about: {story_plan.get('story_summary', '')}
-{key_moments_block}
+{mode_block}{key_moments_block}
 Find the {wanted} strongest candidate moments. That is more than will be published on
 purpose: a second pass ranks them and keeps the best {num_clips}, so include a real
 range rather than padding with near-duplicates. Candidates must not overlap.
@@ -376,14 +389,16 @@ Return ONLY valid JSON in this shape:
 """
 
 
-async def _judge_candidates(clips: list, segments: list, num_clips: int) -> bool:
-    """Second pass: score each candidate on what the viewer will actually hear.
+async def _judge_candidates(clips: list, segments: list, num_clips: int, mode: str = "viral") -> bool:
+    """Second pass: an editor's verdict on what the viewer will actually hear.
 
     The first pass rates its own picks while reading the whole transcript. Here the
     model sees only the words inside each final window, opening line first - the
-    same information a stranger in the feed gets. Writes judge_score (0-1) and
-    judge_reason onto the clips it rated. Returns False, leaving the clips as they
-    were, when the reply is unusable: the first pass's own scores still rank them.
+    same information a stranger in the feed gets - and scores eleven dimensions plus
+    a keep/reject decision (rubric in services.clip_judging). Writes judge_dims,
+    judge_decision, judge_score (0-1) and judge_reason onto the clips it rated.
+    Returns False, leaving the clips as they were, when no row is usable: the first
+    pass's own scores still rank them.
     """
     blocks = []
     for index, clip in enumerate(clips):
@@ -400,29 +415,19 @@ async def _judge_candidates(clips: list, segments: list, num_clips: int) -> bool
 
     prompt = f"""
 Below are {len(clips)} candidate shorts cut from one long video. For each you see exactly
-what the viewer hears, from the first word to the last. Only the best {num_clips} will be
-published. Judge each one as a stranger scrolling a feed who has never seen the video:
-
-- Opening: do the first ~3 seconds (the OPENING LINE) stop the scroll on their own?
-- Standalone: does it make sense with no context?
-- Payoff: does it end on something landing - an answer, a punchline, a reveal - rather
-  than trailing off or stopping mid-thought?
-- Stakes: is there emotion, conflict, surprise or a strong opinion in it?
-- Title: does it tease this clip truthfully, or is it generic or a plain summary?
-
-Give each candidate one overall score from 0 to 10. It is not an average: a weak
-opening caps the score at 5, because viewers leave before the rest matters. Spread the
-scores out and score every candidate.
-
+what the viewer hears, from the first word to the last. Judge each as a stranger scrolling
+a feed who has never seen the video. A weak opening caps the overall impression, because
+viewers leave before the rest matters.
+{judge_instructions(num_clips, mode)}
 {candidates_text}
 
 Return ONLY valid JSON:
-{{"ranked": [{{"candidate_id": "c0", "score": float, "reason": "one short sentence"}}]}}
+{{"ranked": [{{"candidate_id": "c0", "decision": "keep", "hook": 0-10, "curiosity": 0-10, "emotion": 0-10, "surprise": 0-10, "story": 0-10, "payoff": 0-10, "pacing": 0-10, "standalone": 0-10, "rewatch": 0-10, "conflict": 0-10, "coherence": 0-10, "reason": "under 18 words"}}]}}
 """
 
     try:
         text, _ = await _selection_model_json(
-            prompt, _RANKING_SCHEMA, max_tokens=max(2000, len(clips) * 150)
+            prompt, JUDGE_SCHEMA, max_tokens=max(3000, len(clips) * 260)
         )
         data = salvage_incomplete_json(text.replace("```json", "").replace("```", "").strip())
         ranked = data.get("ranked")
@@ -430,17 +435,19 @@ Return ONLY valid JSON:
             return False
         rated = 0
         for row in ranked:
-            if not isinstance(row, dict):
+            judgement = parse_judgement(row)
+            if judgement is None:
                 continue
             try:
                 index = int(str(row.get("candidate_id", "")).strip().lstrip("cC"))
-                score = float(row.get("score"))
             except (TypeError, ValueError):
                 continue
-            if not 0 <= index < len(clips):
+            if not 0 <= index < len(clips) or "judge_dims" in clips[index]:
                 continue
-            clips[index]["judge_score"] = round(max(0.0, min(1.0, score / 10.0)), 4)
-            clips[index]["judge_reason"] = str(row.get("reason") or "")[:240]
+            clips[index]["judge_dims"] = judgement["dims"]
+            clips[index]["judge_decision"] = judgement["decision"]
+            clips[index]["judge_score"] = round(dimension_score(judgement["dims"]), 4)
+            clips[index]["judge_reason"] = judgement["reason"]
             rated += 1
         return rated > 0
     except Exception as exc:
@@ -460,13 +467,16 @@ def _selection_score(clip: dict) -> float:
     model = float(clip.get("llm_score_raw", 0.75))
     judge = clip.get("judge_score")
     if judge is not None:
-        model = 0.4 * model + 0.6 * float(judge)
+        model = 0.3 * model + 0.7 * float(judge)
     score = (
         model * 0.75 +
         float(clip.get("audio_dynamics", 0.5)) * 0.10 +
         float(clip.get("pacing_score", 0.5)) * 0.10 +
         float(clip.get("visual_event_density", 0.5)) * 0.05
     )
+    if clip.get("judge_dims"):
+        score = apply_penalties(score, clip["judge_dims"], clip.get("judge_decision", "keep"),
+                                float(clip["end"]) - float(clip["start"]))
     return round(min(1.0, score), 4)
 
 
@@ -786,7 +796,8 @@ def _composite_score_v2(clip: dict) -> float:
     return round(min(1.0, composite), 4)
 
 
-async def select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None) -> list:
+async def select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None,
+                       mode: str = "viral") -> list:
     """
     Select the best clips from a video using AI, in two passes.
 
@@ -810,9 +821,12 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
     words = load_words(os.path.join(os.path.dirname(segments_file), "words.json"))
 
     story_plan = await analyze_story_segments(segments, video_title=video_title)
+    mode = normalise_mode(mode)
+    topic_breaks = topic_boundaries(segments)
 
     wanted = _candidates_wanted(num_clips)
-    prompt = _candidate_prompt(segments, story_plan, wanted, num_clips, video_title, temporal_events)
+    prompt = _candidate_prompt(segments, story_plan, wanted, num_clips, video_title, temporal_events,
+                               mode=mode, topic_breaks=topic_breaks)
     source = "ai"
 
     try:
@@ -834,6 +848,9 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 continue
             # The LLM is not trusted to respect the range or to land on a sentence
             # edge; the code places the window.
+            # Finish the subject the clip is on before putting it on sentence edges.
+            raw_start, raw_end = fit_to_topic(raw_start, raw_end, topic_breaks,
+                                              float(settings.MAX_CLIP_SECONDS))
             window = _place_window(raw_start, raw_end, segments, words)
             if window is None:
                 continue
@@ -913,7 +930,16 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             valid_clips.append(clip)
 
         candidate_count = len(valid_clips)
-        judged = candidate_count > 1 and await _judge_candidates(valid_clips, segments, num_clips)
+        judged = candidate_count > 1 and await _judge_candidates(valid_clips, segments, num_clips, mode)
+        if judged:
+            # A reject is final: a clip the editor refused is not brought back by its
+            # first-pass score. Unrated candidates (no usable row) stay in.
+            rejected = [c for c in valid_clips if c.get("judge_decision") == "reject"]
+            valid_clips = [c for c in valid_clips if c.get("judge_decision") != "reject"]
+            logger.info(f"Judge kept {len(valid_clips)} of {candidate_count} candidates, rejected {len(rejected)}")
+            if not valid_clips:
+                logger.warning("Every candidate was rejected by the judge: no Short for this video")
+                return []
         for clip in valid_clips:
             clip["virality_score"] = _selection_score(clip)
 
@@ -925,6 +951,10 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
                 f"({'ranked by second pass' if judged else 'first-pass scores only'})"
             )
             return valid_clips[:num_clips]
+        if judged:
+            # Fewer good clips than asked for is the honest answer; do not pad with
+            # transcript filler the judge never saw.
+            return valid_clips
 
         # Fill with heuristic moments if LLM returned fewer clips than requested
         total_duration = segments[-1]["end"] if segments else settings.MIN_CLIP_SECONDS

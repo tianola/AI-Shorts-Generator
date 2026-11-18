@@ -18,6 +18,7 @@ from starlette.concurrency import run_in_threadpool
 
 from api.common import clip_payload, resolve_auto_upload, resolve_upload_privacy
 from config import settings
+from services.clip_judging import normalise_mode
 from database.models import Clip, Job, JobProgress, TERMINAL_JOB_STATUSES
 from database.session import get_database
 
@@ -221,6 +222,7 @@ async def create_job(
     caption_style: Optional[str] = "mrbeast",
     layout_mode: Optional[str] = "auto",
     target_clips: Optional[int] = 10,
+    clip_mode: Optional[str] = "viral",
     auto_upload: Optional[bool] = None,
     llm_translate: Optional[bool] = False,
     upload_privacy: Optional[str] = None,
@@ -237,6 +239,7 @@ async def create_job(
         default_caption_style=caption_style,
         default_layout_mode=layout_mode,
         target_clips=target_clips or 10,
+        clip_mode=normalise_mode(clip_mode),
         auto_upload=resolve_auto_upload(auto_upload),
         llm_translate=bool(llm_translate),
         upload_privacy=resolve_upload_privacy(upload_privacy),
@@ -321,6 +324,7 @@ async def create_job_from_upload(
     caption_style: Optional[str] = Form("mrbeast"),
     layout_mode: Optional[str] = Form("auto"),
     target_clips: Optional[int] = Form(10),
+    clip_mode: Optional[str] = Form("viral"),
     auto_upload: Optional[bool] = Form(None),
     llm_translate: Optional[bool] = Form(False),
     upload_privacy: Optional[str] = Form(None),
@@ -342,6 +346,7 @@ async def create_job_from_upload(
         default_caption_style=caption_style,
         default_layout_mode=layout_mode,
         target_clips=target_clips or 10,
+        clip_mode=normalise_mode(clip_mode),
         auto_upload=resolve_auto_upload(auto_upload),
         llm_translate=bool(llm_translate),
         upload_privacy=resolve_upload_privacy(upload_privacy),

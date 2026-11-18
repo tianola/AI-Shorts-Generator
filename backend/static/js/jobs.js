@@ -366,6 +366,7 @@ export async function createJob(event) {
   const whisperModel = els.whisperModel ? els.whisperModel.value : 'tiny';
   const captionStyle = els.captionStyle ? els.captionStyle.value : 'mrbeast';
   const layoutMode = els.layoutMode ? els.layoutMode.value : 'auto';
+  const clipMode = els.clipMode ? els.clipMode.value : 'viral';
   const targetClips = els.clipCountInput ? (parseInt(els.clipCountInput.value, 10) || 10) : 10;
   const autoUpload = document.getElementById('autoUploadCheck') ? document.getElementById('autoUploadCheck').checked : true;
   const llmTranslate = document.getElementById('llmTranslateCheck')?.checked || false;
@@ -383,6 +384,7 @@ export async function createJob(event) {
       formData.append('whisper_model', whisperModel);
       formData.append('caption_style', captionStyle);
       formData.append('layout_mode', layoutMode);
+      formData.append('clip_mode', clipMode);
       formData.append('target_clips', targetClips);
       formData.append('auto_upload', autoUpload);
       formData.append('llm_translate', llmTranslate);
@@ -418,6 +420,7 @@ export async function createJob(event) {
       whisper_model: whisperModel,
       caption_style: captionStyle,
       layout_mode: layoutMode,
+      clip_mode: clipMode,
       target_clips: targetClips,
       auto_upload: autoUpload,
       llm_translate: llmTranslate
