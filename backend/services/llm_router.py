@@ -127,6 +127,13 @@ def salvage_incomplete_json(text: str) -> dict:
 	return {array.group(1): items}
 
 
+def pick_model(ollama_model: Optional[str] = None) -> str:
+	"""The model name for the configured provider: OmniRoute's, or the given Ollama one."""
+	if settings.AI_PROVIDER.lower() == "ollama":
+		return ollama_model or settings.OLLAMA_MODEL
+	return settings.OMNIROUTE_MODEL
+
+
 async def call_llm_structured(
 	response_model: Type[T],
 	prompt: str,

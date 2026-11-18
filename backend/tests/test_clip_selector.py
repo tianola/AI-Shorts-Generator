@@ -7,7 +7,7 @@ These tests pin the guards that enforce the range:
 1. The shipped config defaults allow 30-60 s clips.
 2. The LLM is not trusted to respect the range — clips longer than MAX
    get trimmed to MAX by the code.
-3. The validation floor is 80% of MIN (16s), not the old 60% (12s).
+3. The validation floor is 80% of MIN (24s at the default MIN of 30), not the old 60%.
 4. The heuristic fallback uses the new MAX when sizing clips.
 """
 import json
@@ -54,7 +54,7 @@ async def test_an_ai_clip_longer_than_max_gets_trimmed_to_max(pin_clip_range, mo
             "clips": [
                 {
                     "start": 10.0,
-                    "end": 60.0,  # 50 seconds — exceeds MAX=30
+                    "end": 60.0,  # 50 seconds, above the MAX of 30 pinned by the fixture
                     "title": "Too Long Clip",
                     "hook": "Wait for it",
                     "virality_score": 0.9,
@@ -87,7 +87,7 @@ async def test_an_ai_clip_longer_than_max_gets_trimmed_to_max(pin_clip_range, mo
 
 @pytest.mark.asyncio
 async def test_the_validation_floor_is_eighty_percent_of_min_not_sixty(pin_clip_range, monkeypatch):
-    """A 15-second clip passes the old 60% floor (12s) but fails the new 80% floor (16s)."""
+    """A 15-second clip fails the 80% floor (24s); a 25-second one passes it."""
     from services import clip_selector
 
     segments = [{"start": 0.0, "end": 300.0, "text": "word " * 40}]
@@ -102,14 +102,14 @@ async def test_the_validation_floor_is_eighty_percent_of_min_not_sixty(pin_clip_
             "clips": [
                 {
                     "start": 5.0,
-                    "end": 20.0,  # 15 seconds — above old 12s floor, below new 16s floor
+                    "end": 20.0,  # 15 seconds — below the 24s floor
                     "title": "Too Short Clip",
                     "hook": "Quick",
                     "virality_score": 0.85,
                 },
                 {
                     "start": 50.0,
-                    "end": 75.0,  # 25 seconds — above new 16s floor, valid
+                    "end": 75.0,  # 25 seconds, above the 24s floor, valid
                     "title": "Good Clip",
                     "hook": "This one works",
                     "virality_score": 0.88,

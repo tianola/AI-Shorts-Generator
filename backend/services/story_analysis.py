@@ -4,8 +4,7 @@ from typing import List, Dict, Any, Optional
 
 from loguru import logger
 
-from config import settings
-from services.llm_router import call_llm_json
+from services.llm_router import call_llm_json, pick_model
 
 
 async def analyze_story_segments(segments: List[Dict[str, Any]], video_title: Optional[str] = None) -> Dict[str, Any]:
@@ -64,7 +63,7 @@ async def analyze_story_segments(segments: List[Dict[str, Any]], video_title: Op
 		response_text = await call_llm_json(
 			prompt=prompt,
 			system="You are an expert storyteller for short-form viral video. Extract the strongest hook and story angle.",
-			model=settings.OMNIROUTE_MODEL if settings.AI_PROVIDER == "omniroute" else settings.OLLAMA_MODEL,
+			model=pick_model(),
 			temperature=0.3,
 			max_tokens=1500,
 		)

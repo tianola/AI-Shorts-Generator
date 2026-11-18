@@ -23,7 +23,6 @@ MODULES = [
     os.path.join(BACKEND, "services", "render.py"),
     os.path.join(BACKEND, "services", "sfx.py"),
     os.path.join(BACKEND, "services", "audio_polish.py"),
-    os.path.join(BACKEND, "services", "vertical.py"),
     os.path.join(BACKEND, "services", "smart_crop.py"),
 ]
 

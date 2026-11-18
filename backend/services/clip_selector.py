@@ -14,7 +14,7 @@ from services.clip_judging import (
     JUDGE_SCHEMA, apply_penalties, dimension_score, fit_to_topic, judge_instructions,
     mode_guidance, normalise_mode, parse_judgement, topic_boundaries,
 )
-from services.llm_router import call_llm_json, salvage_incomplete_json
+from services.llm_router import call_llm_json, pick_model, salvage_incomplete_json
 from services.metadata import derive_title_from_text
 from services.story_analysis import analyze_story_segments
 from services.tone_detector import is_transcript_somber, classify_content_tone
@@ -90,27 +90,6 @@ _CANDIDATE_SCHEMA = {
     "additionalProperties": False,
 }
 
-_RANKING_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "ranked": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "candidate_id": {"type": "string"},
-                    "score": {"type": "number"},
-                    "reason": {"type": "string"},
-                },
-                "required": ["candidate_id", "score", "reason"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["ranked"],
-    "additionalProperties": False,
-}
-
 # Where a clip came from. Only a window a model actually chose may publish on its
 # own; the transcript-heuristic filler and the time grid are there so a job still
 # renders something to review, not so it reaches the channel unattended.
@@ -154,7 +133,7 @@ async def _selection_model_json(prompt: str, schema: dict, max_tokens: int) -> t
     text = await call_llm_json(
         prompt=prompt,
         system=_SELECTION_SYSTEM,
-        model=settings.OLLAMA_MODEL if settings.AI_PROVIDER == "ollama" else settings.OMNIROUTE_MODEL,
+        model=pick_model(),
         temperature=0.35,
         max_tokens=max(max_tokens, _OMNIROUTE_MIN_TOKENS),
     )
@@ -721,27 +700,6 @@ def _semantic_density_score(seg: dict) -> float:
         return round(max(0.5, 1.0 - (wps - 4.5) * 0.1), 3)
 
 
-def _composite_score(clip: dict) -> float:
-    """Legacy weighted multi-signal virality score (kept for backward compat).
-
-    Weights: LLM 40% | Audio Energy 25% | Keyword 20% | Density 10% | Structural 5%
-    """
-    llm_score     = float(clip.get("virality_score", 0.75))
-    audio_energy  = float(clip.get("audio_energy_score", 0.5))
-    keyword_score = float(clip.get("keyword_score", 0.5))
-    density_score = float(clip.get("semantic_density", 0.5))
-    structural    = float(clip.get("structural_score", 0.5))
-
-    composite = (
-        llm_score     * 0.40 +
-        audio_energy  * 0.25 +
-        keyword_score * 0.20 +
-        density_score * 0.10 +
-        structural    * 0.05
-    )
-    return round(min(1.0, composite), 4)
-
-
 def _normalise_llm_score(value) -> float:
     """Map the model's own virality self-rating onto 0-1.
 
@@ -1111,6 +1069,3 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             })
         return _snap_filler(fallback_clips, segments, words)
 
-
-# Backward-compatibility alias — old callers used select_best_clips
-select_best_clips = select_clips

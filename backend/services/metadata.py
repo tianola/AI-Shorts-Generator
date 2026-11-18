@@ -7,7 +7,7 @@ from typing import List
 from pydantic import BaseModel, Field
 from loguru import logger
 from config import settings
-from services.llm_router import call_llm_structured
+from services.llm_router import call_llm_structured, pick_model
 
 class ClipMetadata(BaseModel):
     title: str = Field(..., description="Under 45 chars; teases the most surprising concrete thing in this clip without giving the answer away; true to the clip; no hashtags, no emojis")
@@ -135,7 +135,7 @@ async def generate_metadata(
             response_model=ClipMetadata,
             prompt=user_prompt,
             system=system_prompt,
-            model=settings.OMNIROUTE_MODEL if settings.AI_PROVIDER == "omniroute" else settings.METADATA_OLLAMA_MODEL,
+            model=pick_model(settings.METADATA_OLLAMA_MODEL),
             temperature=0.3,
         )
 

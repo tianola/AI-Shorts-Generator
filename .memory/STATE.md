@@ -1,6 +1,6 @@
 # State — 2026-11-15
 
-## Done this session (uncommitted, services NOT restarted)
+## Done earlier (committed as 953c8ed)
 - Clip selector rewritten (`backend/services/clip_selector.py`): two passes (≈2x candidates → ranking pass on the words inside each window), windows placed on segment boundaries by `_fit_window`, overlap dedupe, `selection_path` on every clip (`claude` / `ai` / `heuristic` / `grid`), English keyword scores no longer rank (`_selection_score`).
 - Claude for selection only: `services/claude_client.py`, settings `ANTHROPIC_API_KEY`, `CLAUDE_SELECTION_MODEL=claude-opus-5-5`. No key → OmniRoute chain. `anthropic` installed in `backend/.venv`.
 - Titles: selector prompt asks for a teasing headline in the spoken language; `generate_metadata(keep_title=True)` keeps it for model picks.
@@ -12,7 +12,7 @@
 - Bug fixed: `_blocked_script` crashed (`text` → `txt`) instead of holding a foreign-script title.
 - Tests: 789 passed, 1 skipped; ruff F,E9 clean. New: `tests/test_two_pass_selection.py`, `tests/test_shot_change_follow.py`. `tests/conftest.py` blanks `ANTHROPIC_API_KEY`.
 
-## Done 2026-11-16 (uncommitted)
+## Done 2026-11-16 (committed in 953c8ed)
 - Free selection model: `OMNIROUTE_MODEL=free/best`, `OMNIROUTE_MODEL_FALLBACKS=free/coding` (config defaults, `.env`, `.env.example`). Both are free-only priority combos on the local OmniRoute. Measured on job 111 with the real selector: free/best 5 `ai` clips in 70 s (served by claude-opus-4-6-thinking), free/coding 5 in 64 s. auto/best-free timed out → grid; pinned agy gemini ids 429 until 11-21.
 - `llm_router`: `OMNIROUTE_TIMEOUT_SECONDS=300` (combos fall through members with 120 s each); `_json_object_in` reads text blocks from a thinking content array.
 - Tests updated (`test_selection_model_pin.py`, `test_selection_model_chain.py`): forbid `auto/*`, allow `free/*`. 790 passed, 1 skipped.
@@ -22,7 +22,7 @@
 - Scripts: scratchpad `bench.py`, `rank.py`, `write_combo.py` (not in repo). Tests 791 passed.
 - OmniRoute keys live outside the repo (Qoder `draft_secrets.txt`); never copy them into project files.
 
-## Done 2026-11-16 (afternoon, uncommitted; worker service NOT restarted - UAC denied twice)
+## Done 2026-11-16 (afternoon, committed as 65e5a87)
 - Committed earlier work as 953c8ed. Services restarted 12:57.
 - ffmpeg: `utils/env_check.ensure_media_tools_on_path` finds FFmpeg in `C:\Users\*\AppData\Local\Microsoft\WinGet\{Packages\*FFmpeg*\*\bin,Links}` (LocalSystem PATH lacks it) or `FFMPEG_DIR`. Backend self-restarts on idle; confirmed finding ffmpeg 14:07.
 - Test run: job 112 (fwW3XVFrm9c, 46 min source, 10 `ai` clips, 33 min) via service; job 113 same URL via own process (`queued` status, scratchpad run_job.py) with new code, 37 min, OK.
@@ -46,8 +46,9 @@
 - User: add `ANTHROPIC_API_KEY`, restart `ShortsWorker` + `ShortsBackend`, run one job, review clips.
 - Not done: full end-to-end render with the new code; single-pass render failures on job 109 not investigated; split-screen for multi-camera edits (speakers never co-visible) is not possible, follow-crop handles those.
 
-## Done 2026-11-18 (uncommitted, services NOT restarted)
+## Done 2026-11-18 (committed as 84d0fae; services restarted 09:06)
 - Commit ed8b1a7: clips ask for whole topic 35-55 s, MIN_CLIP_SECONDS 30.
 - Copied (own code) the Clipify AI ideas, user OK'd non-commercial use: `services/clip_judging.py` (11 dimensions, keep/reject final, penalties, 7 editing modes, topic segmentation + `fit_to_topic`), `Job.clip_mode` (API param `clip_mode`, UI select), `services/gaming_layout.py` (layout `gaming`: gameplay + corner facecam), `services/branding.py` + `api/branding.py` (logo/text, applied after SFX when `branding.json` enabled, `/api/clips/{id}/branding`), `services/narrate.py` + `api/narrate.py` (faceless shorts: script, SAPI/Kokoro/ElevenLabs voice, library footage, captions), `services/live_studio.py` + `api/live.py` (live buffer, highlights, instant clip). Credit in `backend/NOTICE-third-party-ideas.md`.
 - Behaviour change: judge reject is final; all rejected -> no clips; fewer good clips than asked is not padded with heuristic filler.
 - Tests 850 passed. NOT tried on a real video, not in the UI yet for branding/narrate/live (API only).
+- Cleanup (uncommitted): removed dead scripts, `_composite_score`, `_RANKING_SCHEMA`, `select_best_clips`; `llm_router.pick_model()` replaces 3 copies; old OpenCV vertical (`make_vertical*`, `compute_crop_box`, `sample_frames_for_face_tracking`) removed, `smart_crop_video` is now one ffmpeg encode from `build_vertical_filter`. Evidence: single-pass failed 0 times since 2026-11-12 (84 successes). Tests 848. Job 115 (new judging, 35-55 s) was running, not reviewed.

@@ -11,7 +11,6 @@ import tempfile
 from unittest.mock import patch
 from services.clip_selector import (
     _audio_dynamics_score,
-    _composite_score,
     _selection_score,
     select_clips,
 )
@@ -105,25 +104,3 @@ def test_rerender_clip_request_schema_supports_thumbnail_template():
     req = RerenderClipRequest(caption_style="cyber_neon", layout_mode="split_screen", thumbnail_template=2)
     assert req.thumbnail_template == 2
     assert req.caption_style == "cyber_neon"
-
-
-def test_composite_score_weights_breakdown():
-    """Test exact mathematical weights: LLM 40%, Audio 25%, Keywords 20%, Density 10%, Structure 5%."""
-    clip = {
-        "virality_score": 1.0,      # 1.0 * 0.40 = 0.40
-        "audio_energy_score": 1.0,  # 1.0 * 0.25 = 0.25
-        "keyword_score": 1.0,       # 1.0 * 0.20 = 0.20
-        "semantic_density": 1.0,    # 1.0 * 0.10 = 0.10
-        "structural_score": 1.0,    # 1.0 * 0.05 = 0.05
-    }
-    # Sum = 1.0
-    assert _composite_score(clip) == 1.0
-
-    clip_half = {
-        "virality_score": 0.5,
-        "audio_energy_score": 0.5,
-        "keyword_score": 0.5,
-        "semantic_density": 0.5,
-        "structural_score": 0.5,
-    }
-    assert _composite_score(clip_half) == 0.5
