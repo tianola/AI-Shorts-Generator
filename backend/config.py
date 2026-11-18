@@ -179,7 +179,7 @@ class Settings(BaseSettings):
         description="Number of clips to generate per video (short-form viral moments)"
     )
     MIN_CLIP_SECONDS: int = Field(
-        default=20,
+        default=30,
         ge=5,
         le=120,
         description="Minimum clip duration in seconds"

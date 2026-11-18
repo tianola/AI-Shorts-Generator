@@ -1,10 +1,10 @@
-"""Clip length: 20 s floor, 60 s ceiling (it was 30 until job 113 cut mid-sentence).
+"""Clip length: 30 s floor, 60 s ceiling (it was 30 until job 113 cut mid-sentence).
 
 YouTube Shorts completion rate beats absolute watch time, so the prompt aims at
 25-45 s, but a clip may run to a minute rather than lose its last sentence.
 These tests pin the guards that enforce the range:
 
-1. The shipped config defaults allow 20-60 s clips.
+1. The shipped config defaults allow 30-60 s clips.
 2. The LLM is not trusted to respect the range — clips longer than MAX
    get trimmed to MAX by the code.
 3. The validation floor is 80% of MIN (16s), not the old 60% (12s).
@@ -25,7 +25,7 @@ from config import settings
 @pytest.fixture
 def pin_clip_range(monkeypatch):
     """Lock the clip range to the shipped defaults for every test."""
-    monkeypatch.setattr(settings, "MIN_CLIP_SECONDS", 20, raising=False)
+    monkeypatch.setattr(settings, "MIN_CLIP_SECONDS", 30, raising=False)
     monkeypatch.setattr(settings, "MAX_CLIP_SECONDS", 30, raising=False)
     monkeypatch.setattr(settings, "NUM_CLIPS", 3, raising=False)
 
@@ -33,7 +33,7 @@ def pin_clip_range(monkeypatch):
 def test_the_shipped_defaults_allow_a_story_up_to_a_minute():
     """30 s cut half of job 113's clips mid-sentence; 60 s is a ceiling, and the
     prompt still aims at 25-45 s."""
-    assert settings.MIN_CLIP_SECONDS == 20
+    assert settings.MIN_CLIP_SECONDS == 30
     assert settings.MAX_CLIP_SECONDS == 60
 
 

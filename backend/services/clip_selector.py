@@ -321,9 +321,13 @@ What makes a moment worth picking:
 - Something is at stake: emotion, disagreement, money, risk, a strong opinion, a funny
   or shocking turn. A calm explanation with no turn in it is a weak pick.
 
-Length: between {settings.MIN_CLIP_SECONDS} and {settings.MAX_CLIP_SECONDS} seconds. Most strong
-moments land in 25-45 seconds; use the longer end only when the story needs it to pay
-off. Never shorten a moment by cutting the last sentence: "end" is the moment the
+Length: between {settings.MIN_CLIP_SECONDS} and {settings.MAX_CLIP_SECONDS} seconds, and
+aim for 35-55. A clip must cover the WHOLE topic the speaker is on: the setup, the
+point, and the follow-through or conclusion of that same thread. Do not stop at the
+first sentence that sounds like an answer if the speaker keeps developing the same
+point in the next lines; keep going until they move to a different subject. A 20-25
+second clip that leaves the topic unfinished is worse than a 50 second one that closes
+it. Never shorten a moment by cutting the last sentence: "end" is the moment the
 speaker finishes the sentence where the payoff lands, not where a line of the
 transcript happens to stop (a line can break mid-sentence).
 Use the transcript's own timestamps.
