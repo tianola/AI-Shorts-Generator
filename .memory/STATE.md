@@ -71,3 +71,10 @@
 - Audio delay: not reproduced by measurement; aresample fix unverified.
 - Weak titles already uploaded (e.g. "... moment" / 3-word titles). Edit only in YouTube Studio (OAuth scope lacks edit/delete).
 - Multi-stream relaunch (`storage/live_multi`, GAP=180 s uploads): not started; user chose commit only.
+
+## Done 2026-11-21 (evening, uncommitted)
+- Webcam finder rewritten: `services/facecam_finder.py`. The Haar face detector never found the streamer's face in the webcam (it hit a static doll on a shelf, which then got locked). Now YOLO person detection (`focus_tracking._get_yolo`, the project's yolov8n) in corners and edges; a person narrower than 22% of the frame, seen on >=50% of 24 samples, counts. Head box centres the panel. Verified: TimTheTatman (top-left) and IShowSpeed (left edge) render correctly; Kai bottom-left.
+- Lock in `LiveSession._find_facecam`: locked when the same spot appears in 2 clips or hit rate >=80%. `panel_for_face` extracted in `gaming_layout`; `CAM_FACE_SPAN` 4 -> 5.
+- Titles: `LiveSession(topic=...)` -> `llm_highlight`/`heuristic_highlight` keep the topic in every title (`_keep_topic`). Multi-live script uses topic "GTA 6" and no hardcoded cam.
+- Tests: 874 passed, 1 skipped (new `tests/test_facecam_finder_and_titles.py`). One real LLM spot-check: "GTA 6 Stolen Car Chase Ends in Water".
+- Limitation: Tim's webcam is ~320 px wide in the source, so the zoomed panel is soft at 1080.

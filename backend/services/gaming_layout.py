@@ -19,7 +19,7 @@ MIN_HIT_RATE = 0.5          # faces must be seen in the same corner on this shar
 PAD = 0.45                  # grow the face box by this much of its size for hair/shoulders
 EDGE_MAX_WIDTH = 0.12       # a face this narrow on a side edge is an overlay, not a speaker
 EDGE_ZONE = 0.22            # ...and its centre is within this share of the frame from that edge
-CAM_FACE_SPAN = 4.0         # the facecam window is about this many face-widths wide
+CAM_FACE_SPAN = 5.0         # the facecam window is about this many face-widths wide
 PANEL_ASPECT = 1080 / 672   # facecam panel shape (width / height) in the output
 
 Box = Tuple[int, int, int, int]
@@ -79,10 +79,17 @@ def pick_facecam(samples: List[List[Box]], src_w: int, src_h: int,
     y = median(b[1] for b in boxes)
     w = median(b[2] for b in boxes)
     h = median(b[3] for b in boxes)
-    # The overlay window is much bigger than the face. Take a panel-shaped rectangle
-    # centred on the face, wide enough to show the person and their surroundings, and
-    # slide it back inside the frame if it overhangs.
-    width = max(int(w * (1 + 2 * PAD)), int(w * CAM_FACE_SPAN)) if w < src_w * EDGE_MAX_WIDTH else int(w * (1 + 2 * PAD))
+    return panel_for_face((x, y, w, h), src_w, src_h)
+
+
+def panel_for_face(face: Box, src_w: int, src_h: int) -> Box:
+    """The facecam window around a face box: a panel-shaped rectangle centred on the face.
+
+    The overlay window is much bigger than the face, so it is wide enough to show the person
+    and their surroundings, and slid back inside the frame if it overhangs."""
+    x, y, w, h = face
+    small = w < src_w * EDGE_MAX_WIDTH
+    width = max(int(w * (1 + 2 * PAD)), int(w * CAM_FACE_SPAN)) if small else int(w * (1 + 2 * PAD))
     width = min(width, src_w)
     height = min(int(width / PANEL_ASPECT), src_h)
     width = min(width, int(height * PANEL_ASPECT))

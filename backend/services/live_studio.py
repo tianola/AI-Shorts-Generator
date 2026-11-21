@@ -21,7 +21,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from loguru import logger
 
@@ -108,11 +108,20 @@ def _subject(context: str) -> str:
     return " ".join(words[:4]) if words else "Live"
 
 
-def heuristic_highlight(text: str, start: float, end: float, context: str = "") -> Optional[Highlight]:
+def _keep_topic(title: str, topic: str) -> str:
+    """Make sure the title names the stream's topic (e.g. "GTA 6"), so the clip stays on it."""
+    title = title.strip()
+    if not topic or topic.lower() in title.lower():
+        return title[:80]
+    return f"{topic}: {title}"[:80]
+
+
+def heuristic_highlight(text: str, start: float, end: float, context: str = "",
+                        topic: str = "") -> Optional[Highlight]:
     """Cheap offline detector: keyword families and exclamation density.
 
     Its title is generic on purpose: the first words of the speech make a cut-off, meaningless
-    title, so a hit found this way is named after the stream and the kind of moment."""
+    title, so a hit found this way is named after the topic (or the stream) and the kind of moment."""
     best, weight = None, 0
     for category, pattern in _HEURISTICS.items():
         hits = len(pattern.findall(text))
@@ -123,18 +132,22 @@ def heuristic_highlight(text: str, start: float, end: float, context: str = "") 
         best = best or "High-energy"
     if not best or weight < 2:
         return None
-    return Highlight(start, end, best, f"{_subject(context)}: {best.lower()} moment",
+    return Highlight(start, end, best, f"{topic or _subject(context)}: {best.lower()} moment",
                      min(10.0, 5.0 + weight), "keyword match")
 
 
-async def llm_highlight(text: str, start: float, end: float, context: str = "") -> Optional[Highlight]:
+async def llm_highlight(text: str, start: float, end: float, context: str = "",
+                        topic: str = "") -> Optional[Highlight]:
     """Ask the model whether the recent speech is a clip-worthy moment, and to name it.
 
     `context` is what is known about the stream (its title, what is happening around it), so
-    the title can say what the clip is about instead of repeating a line of chatter."""
+    the title can say what the clip is about instead of repeating a line of chatter. `topic` is
+    the name every title must carry (e.g. "GTA 6"), which keeps the clip on the hype."""
     from services.llm_router import call_llm_json
 
     about = f"What is known about this stream: {context}\n" if context else ""
+    keep = (f'The stream is about "{topic}". The title MUST contain "{topic}" exactly, and it must '
+            "name what happens in this moment, not generic chatter. ") if topic else ""
     prompt = (
         "You clip live streams for YouTube Shorts.\n"
         f"{about}Recent speech from the stream (automatic transcript, may contain mistakes):\n"
@@ -142,9 +155,9 @@ async def llm_highlight(text: str, start: float, end: float, context: str = "") 
         "Is it an engaging moment worth a vertical short (funny, exciting, surprising, emotional, "
         "an announcement, a great play, an insight)? Reply JSON only: "
         '{"is_highlight": true/false, "category": "one word", "score": 1-10, '
-        '"title": "natural English headline of 5-9 words that says what happens and, when it fits, '
-        'names the subject of the stream; a complete phrase, never cut off, no quotes, no clickbait '
-        'that the clip does not deliver", '
+        '"title": "a headline of 5-9 words that says what happens, the surprising or funny part first; '
+        "a complete phrase, never cut off, no quotes, no clickbait that the clip does not deliver. "
+        f'{keep}", '
         '"description": "one sentence for the video description", "reason": "short"}'
     )
     raw = await call_llm_json(prompt=prompt, system="You are a sharp live-stream clipper. JSON only.",
@@ -156,7 +169,7 @@ async def llm_highlight(text: str, start: float, end: float, context: str = "") 
         score = max(1.0, min(10.0, float(data.get("score", 7))))
     except (TypeError, ValueError):
         score = 7.0
-    title = str(data.get("title") or "").strip().strip('"')[:80]
+    title = _keep_topic(str(data.get("title") or "").strip().strip('"'), topic)
     if len(title.split()) < 3:        # nothing usable to publish under
         return None
     return Highlight(start, end, str(data.get("category") or "Highlight")[:24], title, score,
@@ -187,7 +200,7 @@ def validate_source(kind: str, url: str) -> Optional[str]:
 class LiveSession:
     def __init__(self, root: Path, kind: str, url: str, sensitivity: int = 5,
                  buffer_minutes: int = 10, auto_clip: bool = True, min_gap: float = 30.0,
-                 layout: str = "auto", context: str = "",
+                 layout: str = "auto", context: str = "", topic: str = "",
                  facecam: Optional[tuple] = None):
         self.root = Path(root)
         self.kind, self.url = kind.lower(), url.strip()
@@ -196,6 +209,7 @@ class LiveSession:
         self.layout = layout or "auto"      # vertical layout of the clips: auto, gaming, fit_blur...
         self.facecam = facecam              # fixed facecam box as fractions of the frame (x, y, w, h), if known
         self.context = context.strip()      # what the stream is about; the stream's own title is added
+        self.topic = topic.strip()          # the name every title must carry, e.g. "GTA 6"
         self.min_gap = min_gap
         self.buffer = RollingBuffer(self.root / "buffer", max(3, min(30, buffer_minutes)) * 60)
         self.clips_dir = self.root / "clips"
@@ -207,7 +221,7 @@ class LiveSession:
         self._stop = threading.Event()
         self._last_hit = -1e9
         self._lock = threading.Lock()
-        self._face_samples: List[List[tuple]] = []
+        self._cam_votes: List[Tuple[float, float, float]] = []   # (centre x, centre y, hit rate) per clip
 
     # -- control
     def start(self) -> None:
@@ -329,9 +343,9 @@ class LiveSession:
                 # the model answered "not a highlight" that is the verdict; second-guessing
                 # it produced clips with made-up generic titles.
                 try:
-                    hit = asyncio.run(llm_highlight(joined, window[0]["start"], window[-1]["end"], self.context))
+                    hit = asyncio.run(llm_highlight(joined, window[0]["start"], window[-1]["end"], self.context, self.topic))
                 except Exception:
-                    hit = heuristic_highlight(joined, window[0]["start"], window[-1]["end"], self.context)
+                    hit = heuristic_highlight(joined, window[0]["start"], window[-1]["end"], self.context, self.topic)
                 if hit and hit.score >= threshold_for(self.sensitivity):
                     self._last_hit = hit.end
                     try:
@@ -341,38 +355,31 @@ class LiveSession:
                         logger.warning(f"Live clip failed: {exc}")
 
     # -- clipping
-    FACECAM_GRID = (16000, 9000)  # face boxes from clips of any resolution, in a common 16:9 grid
-
     def _find_facecam(self, raw: Path) -> Optional[tuple]:
-        """The webcam box (fractions of the frame) for this clip, or None.
+        """The webcam panel (fractions of the frame) for this clip, or None.
 
-        Faces seen in every clip of the session are pooled. Once a corner holds a face on
-        enough of the pooled frames, that box is locked, so every later clip frames the
-        webcam identically. Until then a clip whose own frames show the webcam clearly uses
-        its own box."""
-        from services.gaming_layout import corner_of, pick_facecam, sample_faces
-        found, w, h = sample_faces(str(raw), samples=16)
-        if not found:
+        facecam_finder looks for a face that the detector hits on most sampled frames in one
+        corner or side edge. The webcam is locked for the whole session once the same spot is
+        found in two clips, or in a clip where it is hit on 80% of the frames. Until then each
+        clip uses the webcam it shows itself."""
+        from services.facecam_finder import find_webcams
+        from services.gaming_layout import panel_for_face
+
+        cams = find_webcams(str(raw))
+        if not cams:
             return None
-        kw, kh = self.FACECAM_GRID
-        self._face_samples.extend([[(x * kw // w, y * kh // h, bw * kw // w, bh * kh // h) for x, y, bw, bh in faces]
-                                   for faces in found])
-        if len(self._face_samples) >= 32:
-            # The face detector misses a webcam face on most frames of some streams (headset,
-            # dim light, looking down). What gives the webcam away is that its face is always in
-            # the same corner: lock once 8 frames show a corner face and 80% of them agree.
-            corners = {}
-            for faces in self._face_samples:
-                for c in {corner_of(b, kw, kh) for b in faces} - {None}:
-                    corners[c] = corners.get(c, 0) + 1
-            best = max(corners.values(), default=0)
-            pooled = pick_facecam(self._face_samples, kw, kh, min_hit_rate=0.0)
-            if pooled and best >= 8 and best >= 0.8 * sum(corners.values()):
-                self.facecam = (pooled[0] / kw, pooled[1] / kh, pooled[2] / kw, pooled[3] / kh)
-                logger.info(f"Live facecam locked at {self.facecam}")
-                return self.facecam
-        own = pick_facecam(found, w, h)
-        return (own[0] / w, own[1] / h, own[2] / w, own[3] / h) if own else None
+        cam = cams[0]
+        w, h = cam.src_w, cam.src_h
+        x, y, bw, bh = cam.box
+        cx, cy = (x + bw / 2) / w, (y + bh / 2) / h
+        self._cam_votes.append((cx, cy, cam.hit_rate))
+        agree = [v for v in self._cam_votes if abs(v[0] - cx) < 0.03 and abs(v[1] - cy) < 0.03]
+        px, py, pw, ph = panel_for_face(cam.box, w, h)
+        panel = (px / w, py / h, pw / w, ph / h)
+        if len(agree) >= 2 or cam.hit_rate >= 0.8:
+            self.facecam = panel
+            logger.info(f"Live webcam locked at {panel} ({cam.region}, hit rate {cam.hit_rate})")
+        return panel
 
     def _crop_with_facecam(self, raw: Path, out: Path) -> None:
         """The streamer's webcam fixed on top, the gameplay cropped below.
