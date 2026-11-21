@@ -115,3 +115,9 @@ def test_a_small_overlay_facecam_gets_a_panel_shaped_window_inside_the_frame():
     assert abs(w / h - gl.PANEL_ASPECT) < 0.05
     assert x <= 85 and x + w >= 85 + 56 and y <= 355 and y + h >= 355 + 56      # the face is inside it
     assert w >= 56 * 3                                                             # and room around it
+
+
+def test_the_cover_layout_puts_the_webcam_on_top_and_fills_the_gameplay_below():
+    graph = gl.build_gaming_filter(1280, 720, (0, 306, 258, 162), cover=True)
+    assert graph.endswith("[camp][game]vstack=inputs=2[outv]")
+    assert "crop=258:162:0:306" in graph and "boxblur" not in graph

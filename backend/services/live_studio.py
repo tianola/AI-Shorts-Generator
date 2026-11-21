@@ -29,6 +29,7 @@ from config import settings
 
 SEGMENT_SECONDS = 5
 YOUTUBE_RE = re.compile(r"^(https?://)?(www\.|m\.)?(youtube\.com/|youtu\.be/)", re.I)
+TWITCH_RE = re.compile(r"^(https?://)?(www\.)?twitch\.tv/\w+", re.I)
 TIKTOK_RE = re.compile(r"^(https?://)?(www\.)?tiktok\.com/@[\w.-]+", re.I)
 OBS_URL = "rtmp://127.0.0.1:1935/live/stream"
 
@@ -176,20 +177,24 @@ def validate_source(kind: str, url: str) -> Optional[str]:
         return None
     if kind == "youtube":
         return None if YOUTUBE_RE.match(url or "") else "Enter a YouTube live link"
+    if kind == "twitch":
+        return None if TWITCH_RE.match(url or "") else "Enter a Twitch channel link (twitch.tv/name)"
     if kind == "tiktok":
         return None if TIKTOK_RE.match(url or "") else "Enter a TikTok live link (tiktok.com/@name/live)"
-    return "Source must be youtube, tiktok or obs"
+    return "Source must be youtube, twitch, tiktok or obs"
 
 
 class LiveSession:
     def __init__(self, root: Path, kind: str, url: str, sensitivity: int = 5,
                  buffer_minutes: int = 10, auto_clip: bool = True, min_gap: float = 30.0,
-                 layout: str = "auto", context: str = ""):
+                 layout: str = "auto", context: str = "",
+                 facecam: Optional[tuple] = None):
         self.root = Path(root)
         self.kind, self.url = kind.lower(), url.strip()
         self.sensitivity = max(1, min(10, sensitivity))
         self.auto_clip = auto_clip
         self.layout = layout or "auto"      # vertical layout of the clips: auto, gaming, fit_blur...
+        self.facecam = facecam              # fixed facecam box as fractions of the frame (x, y, w, h), if known
         self.context = context.strip()      # what the stream is about; the stream's own title is added
         self.min_gap = min_gap
         self.buffer = RollingBuffer(self.root / "buffer", max(3, min(30, buffer_minutes)) * 60)
@@ -202,6 +207,7 @@ class LiveSession:
         self._stop = threading.Event()
         self._last_hit = -1e9
         self._lock = threading.Lock()
+        self._face_samples: List[List[tuple]] = []
 
     # -- control
     def start(self) -> None:
@@ -229,7 +235,7 @@ class LiveSession:
         if self.kind == "obs":
             return ["-listen", "1", "-i", OBS_URL]
         out = subprocess.run([sys.executable, "-m", "yt_dlp", "-g", "--no-warnings",
-                              "-f", "bv*[height<=720]+ba/b[height<=720]/b", self.url],
+                              "-f", "bv*[height<=1080]+ba/b[height<=1080]/b", self.url],
                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
         lines = [ln.strip() for ln in out.stdout.splitlines() if ln.startswith("http")]
         if out.returncode or not lines:
@@ -242,7 +248,7 @@ class LiveSession:
 
     def _learn_stream_title(self) -> None:
         """Add the stream's own title to the context the model names clips from."""
-        if self.kind != "youtube":
+        if self.kind not in ("youtube", "twitch"):
             return
         try:
             out = subprocess.run([sys.executable, "-m", "yt_dlp", "--no-warnings", "--skip-download",
@@ -335,6 +341,60 @@ class LiveSession:
                         logger.warning(f"Live clip failed: {exc}")
 
     # -- clipping
+    FACECAM_GRID = (16000, 9000)  # face boxes from clips of any resolution, in a common 16:9 grid
+
+    def _find_facecam(self, raw: Path) -> Optional[tuple]:
+        """The webcam box (fractions of the frame) for this clip, or None.
+
+        Faces seen in every clip of the session are pooled. Once a corner holds a face on
+        enough of the pooled frames, that box is locked, so every later clip frames the
+        webcam identically. Until then a clip whose own frames show the webcam clearly uses
+        its own box."""
+        from services.gaming_layout import corner_of, pick_facecam, sample_faces
+        found, w, h = sample_faces(str(raw), samples=16)
+        if not found:
+            return None
+        kw, kh = self.FACECAM_GRID
+        self._face_samples.extend([[(x * kw // w, y * kh // h, bw * kw // w, bh * kh // h) for x, y, bw, bh in faces]
+                                   for faces in found])
+        if len(self._face_samples) >= 32:
+            # The face detector misses a webcam face on most frames of some streams (headset,
+            # dim light, looking down). What gives the webcam away is that its face is always in
+            # the same corner: lock once 8 frames show a corner face and 80% of them agree.
+            corners = {}
+            for faces in self._face_samples:
+                for c in {corner_of(b, kw, kh) for b in faces} - {None}:
+                    corners[c] = corners.get(c, 0) + 1
+            best = max(corners.values(), default=0)
+            pooled = pick_facecam(self._face_samples, kw, kh, min_hit_rate=0.0)
+            if pooled and best >= 8 and best >= 0.8 * sum(corners.values()):
+                self.facecam = (pooled[0] / kw, pooled[1] / kh, pooled[2] / kw, pooled[3] / kh)
+                logger.info(f"Live facecam locked at {self.facecam}")
+                return self.facecam
+        own = pick_facecam(found, w, h)
+        return (own[0] / w, own[1] / h, own[2] / w, own[3] / h) if own else None
+
+    def _crop_with_facecam(self, raw: Path, out: Path) -> None:
+        """The streamer's webcam fixed on top, the gameplay cropped below.
+
+        The webcam box is the one given for the session, or found in the first clip and then kept."""
+        from services.gaming_layout import build_gaming_filter
+        probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                "stream=width,height", "-of", "csv=p=0", str(raw)],
+                               capture_output=True, text=True).stdout.strip().split(",")
+        w, h = int(probe[0]), int(probe[1])
+        cam = self.facecam or self._find_facecam(raw)
+        if not cam:
+            raise LookupError("no facecam in this stream")
+        fx, fy, fw, fh = cam
+        graph = build_gaming_filter(w, h, (int(fx * w), int(fy * h), int(fw * w), int(fh * h)), cover=True)
+        proc = subprocess.run(["ffmpeg", "-y", "-i", str(raw), "-filter_complex", graph, "-map", "[outv]", "-map", "0:a?",
+                               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "copy",
+                               "-movflags", "+faststart", str(out)], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        if proc.returncode:
+            raise RuntimeError(proc.stderr[-300:])
+
     def cut(self, start: float, end: float, title: str = "Live moment", category: str = "",
             reason: str = "", description: str = "") -> dict:
         """Cut [start, end] (seconds since session start) from the buffer into a clip."""
@@ -348,17 +408,35 @@ class LiveSession:
         listing.write_text("".join(f"file '{s.path.as_posix()}'\n" for s in segs), encoding="utf-8")
         raw, vertical = folder / "raw.mp4", folder / "clip.mp4"
         proc = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
-                               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac",
-                               str(raw)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-af", "aresample=async=1:first_pts=0",
+                               "-c:a", "aac", str(raw)], capture_output=True, text=True, encoding="utf-8", errors="replace")
         if proc.returncode:
             raise RuntimeError(f"ffmpeg concat failed: {proc.stderr[-300:]}")
         try:
-            from services.smart_crop import smart_crop_video
-            smart_crop_video(str(raw), str(vertical), mode=self.layout)
+            done = False
+            if self.facecam or self.layout in ("auto", "gaming"):
+                try:
+                    self._crop_with_facecam(raw, vertical)
+                    done = True
+                except LookupError:
+                    pass            # no webcam overlay: not a gaming stream, frame it normally
+            if not done:
+                from services.smart_crop import smart_crop_video
+                smart_crop_video(str(raw), str(vertical), mode=self.layout)
         except Exception as exc:
             logger.warning(f"Live clip kept horizontal ({exc})")
             shutil.copy2(raw, vertical)
         listing.unlink(missing_ok=True)
+        if title and title != "Instant clip":
+            # The headline stays on screen for the whole clip, like the clips the main pipeline makes.
+            titled = folder / "titled.mp4"
+            try:
+                from services.motion_title import add_motion_title
+                add_motion_title(str(vertical), title, str(titled))
+                titled.replace(vertical)
+            except Exception as exc:
+                logger.warning(f"Live clip has no title overlay ({exc})")
+                titled.unlink(missing_ok=True)
         meta = {"id": clip_id, "title": title, "category": category, "reason": reason, "description": description,
                 "duration": round(sum(1 for _ in segs) * float(SEGMENT_SECONDS), 1),
                 "created_at": time.time(),

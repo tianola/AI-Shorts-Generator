@@ -47,7 +47,8 @@ def corner_of(box: Box, src_w: int, src_h: int) -> Optional[str]:
     return None
 
 
-def pick_facecam(samples: List[List[Box]], src_w: int, src_h: int) -> Optional[Box]:
+def pick_facecam(samples: List[List[Box]], src_w: int, src_h: int,
+                 min_hit_rate: float = MIN_HIT_RATE) -> Optional[Box]:
     """The facecam rectangle from per-frame face boxes, or None when there is none.
 
     `samples` has one list of detected faces per sampled frame. The corner that holds a
@@ -67,7 +68,7 @@ def pick_facecam(samples: List[List[Box]], src_w: int, src_h: int) -> Optional[B
     if not by_corner:
         return None
     _corner, boxes = max(by_corner.items(), key=lambda item: len(item[1]))
-    if len(boxes) / len(samples) < MIN_HIT_RATE:
+    if len(boxes) / len(samples) < min_hit_rate:
         return None
 
     def median(values):
@@ -90,32 +91,38 @@ def pick_facecam(samples: List[List[Box]], src_w: int, src_h: int) -> Optional[B
     return left, top, width, height
 
 
-def detect_facecam(video_path: str, samples: int = 10) -> Optional[Box]:
-    """Look for a corner facecam in evenly spaced frames of the clip."""
+def sample_faces(video_path: str, samples: int = 10) -> Tuple[List[List[Box]], int, int]:
+    """Faces found in evenly spaced frames of a clip, with the frame size."""
     from services.vertical import detect_faces_in_frame
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        return None
+        return [], 0, 0
     try:
         frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         if frames <= 0 or src_w <= 0 or src_h <= 0:
-            return None
+            return [], 0, 0
         found = []
         for i in range(samples):
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(frames * (i + 0.5) / samples))
             ok, frame = cap.read()
             if ok:
                 found.append(detect_faces_in_frame(frame))
-        return pick_facecam(found, src_w, src_h)
+        return found, src_w, src_h
     finally:
         cap.release()
 
 
+def detect_facecam(video_path: str, samples: int = 10) -> Optional[Box]:
+    """Look for a corner facecam in evenly spaced frames of the clip."""
+    found, src_w, src_h = sample_faces(video_path, samples)
+    return pick_facecam(found, src_w, src_h) if found else None
+
+
 def build_gaming_filter(src_w: int, src_h: int, cam: Box,
-                        target_w: int = 1080, target_h: int = 1920) -> str:
+                        target_w: int = 1080, target_h: int = 1920, cover: bool = False) -> str:
     """filter_complex for gameplay over facecam, ending in [outv].
 
     The gameplay panel keeps the whole frame visible (HUD, minimap) on a blurred
@@ -126,6 +133,15 @@ def build_gaming_filter(src_w: int, src_h: int, cam: Box,
     cx, cy, cw, ch = cam
     cw, ch = max(16, cw // 2 * 2), max(16, ch // 2 * 2)
     bg_w, bg_h = target_w // 2, game_h // 2
+    if cover:
+        # The streamer-clip format: the webcam in a fixed panel on top, and below it the
+        # middle of the gameplay filling the rest of the frame. Both crops are constant for
+        # the whole clip, so nothing moves.
+        game = (f"[gfg]scale={target_w}:{game_h}:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{game_h}[game];")
+        return (f"[0:v]split=2[gfg][cam];{game}"
+                f"[cam]crop={cw}:{ch}:{cx}:{cy},scale={target_w}:{cam_h}:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{cam_h}[camp];[camp][game]vstack=inputs=2[outv]")
     return (
         f"[0:v]split=3[gbg][gfg][cam];"
         f"[gbg]scale={bg_w}:{bg_h}:force_original_aspect_ratio=increase,crop={bg_w}:{bg_h},"
