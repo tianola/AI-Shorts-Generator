@@ -12,7 +12,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 from typing import List
 
-from database.models import Job, JobProgress
+from database.models import Job, JobProgress, TERMINAL_JOB_STATUSES
 from database.session import SessionLocal
 
 router = APIRouter()
@@ -81,7 +81,7 @@ async def redis_listener(websocket: WebSocket, job_id: int):
                     })
                     await websocket.send_text(payload)
 
-                if status in ("completed", "failed"):
+                if status in TERMINAL_JOB_STATUSES:
                     break
             finally:
                 db.close()

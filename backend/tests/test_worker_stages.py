@@ -119,12 +119,15 @@ def test_source_metadata_is_returned(job_dir, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# stage_diarize: who speaks when, soft-failing into the old behaviour
+# stage_diarize: who speaks when, scoped to the selected clip windows,
+# soft-failing into the old behaviour
 # ---------------------------------------------------------------------------
 
-def _run_diarize(job_dir):
+def _run_diarize(job_dir, clips=None):
     return asyncio.run(worker.stage_diarize(
-        1, job_dir, str(job_dir / "source.mp4"), lambda stage, percent: None))
+        1, job_dir, str(job_dir / "source.mp4"),
+        clips if clips is not None else [{"start": 10.0, "end": 40.0}],
+        lambda stage, percent: None))
 
 
 class TestStageDiarize:
@@ -132,32 +135,34 @@ class TestStageDiarize:
         import services.diarization as diar
         calls = []
 
-        def fake_try_diarize(path):
-            calls.append(path)
+        def fake_windows(path, windows, margin=0.0):
+            calls.append((path, windows))
             return [{"speaker": "SPEAKER_00", "start": 0.0, "end": 1.2}]
 
-        monkeypatch.setattr(diar, "try_diarize", fake_try_diarize)
+        monkeypatch.setattr(diar, "try_diarize_windows", fake_windows)
 
         turns = _run_diarize(job_dir)
 
         assert turns == [{"speaker": "SPEAKER_00", "start": 0.0, "end": 1.2}]
         assert len(calls) == 1
+        # the windows handed to the model are exactly the clip spans
+        assert calls[0][1] == [{"start": 10.0, "end": 40.0}]
         data = json.loads((job_dir / "diarization.json").read_text(encoding="utf-8"))
         assert data["turns"] == turns
 
-        def explode(path):
+        def explode(path, windows, margin=0.0):
             raise AssertionError("a resumed job must not re-run diarization")
 
-        monkeypatch.setattr(diar, "try_diarize", explode)
+        monkeypatch.setattr(diar, "try_diarize_windows", explode)
         assert _run_diarize(job_dir) == turns
 
     def test_disabled_diarization_is_skipped_entirely(self, job_dir, monkeypatch):
         import services.diarization as diar
 
-        def explode(path):
+        def explode(path, windows, margin=0.0):
             raise AssertionError("DIARIZATION_ENABLED=false must not run pyannote")
 
-        monkeypatch.setattr(diar, "try_diarize", explode)
+        monkeypatch.setattr(diar, "try_diarize_windows", explode)
         monkeypatch.setattr(worker.settings, "DIARIZATION_ENABLED", False)
 
         assert _run_diarize(job_dir) == []
@@ -165,7 +170,8 @@ class TestStageDiarize:
 
     def test_an_unavailable_diarizer_is_a_warning_not_a_failure(self, job_dir, monkeypatch):
         import services.diarization as diar
-        monkeypatch.setattr(diar, "try_diarize", lambda path: None)
+        monkeypatch.setattr(diar, "try_diarize_windows",
+                            lambda path, windows, margin=0.0: None)
 
         assert _run_diarize(job_dir) == []
         assert not (job_dir / "diarization.json").exists()
@@ -173,11 +179,21 @@ class TestStageDiarize:
     def test_a_broken_diarizer_never_kills_the_job(self, job_dir, monkeypatch):
         import services.diarization as diar
 
-        def explode(path):
+        def explode(path, windows, margin=0.0):
             raise RuntimeError("torch exploded")
 
-        monkeypatch.setattr(diar, "try_diarize", explode)
+        monkeypatch.setattr(diar, "try_diarize_windows", explode)
         assert _run_diarize(job_dir) == []
+
+    def test_no_clips_skips_the_model_entirely(self, job_dir, monkeypatch):
+        import services.diarization as diar
+
+        def explode(path, windows, margin=0.0):
+            raise AssertionError("no clip windows means nothing to diarize")
+
+        monkeypatch.setattr(diar, "try_diarize_windows", explode)
+        assert _run_diarize(job_dir, clips=[]) == []
+        assert not (job_dir / "diarization.json").exists()
 
 
 # ---------------------------------------------------------------------------

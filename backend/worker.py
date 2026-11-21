@@ -4,6 +4,7 @@ Polling-based job processor with comprehensive error handling and logging.
 Uses async/await for Cloud API calls.
 """
 import os
+import unicodedata
 
 # Must run before any import that pulls in loguru: see utils/daemon_streams.py
 from utils.daemon_streams import redirect_daemon_streams
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from sqlalchemy import func, or_, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from database.session import SessionLocal, init_database
 from database.models import Job, Clip, JobProgress
@@ -30,6 +32,9 @@ from loguru import logger
 from utils.logger import job_info, job_error, job_warning, job_debug
 from utils.env_check import log_media_tools, missing_media_tools
 from utils.disk import has_headroom, reclaim
+from utils import derived_cache
+from utils import clip_trim
+from utils import upload_pacing
 from services.youtube import download_youtube
 from services.audio import extract_audio
 from services.whisper import transcribe_audio_file
@@ -40,7 +45,7 @@ from services.word_cropper import crop_words
 from services.captions import create_captions
 from services.dimension_checker import check_dimensions, log_dimension_warning
 from services.render import burn_captions
-from services.metadata import generate_metadata
+from services.metadata import derive_title_from_text, generate_metadata
 from services.thumbnail import generate_thumbnail
 from services.sfx import add_automatic_sfx
 
@@ -48,6 +53,83 @@ _REDIS_CLIENT = None
 _REDIS_CHECKED = False
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
+
+# --- stall watchdog state ---------------------------------------------------
+# The main poll loop runs process_job() synchronously; if a stage blocks forever
+# (a wedged network call, a lock, a subprocess that never returns) the loop never
+# returns to poll, and the lease heartbeat keeps the job looking alive - so the
+# queue freezes silently (the job-99 failure). _MAIN_TICK is bumped on every real
+# progress signal and _CURRENT_JOB names the in-flight job; the watchdog thread
+# reads both and, when a job has produced no signal past the timeout, fails that
+# job and exits the process so NSSM relaunches a clean worker for the rest.
+_MAIN_TICK = [0.0]
+_MAIN_PROC = [0.0]
+_CURRENT_JOB = [None]
+
+
+def _touch_main_tick() -> None:
+    _MAIN_TICK[0] = time.time()
+    _MAIN_PROC[0] = time.process_time()
+
+
+# An upload-pacing gap is a bounded sleep that can legally outlast the stall
+# window (UPLOAD_MIN_GAP_SECONDS + jitter = 4200 s against 30 min), and it burns
+# no CPU - which is precisely the signature the watchdog kills on. Hand the
+# pacer our liveness signal so each chunk that wakes up reports itself; a wait
+# that never wakes still never ticks, so a real wedge keeps getting caught.
+upload_pacing.set_liveness_hook(_touch_main_tick)
+
+
+def _should_stall_exit(current_job_id, last_tick: float, now: float,
+                       timeout_seconds: float, cpu_seconds: float = 0.0,
+                       min_cpu_seconds: float = 120.0) -> bool:
+    """True when a job is in flight, has no progress tick within the timeout,
+    AND the process burned negligible CPU over that same window.
+
+    Idle polling (no current job) is healthy and never counts as a stall.
+
+    The CPU test is what keeps a legitimately-slow compute stage alive: pyannote
+    diarization on an hour of audio, or YOLO temporal localization, run for far
+    longer than the timeout emitting only a single start tick, yet keep crunching
+    CPU. A genuine wedge (the job-99 failure) is a blocked main thread that
+    produces neither ticks nor CPU - that is the only case we kill on.
+    """
+    if current_job_id is None:
+        return False
+    if (now - last_tick) <= timeout_seconds:
+        return False
+    return cpu_seconds < min_cpu_seconds
+
+
+def _stall_watchdog(stop: threading.Event) -> None:
+    """Fail + exit when the main thread is wedged on one job past the timeout."""
+    mins = int(settings.WORKER_STALL_TIMEOUT_MINUTES)
+    timeout_seconds = max(60, mins * 60)
+    min_cpu_seconds = max(1.0, float(settings.WORKER_STALL_MIN_CPU_SECONDS))
+    while not stop.wait(30):
+        jid = _CURRENT_JOB[0]
+        cpu_since_tick = time.process_time() - _MAIN_PROC[0]
+        if not _should_stall_exit(jid, _MAIN_TICK[0], time.time(),
+                                  timeout_seconds, cpu_since_tick, min_cpu_seconds):
+            continue
+        logger.error(
+            f"Watchdog: job {jid} made no progress and used <{min_cpu_seconds:.0f}s "
+            f"CPU for >{mins}m (main thread wedged); failing it and exiting so the "
+            f"service restarts")
+        try:
+            db = SessionLocal()
+            db.execute(
+                text("UPDATE jobs SET status='failed', "
+                     "error_message=COALESCE(error_message,'')||:reason "
+                     "WHERE id=:jid AND status='processing'"),
+                {"reason": f" [stalled >{mins}m, watchdog]", "jid": jid})
+            db.commit()
+            db.close()
+        except Exception as e:
+            logger.error(f"Watchdog: could not fail job {jid} ({e}); exiting anyway")
+        # Hard exit: the stuck main thread cannot be joined, and NSSM's
+        # AppExit=Restart turns the process death into a fresh worker.
+        os._exit(1)
 
 
 def claim_job(db, job_id: int) -> bool:
@@ -104,6 +186,84 @@ def touch_lease(db, job_id: int) -> int:
     db.commit()
     return touched
 
+
+# What a clip row may say about itself. Anything outside this set is identity
+# (id, job_id, index) or publish state, and the publish state is exactly why an
+# existing row is reused instead of replaced.
+CLIP_RECORD_FIELDS = (
+    "start", "end", "title", "hook", "hook_style", "score",
+    "hook_score", "coherence_score", "connection_score", "trend_score",
+    "score_breakdown", "file_path", "thumbnail_path", "description",
+    "hashtags", "platform_metadata", "caption_style", "layout_mode",
+)
+
+
+def record_clip(db, job_id: int, index: int, values: dict) -> Clip:
+    """Insert or re-record the row for one rendered clip, and return it.
+
+    Reusing the row a previous run left behind is not an optimization, it is the
+    double-publish guard: a fresh Clip() has no youtube_video_id, so the upload
+    step reads an unpublished clip and ships a short already on YouTube a second
+    time. Reuse therefore keeps every column outside CLIP_RECORD_FIELDS.
+
+    Reuse is not the same as ignoring the run. Writing only on insert left job
+    110 re-rendered onto ten new windows while its rows still reported the old
+    grid start, end and title - a row describing a file it no longer points at.
+
+    The read above is not a lock, so two workers can both see "no row". The
+    unique index on clips(job_id, index) (database.migrations) decides the race
+    in the database, and the IntegrityError it raises here is handled as "the
+    row exists now, write into it" rather than as a failed render.
+    """
+    unknown = sorted(set(values) - set(CLIP_RECORD_FIELDS))
+    if unknown:
+        raise ValueError(
+            "record_clip only writes CLIP_RECORD_FIELDS, got "
+            + ", ".join(unknown)
+        )
+
+    clip_db = (
+        db.query(Clip)
+        .filter(Clip.job_id == job_id, Clip.index == index)
+        .first()
+    )
+    if clip_db is None:
+        clip_db = Clip(
+            job_id=job_id, index=index, uploaded=False, upload_retry_count=0,
+            **values
+        )
+        db.add(clip_db)
+    else:
+        for field, value in values.items():
+            setattr(clip_db, field, value)
+    try:
+        db.commit()
+    except IntegrityError:
+        # The read-then-write above has a window, and on two workers on one job
+        # (see api/jobs.restart_job's old lease hole) somebody else wins it: the
+        # unique index on clips(job_id, index) rejects our INSERT. That is the
+        # constraint doing its job, not an error to raise - the render is forty
+        # minutes old at this point and the row we wanted already exists. Fall
+        # through the same reuse path the pre-read would have taken.
+        db.rollback()
+        raced = (
+            db.query(Clip)
+            .filter(Clip.job_id == job_id, Clip.index == index)
+            .first()
+        )
+        if raced is None:
+            # Not our slot: some other constraint (or a genuinely broken row)
+            # failed. Nothing here can fix that silently.
+            raise
+        for field, value in values.items():
+            setattr(raced, field, value)
+        db.commit()
+        clip_db = raced
+        job_debug(job_id, f"Clip slot ({job_id}, {index}) was taken by another "
+                          f"worker mid-write; reused row {clip_db.id}")
+    db.refresh(clip_db)
+    return clip_db
+
 def _get_redis_client():
     global _REDIS_CLIENT, _REDIS_CHECKED
     if _REDIS_CHECKED:
@@ -128,6 +288,42 @@ def _url_fingerprint(url: str) -> str:
     import hashlib
     return hashlib.sha256((url or "").strip().encode("utf-8")).hexdigest()[:16]
 
+
+def ensure_derived(job_id: int, artifact_path: str, kind: str,
+                   build: Callable[[], object], inputs: dict,
+                   legacy_current: bool = False) -> bool:
+    """Produce ``artifact_path`` unless it already comes from these exact inputs.
+
+    Returns True when the artifact was (re)built, so the caller keeps its own
+    log wording. ``inputs`` is what the build consumed — the clip window, the
+    caption style, the source fingerprint, the identity of the file this
+    artifact was derived from — and it is recorded in ``<dir>/artifact.json``
+    next to the artifact.
+
+    ``os.path.exists`` was the old test and it is not evidence: the per-clip
+    files live in a directory named by the clip *index*, so a re-run whose
+    selector picked other windows found ``clip_0/words.json`` sitting there from
+    the previous window and burned its text into a freshly cut picture (job 110:
+    a frame at t=3175 s carrying the caption "own. Something the legacy" from
+    t=0 s). An artifact now only counts as current while its key matches, and
+    anything the key cannot answer (no entry, unreadable manifest, different
+    kind) is rebuilt.
+
+    The entry is dropped before the rebuild on purpose: a build that dies
+    half-way (an ffmpeg failure, the stall watchdog's ``os._exit``) must not
+    leave behind a key that still vouches for the truncated file.
+    """
+    if derived_cache.is_current(artifact_path, kind, inputs, legacy_current=legacy_current):
+        return False
+
+    derived_cache.forget(artifact_path)
+    build()
+    if not derived_cache.record(artifact_path, kind, inputs):
+        job_warning(job_id, f"Could not record the cache key for {artifact_path}; "
+                            "it will be rebuilt on the next run")
+    return True
+
+
 def _clear_derived_artifacts(job_dir, job_id):
     """Remove per-job files that derive from the source video, so a re-downloaded
     source is never paired with stale audio/transcript/timing or old clip cuts
@@ -137,6 +333,9 @@ def _clear_derived_artifacts(job_dir, job_id):
         "audio.wav", "words.json", "segments.json", "transcript.txt",
         "short.mp4", "vertical.mp4", "final_short.mp4", "final_with_title.mp4",
         "final_with_sfx.mp4", "popup_card.png", "captions.ass", "diarization.json",
+        # The cache keys for the files above. Leaving this behind would let the
+        # next run vouch for a transcript that no longer exists under it.
+        derived_cache.MANIFEST_NAME,
     ]
     for name in stale_files:
         p = os.path.join(str(job_dir), name)
@@ -158,6 +357,60 @@ def _clear_derived_artifacts(job_dir, job_id):
                     job_info(job_id, f"Removed stale clip dir: {clip_dir}")
                 except Exception as e:
                     job_warning(job_id, f"Could not remove {clip_dir}: {e}")
+
+# What the render step leaves beside final_video.mp4. The trimmed cut is on this
+# list because it is a deliverable derived from the render, not an intermediate
+# toward it: pruning it would delete the only file matching the row's
+# trim_start/trim_end, and the next resume would repoint the row at the long cut.
+RENDER_KEEP_NAMES = ("final_video.mp4", clip_trim.TRIMMED_ARTIFACT_NAME,
+                     "thumbnail.jpg", "metadata.json", "storyboard.jpg", "words.json")
+
+
+def _prune_render_intermediates(clip_dir) -> None:
+    """Delete the stage-by-stage videos, subtitle and audio files one render left."""
+    for entry in os.listdir(str(clip_dir)):
+        if entry in RENDER_KEEP_NAMES:
+            continue
+        if entry.endswith(".mp4") or entry.endswith(".ass") or entry.endswith(".wav"):
+            try:
+                os.remove(os.path.join(str(clip_dir), entry))
+            except OSError:
+                pass
+
+
+def _reapply_recorded_trim(db, job_id, clip_db, clip_dir, clip_start, clip_end,
+                           index) -> bool:
+    """Re-cut the operator's stored trim out of whatever render exists now.
+
+    A resume skips the render stages and re-records a row that already exists, so
+    without this the row keeps naming the untrimmed file and the queue publishes
+    the cut the operator removed from the timeline. A recorded trim that no longer
+    fits the new render is reported, not hidden: publishing the long version is
+    the failure being fixed, so the row stays on the render it describes and the
+    job log says why.
+
+    Returns True only when the row was repointed at a fresh trimmed artifact.
+    """
+    from services.trim import TrimValidationError
+
+    if clip_db.trim_start is None or clip_db.trim_end is None:
+        return False
+    try:
+        trimmed = clip_trim.sync_stored_trim(
+            clip_dir, (clip_start, clip_end), clip_db.trim_start, clip_db.trim_end)
+    except TrimValidationError as exc:
+        job_warning(job_id, f"Clip #{index + 1} will publish untrimmed: its recorded "
+                            f"{clip_db.trim_start}-{clip_db.trim_end}s cut does not fit this "
+                            f"render ({exc})")
+        return False
+    if not trimmed:
+        return False
+    clip_db.file_path = os.path.relpath(trimmed, settings.STORAGE_ROOT)
+    db.commit()
+    job_info(job_id, f"Clip #{index + 1} re-applied its recorded trim "
+                      f"{clip_db.trim_start}-{clip_db.trim_end}s")
+    return True
+
 
 def _drop_transcription_input(job_dir, job_id):
     """Delete the extracted audio once a transcript exists on disk.
@@ -187,6 +440,11 @@ def _drop_transcription_input(job_dir, job_id):
 
 def load_clip_diarization(job_dir, clip_start: float, clip_end: float) -> list:
     """Speaker turns inside one clip, re-zeroed to clip time. [] when none."""
+    if not settings.DIARIZATION_ENABLED:
+        # The switch owns the whole run: a diarization.json from when it was on
+        # must not reach the layouts either (stage_diarize returns [] above, but
+        # this file is what the per-clip render actually reads).
+        return []
     try:
         path = os.path.join(str(job_dir), "diarization.json")
         if not os.path.exists(path):
@@ -197,6 +455,17 @@ def load_clip_diarization(job_dir, clip_start: float, clip_end: float) -> list:
         return slice_turns(data.get("turns") or [], clip_start, clip_end)
     except Exception:
         return []
+
+
+CLIP_FADE_IN = 0.04
+CLIP_FADE_OUT = 0.25
+
+
+def clip_audio_fades(duration: float) -> str:
+    """afade chain for a cut of `duration` seconds: a click-free in and a soft out."""
+    fade_out = min(CLIP_FADE_OUT, max(0.0, duration / 4))
+    return (f"afade=t=in:st=0:d={CLIP_FADE_IN},"
+            f"afade=t=out:st={max(0.0, duration - fade_out):.3f}:d={fade_out:.3f}")
 
 
 def cut_clip(
@@ -230,6 +499,9 @@ def cut_clip(
         "-fps_mode", "cfr",
         "-preset", settings.FFMPEG_PRESET,
         "-crf", str(settings.FFMPEG_CRF),
+        # A hard cut on a waveform clicks and sounds chopped even when it falls
+        # in a pause; a few tens of milliseconds of fade is inaudible as a fade.
+        "-af", clip_audio_fades(duration),
         "-c:a", "aac",
         "-b:a", "128k",
         output
@@ -395,7 +667,25 @@ async def stage_transcribe(job_id: int, job: Job, job_dir: Path, audio_path: str
     source_language = getattr(job, "source_language", None) or None
     keep_native = bool(getattr(job, "keep_native_transcript", False))
 
-    if not os.path.exists(segments_file) or not os.path.exists(words_file):
+    # The transcript is keyed by the source it was heard from and by every
+    # setting that changes what the model returns. Rebuilding it costs a full
+    # Whisper pass on a multi-hour source, so a transcript that predates this
+    # manifest is accepted on existence alone (legacy_current) — the only way
+    # the file can exist while the source changed is the re-download branch,
+    # and that branch deletes both files before it re-fetches.
+    transcript_inputs = {
+        "source": derived_cache.source_fingerprint(job_dir),
+        "model": getattr(job, "whisper_model", None),
+        "task": transcribe_task,
+        "language": source_language,
+        "keep_native": keep_native,
+    }
+    transcript_on_disk = os.path.exists(segments_file) and os.path.exists(words_file)
+    cached_transcript = transcript_on_disk and all(
+        derived_cache.is_current(path, "transcript", transcript_inputs, legacy_current=True)
+        for path in (segments_file, words_file))
+
+    if not cached_transcript:
         transcribe_audio_file(
             audio_path,
             str(job_dir),
@@ -405,6 +695,8 @@ async def stage_transcribe(job_id: int, job: Job, job_dir: Path, audio_path: str
             keep_native=keep_native,
             progress_callback=update_progress,
         )
+        derived_cache.record(segments_file, "transcript", transcript_inputs)
+        derived_cache.record(words_file, "transcript", transcript_inputs)
         job_info(job_id, f"Transcript created (task={transcribe_task}): {segments_file}, {words_file}")
     else:
         job_info(job_id, "Transcript already exists")
@@ -430,34 +722,76 @@ async def stage_transcribe(job_id: int, job: Job, job_dir: Path, audio_path: str
     return segments, segments_file, words_file, source_title, source_channel
 
 
-async def stage_diarize(job_id: int, job_dir: Path, video_path: str, update_progress: Callable[[str, int], None]) -> list:
-    """Who speaks when across the source, written to diarization.json.
+async def stage_diarize(job_id: int, job_dir: Path, video_path: str, clips: list,
+                        update_progress: Callable[[str, int], None]) -> list:
+    """Who speaks when across the selected clip windows, written to diarization.json.
 
-    Soft by design: a missing HF token, a gated model, or an undecodable
-    source leaves the job with no speaker turns and a logged warning — every
-    later stage reads 'no diarization' as the old behavior, not as an error.
+    Diarization is consumed only per clip (``load_clip_diarization`` slices turns
+    to each clip's window), so it runs AFTER selection and over just those windows
+    rather than the whole source — the difference between minutes and ~40+ minutes
+    on a long video.
+
+    Soft by design: a missing HF token, a gated model, or an undecodable source
+    leaves the job with no speaker turns and a logged warning — every later stage
+    reads 'no diarization' as the old behavior, not as an error.
     """
+    # The switch first. A diarization.json left by an older run with the switch
+    # on is evidence about that run, not an instruction for this one, and the
+    # resume used to sit above the gate — so a job with DIARIZATION_ENABLED=false
+    # still fed cached speaker turns to the layouts.
+    if not settings.DIARIZATION_ENABLED:
+        job_info(job_id, "Speaker diarization disabled (DIARIZATION_ENABLED=false), skipping")
+        return []
+
     diarization_file = os.path.join(str(job_dir), "diarization.json")
-    if os.path.exists(diarization_file):
+
+    windows = [{"start": float(c["start"]), "end": float(c["end"])}
+               for c in (clips or []) if c.get("start") is not None and c.get("end") is not None]
+    if not windows:
+        job_info(job_id, "Speaker diarization skipped: no clip windows to analyze")
+        return []
+
+    # Diarization runs over the selected windows only, and pyannote numbers the
+    # voices it finds per call (SPEAKER_00 of one call is not SPEAKER_00 of the
+    # next), so turns computed for other windows are not reusable at all. The
+    # resume is therefore keyed by the exact window set plus the source and the
+    # model that produced it.
+    diarization_inputs = {
+        "source": derived_cache.source_fingerprint(job_dir, video_path),
+        "windows": windows,
+        "model": settings.DIARIZATION_MODEL,
+        "margin": settings.DIARIZATION_CLIP_MARGIN_SECONDS,
+    }
+    if derived_cache.is_current(diarization_file, "diarization", diarization_inputs):
         try:
             with open(diarization_file, "r", encoding="utf-8") as f:
                 turns = (json.load(f) or {}).get("turns") or []
-            job_info(job_id, f"Diarization already on disk: {len(turns)} speaker turns (resume)")
+            job_info(job_id, f"Diarization already on disk for these {len(windows)} clip "
+                             f"windows: {len(turns)} speaker turns (resume)")
             return turns
         except Exception as e:
             job_warning(job_id, f"Could not read existing diarization.json ({e}); re-running diarization")
 
-    if not settings.DIARIZATION_ENABLED:
-        job_info(job_id, "Step 3b/8: Speaker diarization disabled (DIARIZATION_ENABLED=false), skipping")
-        return []
+    if os.path.exists(diarization_file):
+        # Built for a different selection (or unreadable): drop it and its key so
+        # no clip slices turns that were never computed over its own window.
+        try:
+            os.remove(diarization_file)
+            job_info(job_id, "Diarization is for different clip windows — re-running")
+        except Exception as e:
+            job_warning(job_id, f"Could not remove stale diarization.json ({e})")
+        derived_cache.forget(diarization_file)
 
-    job_info(job_id, "Step 3b/8: Speaker diarization (pyannote, CPU)...")
-    update_progress("Identifying speakers...", 51)
+    total = sum(w["end"] - w["start"] for w in windows)
+    job_info(job_id, f"Speaker diarization over {len(windows)} clip windows "
+                     f"(~{total:.0f}s of audio, pyannote, CPU)...")
+    update_progress("Identifying speakers (per clip)...", 58)
     try:
-        from services.diarization import try_diarize
-        turns = try_diarize(video_path)
+        from services.diarization import try_diarize_windows
+        turns = try_diarize_windows(video_path, windows,
+                                    margin=settings.DIARIZATION_CLIP_MARGIN_SECONDS)
     except Exception as e:
-        # try_diarize is soft-fail by contract; the stage must be too.
+        # try_diarize_windows is soft-fail by contract; the stage must be too.
         turns = None
         job_warning(job_id, f"Diarization stage error ({e}); continuing without speaker turns")
     if turns is None:
@@ -466,10 +800,25 @@ async def stage_diarize(job_id: int, job_dir: Path, video_path: str, update_prog
     try:
         with open(diarization_file, "w", encoding="utf-8") as f:
             json.dump({"model": settings.DIARIZATION_MODEL, "turns": turns}, f, ensure_ascii=False, indent=2)
+        derived_cache.record(diarization_file, "diarization", diarization_inputs)
     except Exception as e:
         job_warning(job_id, f"Diarization computed but could not be written to disk: {e}")
-    job_info(job_id, f"Diarization: {len(turns)} speaker turns")
+    job_info(job_id, f"Diarization: {len(turns)} speaker turns across clip windows")
     return turns
+
+
+async def _fix_caption_names(job_dir, clip_words_file: str) -> int:
+    """Correct misheard names in one clip's words, with the source's title and tags as context."""
+    from services.caption_fix import fix_clip_words
+    title, tags = "", []
+    try:
+        with open(os.path.join(str(job_dir), "meta.json"), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        title = meta.get("title") or ""
+        tags = meta.get("tags") or []
+    except Exception:
+        pass
+    return await fix_clip_words(clip_words_file, title=title, tags=tags)
 
 
 async def stage_scene_attention(job_id: int, clip_dir, short_path: str, clip_words_file: str,
@@ -542,8 +891,16 @@ async def stage_score_audio_energy(job_id: int, video_path: str, segments: list,
     job_info(job_id, "Step 4a/8: Audio energy pre-pass (FFmpeg RMS analysis)...")
     update_progress("Analyzing audio energy...", 51)
     try:
-        segments = score_audio_energy(str(video_path), segments)
+        energy_status: dict = {}
+        segments = score_audio_energy(str(video_path), segments, status_out=energy_status)
         job_info(job_id, f"Audio energy scored for {len(segments)} segments")
+        if energy_status.get("partial"):
+            job_warning(job_id, f"Audio energy band incomplete: "
+                        f"{energy_status.get('windows_read')}/{energy_status.get('windows_attempted')} "
+                        f"windows readable, {energy_status.get('unmeasured_segments')} segments carry "
+                        f"the measured mean (coverage {energy_status.get('coverage')})")
+        elif energy_status.get("flat_band"):
+            job_info(job_id, "Audio energy band is flat but measured - audio_dynamics will be near 0")
         # Persist enriched segments so select_clips can read audio_energy_score
         with open(segments_file, "w", encoding="utf-8") as f:
             json.dump(segments, f, ensure_ascii=False, indent=2)
@@ -582,7 +939,8 @@ async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_t
     update_progress("Analyzing virality & selecting top clips...", 52)
     
     num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else settings.NUM_CLIPS
-    clips = await select_clips(segments_file, num_target_clips, video_title=source_title, temporal_events=temporal_events)
+    clips = await select_clips(segments_file, num_target_clips, video_title=source_title, temporal_events=temporal_events,
+                               mode=getattr(job, "clip_mode", None) or "auto")
     job_info(job_id, f"Selected {len(clips)} clips")
     update_progress(f"Selected {len(clips)} clips", 56)
     
@@ -635,26 +993,54 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # 5a. CUT CLIP
         # =====================
         short_path = os.path.join(str(clip_dir), "short.mp4")
-        if not os.path.exists(short_path):
-            cut_clip(video_path, clip_start, clip_end, short_path)
+        clip_window = [float(clip_start), float(clip_end)]
+        if ensure_derived(job_id, short_path, "clip_cut",
+                          lambda: cut_clip(video_path, clip_start, clip_end, short_path),
+                          {"source": derived_cache.source_fingerprint(job_dir, video_path),
+                           "window": clip_window,
+                           "audio": clip_audio_fades(clip_window[1] - clip_window[0])}):
             job_info(job_id, f"Clip cut: {short_path}")
         else:
-            job_info(job_id, f"Clip already exists: {short_path}")
+            job_info(job_id, f"Clip already exists for [{clip_window[0]:.1f}s - "
+                             f"{clip_window[1]:.1f}s]: {short_path}")
 
         # =====================
         # 5b-5e. RENDER: SINGLE-PASS UNIFIED (Task D) OR SEQUENTIAL FALLBACK
         # =====================
         # User's chosen preset on the job ALWAYS takes precedence to keep all clips consistent
         layout_choice = getattr(job, "default_layout_mode", None) or clip.get("layout") or "auto"
+        # The mode is the job's, or - when it was left on auto - the one picked from the video.
+        _edit_mode = clip.get("edit_mode") or getattr(job, "clip_mode", None)
+        if _edit_mode == "gaming" and layout_choice in ("auto", "adaptive", None, ""):
+            layout_choice = "gaming"  # gameplay + facecam panels; the mode implies the layout
         caption_style = getattr(job, "default_caption_style", None) or clip.get("caption_style") or "mrbeast"
 
         # 5c. Crop Words
+        # Keyed by the window it was sliced for and by the transcript file it was
+        # sliced from. words.json is the one per-clip file the end-of-render
+        # cleanup keeps, which is exactly why an existence check here silently
+        # reused the previous selection's text (job 110).
         clip_words_file = os.path.join(str(clip_dir), "words.json")
-        if not os.path.exists(clip_words_file):
-            crop_words(words_file, clip_start, clip_end, clip_words_file)
+        name_fix_task = None
+        name_fix_model = (settings.CAPTION_FIX_MODEL or "default") \
+            if getattr(settings, "CAPTION_FIX_ENABLED", False) else None
+        words_key = {"window": clip_window,
+                     "transcript": derived_cache.input_fingerprint(words_file)}
+        if name_fix_model:
+            # Part of the key so words cropped before the correction existed are
+            # re-cropped and corrected instead of being reused as they were.
+            words_key["name_fix"] = name_fix_model
+        if ensure_derived(job_id, clip_words_file, "clip_words",
+                          lambda: crop_words(words_file, clip_start, clip_end, clip_words_file),
+                          words_key):
             job_info(job_id, f"Words cropped: {clip_words_file}")
+            # Runs alongside scene attention (a ~25 s model call of its own) and is
+            # awaited just before the captions are built from these words.
+            if name_fix_model:
+                name_fix_task = asyncio.create_task(_fix_caption_names(job_dir, clip_words_file))
         else:
-            job_info(job_id, "Words already cropped")
+            job_info(job_id, f"Words already cropped for [{clip_window[0]:.1f}s - "
+                             f"{clip_window[1]:.1f}s]: {clip_words_file}")
 
         # ---- transcript (used for SFX selection + virality) ----
         clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
@@ -689,12 +1075,29 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             resolved_layout = layout_choice
 
         # 5d. Generate ASS Captions with Selected Preset & Emojis
+        # The style is part of the key, so switching presets on a re-render can
+        # not leave an old-styled .ass behind; the cropped-words identity is in it
+        # too, so a window change that rebuilt words.json rebuilds the captions
+        # even if the style and the index are untouched.
         captions_path = os.path.join(str(clip_dir), "captions.ass")
-        if not os.path.exists(captions_path):
-            create_captions(clip_words_file, captions_path, style_name=caption_style)
+        if name_fix_task is not None:
+            try:
+                # free/best took 14-85 s per clip on job 112; past this the clip
+                # keeps Whisper's words rather than holding up the render.
+                fixed = await asyncio.wait_for(name_fix_task, timeout=120)
+                if fixed:
+                    job_info(job_id, f"Caption names corrected: {fixed} word(s) in clip {index + 1}")
+            except Exception as e:
+                job_warning(job_id, f"Caption name correction skipped ({e})")
+        if ensure_derived(job_id, captions_path, "captions",
+                          lambda: create_captions(clip_words_file, captions_path,
+                                                  style_name=caption_style),
+                          {"window": clip_window,
+                           "style": caption_style,
+                           "words": derived_cache.input_fingerprint(clip_words_file)}):
             job_info(job_id, f"Captions created with '{caption_style}' style: {captions_path}")
         else:
-            job_info(job_id, "Captions already exist")
+            job_info(job_id, f"Captions already exist for '{caption_style}' style")
 
         final_path = os.path.join(str(clip_dir), "final_short.mp4")
 
@@ -745,6 +1148,26 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             except Exception as e:
                 job_warning(job_id, f"Visual popup preparation failed ({e}); continuing without popup")
 
+        # ---- Headline first, then the render ----
+        # Single-pass mode composites the title PNG *inside* the encode, so the
+        # text passed there is what the viewer reads forever. Generating the
+        # metadata after the render left job 105 with the selector's draft
+        # burned into every frame while the database held the real title.
+        job_info(job_id, "Generating metadata...")
+        clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
+        # A model pick keeps the selector's headline: it was written with the whole
+        # video in view and ranked on it. The diagnostic arms carry a bracketed
+        # test label in the title, which must not be burned in as-is.
+        from services.clip_selector import MODEL_SELECTION_PATHS
+        metadata = await generate_metadata(
+            clip_transcript,
+            clip.get("title", ""),
+            clip.get("hook", ""),
+            keep_title=(clip.get("selection_path") in MODEL_SELECTION_PATHS
+                        and not clip.get("hook_style")),
+        )
+        final_title = metadata.get("title") or clip.get("title") or ""
+
         # ---- Render: single-pass unified OR sequential fallback ----
         _used_single_pass = False
         if getattr(settings, "SINGLE_PASS_RENDER", False):
@@ -755,7 +1178,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
 
                 vertical_frag = build_vertical_filter(short_path, mode=resolved_layout,
                                                       diarization=clip_turns or None, attention=clip_attention)
-                sfx_list = pick_sfx_for_clip(clip.get("title", "") or "", clip_transcript, job.style_prompt or "")
+                sfx_list = pick_sfx_for_clip(final_title or "", clip_transcript, job.style_prompt or "")
                 sfx_files = []
                 sfx_ts = []
                 for name in sfx_list:
@@ -763,7 +1186,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                     if p:
                         sfx_files.append(p)
                         sfx_ts.append(0.3 if len(sfx_files) == 1 else max(1.5, (clip_end - clip_start) / 2.0))
-                _title = clip.get("title") or "Viral Moment"
+                _title = final_title or derive_title_from_text(clip_transcript)
                 # short_path is already cut from clip_start to clip_end, so relative duration is 0..duration
                 clip_dur = max(0.1, clip_end - clip_start)
                 _rsp(
@@ -789,19 +1212,24 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # ---- Sequential fallback ----
         if not _used_single_pass:
             vertical_path = os.path.join(str(clip_dir), "vertical.mp4")
-            if not os.path.exists(vertical_path):
-                try:
-                    smart_crop_video(short_path, vertical_path, mode=resolved_layout)
+            try:
+                if ensure_derived(job_id, vertical_path, "vertical",
+                                  lambda: smart_crop_video(short_path, vertical_path,
+                                                           mode=resolved_layout),
+                                  {"short": derived_cache.input_fingerprint(short_path),
+                                   "layout": resolved_layout}):
                     job_info(job_id, f"Vertical conversion ({resolved_layout}): {vertical_path}")
-                except Exception as e:
-                    job_warning(job_id, f"Vertical conversion failed, using original short: {str(e)}")
-                    vertical_path = short_path
-                    job_info(job_id, f"Vertical conversion fallback: {vertical_path}")
-            else:
-                job_info(job_id, f"Vertical already exists: {vertical_path}")
+                else:
+                    job_info(job_id, f"Vertical already exists: {vertical_path}")
+            except Exception as e:
+                job_warning(job_id, f"Vertical conversion failed, using original short: {str(e)}")
+                vertical_path = short_path
+                job_info(job_id, f"Vertical conversion fallback: {vertical_path}")
 
-            if not os.path.exists(final_path):
-                burn_captions(vertical_path, captions_path, final_path)
+            if ensure_derived(job_id, final_path, "burned",
+                              lambda: burn_captions(vertical_path, captions_path, final_path),
+                              {"vertical": derived_cache.input_fingerprint(vertical_path),
+                               "captions": derived_cache.input_fingerprint(captions_path)}):
                 job_info(job_id, f"Final video (sequential): {final_path}")
             else:
                 job_info(job_id, "Final video already exists")
@@ -811,30 +1239,25 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             vertical_path = final_path
 
         # =====================
-        # 5f. GENERATE METADATA
+        # 5f. METADATA ENRICHMENT
+        # (title/description/hashtags were generated before the render, so the
+        #  burned-in headline and the published one are the same text)
         # =====================
-        job_info(job_id, "Generating metadata...")
-        clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
-        metadata = await generate_metadata(
-            clip_transcript,
-            clip.get("title", ""),
-            clip.get("hook", "")
-        )
-
-        # Compute Active Expression & Multi-modal Virality Analysis
-        try:
-            from services.virality_detector import compute_composite_virality
-            v_stats = compute_composite_virality(clip.get("virality_score", 0.8), clip_transcript, vertical_path)
-            metadata["virality_breakdown"] = v_stats
-            job_info(job_id, f"Clip Virality Score: {v_stats['virality_score_100']}/100 (Visual: {v_stats['visual_intensity']})")
-        except Exception:
-            v_stats = {"virality_score_100": 85.0, "virality_score": 0.85}
+        # Compute Active Expression & Multi-modal Virality Analysis.
+        # resolve_virality_stats never raises: if the visual/keyword pass fails
+        # it falls back to the selector's own score (flagged, logged) instead of
+        # the old hardcoded 85.0 that sat above the real band and hid the error.
+        from services.virality_detector import resolve_virality_stats
+        v_stats = resolve_virality_stats(clip.get("virality_score"), clip_transcript, vertical_path)
+        metadata["virality_breakdown"] = v_stats
+        job_info(job_id, f"Clip Virality Score: {v_stats['virality_score_100']}/100 "
+                         f"(Visual: {v_stats.get('visual_intensity', 'n/a')})")
 
         # Generate Platform-Specific Copy (TikTok, Instagram Reels, YouTube Shorts)
         from services.copy_generator import generate_platform_copies
         platform_copy = await generate_platform_copies(
             clip_transcript,
-            metadata.get("title") or clip.get("title", "Viral Moment")
+            final_title
         )
         metadata["platform_copy"] = platform_copy
 
@@ -846,7 +1269,8 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         job_info(job_id, f"Metadata generated: {metadata_path}")
 
         # Add top TikTok title overlay ONCE at the end of clip processing
-        final_title = metadata.get("title") or clip.get("title") or "Viral Moment"
+        # (final_title was resolved before the render, together with the headline
+        # that single-pass mode already composited)
         title_overlay_path = os.path.join(str(clip_dir), "final_with_title.mp4")
         # In single-pass mode, the title PNG was already composited in the
         # single ffmpeg pass — skip the separate motion-title re-encode.
@@ -888,6 +1312,18 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             job_info(job_id, "Skipping separate SFX pass (already mixed in single-pass render)")
 
 
+        # 5g2. BURN IN THE CHANNEL BRANDING (logo / text), when configured
+        try:
+            from services import branding as _branding
+            _brand_cfg = _branding.load()
+            if _brand_cfg["enabled"]:
+                _branded_path = os.path.join(str(clip_dir), "final_branded.mp4")
+                if _branding.apply_branding(final_path, _branded_path, _brand_cfg):
+                    final_path = _branded_path
+                    job_info(job_id, "Channel branding burned in")
+        except Exception as e:
+            job_warning(job_id, f"Branding failed (clip kept unbranded): {str(e)}")
+
         # =====================
         # 5h. GENERATE THUMBNAIL & STORYBOARD
         # =====================
@@ -919,14 +1355,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         final_path = final_video_path
 
         # Remove all intermediate video/audio/ass files, keeping only final_video.mp4
-        keep_files = {"final_video.mp4", "thumbnail.jpg", "metadata.json", "storyboard.jpg", "words.json"}
-        for entry in os.listdir(str(clip_dir)):
-            if entry not in keep_files and (entry.endswith(".mp4") or entry.endswith(".ass") or entry.endswith(".wav")):
-                fp = os.path.join(str(clip_dir), entry)
-                try:
-                    os.remove(fp)
-                except Exception:
-                    pass
+        _prune_render_intermediates(clip_dir)
 
         # =====================
         # 5g-extra. DIMENSION CHECK (pre-upload 9:16 validation)
@@ -961,58 +1390,67 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         relative_thumbnail_path = os.path.relpath(thumbnail_path, settings.STORAGE_ROOT) if thumbnail_result else None
 
         # A reclaimed job re-enters this stage for clips it already recorded (the
-        # render stages skip on existing files). Reuse that row: a fresh Clip()
-        # has no youtube_video_id, so the re-upload guards below would never fire
-        # and a short already on YouTube would be published a second time.
-        clip_db = db.query(Clip).filter(Clip.job_id == job_id, Clip.index == index).first()
-        if clip_db is None:
-            clip_db = Clip(
-                job_id=job_id,
-                index=index,
-                start=clip_start,
-                end=clip_end,
-                title=final_title,
-                hook=clip.get("hook"),
-                # The A/B arm, so a later view-count sync can attribute the result.
-                hook_style=clip.get("hook_style"),
-                score=v_stats.get("virality_score_100", 85.0),
-                hook_score=clip.get("hook_score"),
-                coherence_score=clip.get("coherence_score"),
-                connection_score=clip.get("connection_score"),
-                trend_score=clip.get("trend_score"),
-                score_breakdown={
-                    "llm": clip.get("llm_score_raw"),
-                    "audio": clip.get("audio_energy_score"),
-                    "keyword": clip.get("keyword_score"),
-                    "density": clip.get("semantic_density"),
-                    "structural": clip.get("structural_score"),
-                },
-                file_path=relative_final_path,
-                thumbnail_path=relative_thumbnail_path,
-                description=metadata.get("description", ""),
-                hashtags=metadata.get("hashtags", ["#Shorts"]),
-                platform_metadata=metadata.get("platform_copy", {}),
-                caption_style=caption_style,
-                layout_mode=resolved_layout,
-                uploaded=False,
-                upload_retry_count=0
-            )
-
-            db.add(clip_db)
-            db.commit()
-            db.refresh(clip_db)
+        # render stages skip on existing files). record_clip reuses that row so a
+        # short already on YouTube keeps its youtube_video_id, and rewrites the
+        # descriptive columns so the row says what this run actually cut.
+        clip_db = record_clip(db, job_id, index, {
+            "start": clip_start,
+            "end": clip_end,
+            "title": final_title,
+            "hook": clip.get("hook"),
+            # The A/B arm, so a later view-count sync can attribute the result.
+            "hook_style": clip.get("hook_style"),
+            "score": v_stats["virality_score_100"],
+            "hook_score": clip.get("hook_score"),
+            "coherence_score": clip.get("coherence_score"),
+            "connection_score": clip.get("connection_score"),
+            "trend_score": clip.get("trend_score"),
+            "score_breakdown": {
+                "llm": clip.get("llm_score_raw"),
+                "audio": clip.get("audio_energy_score"),
+                "keyword": clip.get("keyword_score"),
+                "density": clip.get("semantic_density"),
+                "structural": clip.get("structural_score"),
+                # Where the window came from and what the second pass said about
+                # it. The publish queue reads selection_path: only a model pick
+                # goes out unattended.
+                "selection_path": clip.get("selection_path"),
+                "judge": clip.get("judge_score"),
+                "judge_reason": clip.get("judge_reason"),
+                "why": clip.get("why"),
+            },
+            "file_path": relative_final_path,
+            "thumbnail_path": relative_thumbnail_path,
+            "description": metadata.get("description", ""),
+            "hashtags": metadata.get("hashtags", ["#Shorts"]),
+            "platform_metadata": metadata.get("platform_copy", {}),
+            "caption_style": caption_style,
+            "layout_mode": resolved_layout,
+        })
         clip_id = clip_db.id
+
+        # The operator's manual trim lives in trim_start/trim_end, not in
+        # final_video.mp4 (utils/clip_trim.py keeps it as a keyed sibling), so a
+        # row re-recorded by a resumed run still describes a cut nobody applied
+        # here. Without this the one path that publishes automatically is the one
+        # path that can ship a short the operator cut out of the timeline.
+        _reapply_recorded_trim(db, job_id, clip_db, clip_dir, clip_start, clip_end, index)
 
         job_info(job_id, f"Clip {index + 1}/{total_clips} saved to DB with ID {clip_id}")
 
         # =========================================================
         # 5i. AUTO-UPLOAD: YouTube joins the queue, TikTok publishes here
         # The YouTube clip is parked in the database rather than uploaded the
-        # second it renders: the queue releases one publish per gap, and the clock
-        # for that lives in the clip row, so neither a burst nor a worker restart
-        # changes the cadence the channel is seen with.
+        # second it renders. Two clocks live in that row: publish_due_at is when
+        # this machine uploads, scheduled_publish_at is the release YouTube is
+        # handed as publishAt, so the cadence the channel is seen with holds even
+        # while this PC is off.
         # =========================================================
-        if getattr(job, "auto_upload", False):
+        if getattr(job, "auto_upload", False) and _needs_review_before_publish(clip_db):
+            job_warning(job_id, f"Clip {index + 1} was not chosen by a model "
+                                f"(selection path: {clip.get('selection_path')}); it is rendered "
+                                f"but not published automatically. Review it and press upload.")
+        elif getattr(job, "auto_upload", False):
             try:
                 if clip_db.youtube_video_id:
                     job_info(job_id, f"Clip {index + 1} already on YouTube ({clip_db.youtube_video_id}), skipping")
@@ -1020,7 +1458,8 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                     enqueue_clips_for_publish(db, job_id)
                     db.refresh(clip_db)
                     job_info(job_id, f"Clip {index + 1}/{total_clips} queued for YouTube, "
-                                     f"due {clip_db.publish_due_at:%Y-%m-%d %H:%M} UTC")
+                                     f"upload {clip_db.publish_due_at:%Y-%m-%d %H:%M} UTC, "
+                                     f"release {clip_db.scheduled_publish_at:%Y-%m-%d %H:%M} UTC")
             except Exception as yt_err:
                 job_warning(job_id, f"Could not queue Clip #{index + 1} for YouTube: {yt_err}")
 
@@ -1067,6 +1506,12 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
 
 PUBLISH_CLAIM_MINUTES = 30
 
+# An upload attempt whose outcome is still unrecorded once its own claim has
+# expired is not in flight any more - whoever started it is gone, and nothing left
+# behind says whether YouTube got the video. The grace is the claim window because
+# that is exactly how long a live attempt is promised to be.
+PUBLISH_ATTEMPT_GRACE_MINUTES = PUBLISH_CLAIM_MINUTES
+
 
 def next_publish_slot(db, now: Optional[datetime] = None) -> datetime:
     """The earliest moment the next YouTube publish may go out.
@@ -1090,24 +1535,195 @@ def next_publish_slot(db, now: Optional[datetime] = None) -> datetime:
     return max(now, last + timedelta(seconds=gap + random.uniform(0, jitter)))
 
 
-def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None) -> int:
-    """Park every rendered clip of a job in the publish queue.
+def _release_window():
+    """The (start, end) UTC hours a release may land in, or None when unset.
 
-    Idempotent: a clip that already waits keeps the slot it was given, and one that
-    already has a video id is finished. Returns how many rows were added.
+    End is exclusive, so "6-22" means 06:00 through 21:59.
+    """
+    raw = (getattr(settings, "PUBLISH_RELEASE_WINDOW_UTC", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        start, end = raw.split("-", 1)
+        start, end = int(start), int(end)
+    except ValueError:
+        logger.warning(f"PUBLISH_RELEASE_WINDOW_UTC={raw!r} is not 'start-end'; ignored")
+        return None
+    if not (0 <= start <= 23 and 0 <= end <= 24) or start == end:
+        logger.warning(f"PUBLISH_RELEASE_WINDOW_UTC={raw!r} is an empty window; ignored")
+        return None
+    return start, end
+
+
+def _snap_into_release_window(moment: datetime) -> datetime:
+    """Move a slot forward, never back, until it sits inside the release window.
+
+    A channel that publishes at 03:17, 15:17 and 03:17 again reads as a cron job to
+    the people who report spam, and to anyone comparing the timestamps. The window is
+    cosmetic to YouTube and not to its audience, so it is applied after the cadence
+    maths and can only delay a release, which is the safe direction.
+    """
+    bounds = _release_window()
+    if not bounds:
+        return moment
+    start, end = bounds
+    while True:
+        if start < end and start <= moment.hour < end:
+            return moment
+        if start > end and (moment.hour >= start or moment.hour < end):
+            return moment
+        if moment.hour < start:
+            return moment.replace(hour=start, minute=0, second=0, microsecond=0)
+        return (moment + timedelta(days=1)).replace(hour=start, minute=0,
+                                                    second=0, microsecond=0)
+
+
+def uploads_in_window(db, now: Optional[datetime] = None, hours: int = 24):
+    """Uploads YouTube accepted in the last `hours`, oldest first, as the channel counts them.
+
+    The budget is spent at upload, so this reads the successes, not the releases: a clip
+    sitting private with a publishAt tomorrow has already cost the channel one slot.
     """
     now = now or datetime.utcnow()
+    since = now - timedelta(hours=hours)
+    rows = db.query(Clip.published_at).filter(
+        Clip.youtube_video_id.isnot(None),
+        Clip.youtube_video_id != "",
+        Clip.published_at.isnot(None),
+        Clip.published_at > since,
+    ).order_by(Clip.published_at.asc()).all()
+    return [row[0] for row in rows]
+
+
+def next_budget_slot(db, now: Optional[datetime] = None):
+    """When the rolling upload budget has room again, or None while it already does.
+
+    YouTube's own number is unpublished, so this waits for the oldest success to age out
+    of the window rather than guessing a fixed retry delay.
+    """
+    budget = max(0, int(getattr(settings, "UPLOAD_DAILY_BUDGET", 0)))
+    if budget <= 0:
+        return None
+    recent = uploads_in_window(db, now=now)
+    if len(recent) < budget:
+        return None
+    return recent[0] + timedelta(hours=24)
+
+
+def next_release_slot(db, now: Optional[datetime] = None,
+                      source_url: Optional[str] = None) -> datetime:
+    """The earliest instant YouTube may be given as the next clip's release.
+
+    This is the channel's cadence — when the audience sees a video — and it is a
+    different clock from next_publish_slot, which is how fast this machine may
+    hand over uploads. The anchor is the latest scheduled_publish_at already in
+    the database, whether that clip is waiting for its slot or already released,
+    so a restart continues the schedule and two jobs cannot be parked on the
+    same minute. Nothing is ever released before PUBLISH_SCHEDULE_LEAD_SECONDS
+    after now, which is the window to inspect a clip first, and no release lands
+    outside the daily window.
+
+    source_url adds the channel's other rule: clips cut from the same original
+    video hold each other at PUBLISH_SAME_SOURCE_MIN_GAP_SECONDS apart, so one
+    stream cannot turn a week of the channel into fifteen pieces of itself.
+    """
+    now = now or datetime.utcnow()
+    gap = max(60, int(settings.PUBLISH_SCHEDULE_GAP_SECONDS))
+    lead = max(60, int(settings.PUBLISH_SCHEDULE_LEAD_SECONDS))
+    candidate = now + timedelta(seconds=lead)
+
+    last = db.query(func.max(Clip.scheduled_publish_at)).filter(
+        Clip.scheduled_publish_at.isnot(None),
+    ).scalar()
+    if last:
+        candidate = max(candidate, last + timedelta(seconds=gap))
+
+    if source_url:
+        same_source = db.query(func.max(Clip.scheduled_publish_at)).join(
+            Job, Clip.job_id == Job.id).filter(
+            Clip.scheduled_publish_at.isnot(None),
+            Job.youtube_url == source_url,
+        ).scalar()
+        source_gap = max(0, int(getattr(settings, "PUBLISH_SAME_SOURCE_MIN_GAP_SECONDS", 0)))
+        if same_source and source_gap:
+            candidate = max(candidate, same_source + timedelta(seconds=source_gap))
+
+    return _snap_into_release_window(candidate)
+
+
+# Selection paths that are not a model's choice: the transcript-heuristic filler
+# and the evenly spaced grid the selector emits when every LLM is down.
+UNREVIEWED_SELECTION_PATHS = ("heuristic", "grid")
+
+
+def _needs_review_before_publish(clip) -> bool:
+    """True for a clip no model chose, which must not publish unattended."""
+    breakdown = clip.score_breakdown if isinstance(clip.score_breakdown, dict) else {}
+    return breakdown.get("selection_path") in UNREVIEWED_SELECTION_PATHS
+
+
+def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None,
+                              include_unreviewed: bool = False) -> int:
+    """Park every rendered clip of a job in the publish queue.
+
+    Two clocks are written per clip: publish_due_at is when this machine uploads
+    it, scheduled_publish_at is when YouTube releases it. The upload time is
+    derived from the release, not from how fast this PC can push bytes, because
+    the channel's upload budget is spent at upload: fifteen clips dated over two
+    weeks would otherwise burn the whole rolling day of uploads on the first
+    afternoon and be refused before half of them ever had a turn.
+    Idempotent: a clip that already waits keeps the slot it was given, and one
+    that already has a video id is finished. Returns how many rows were added.
+
+    A clip the selector did not get from a model (see UNREVIEWED_SELECTION_PATHS)
+    is left out unless include_unreviewed is set, which only the operator's own
+    "upload" request does. Those windows exist so an LLM outage still renders
+    something to look at; queued automatically they put filler on the channel.
+    """
+    now = now or datetime.utcnow()
+    source_url = db.query(Job.youtube_url).filter(Job.id == job_id).scalar()
     pending = db.query(Clip).filter(
         Clip.job_id == job_id,
         Clip.publish_due_at.is_(None),
         or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
     ).order_by(Clip.index.asc()).all()
-    if not pending:
+    if not include_unreviewed:
+        unreviewed = [clip for clip in pending if _needs_review_before_publish(clip)]
+        if unreviewed:
+            pending = [clip for clip in pending if clip not in unreviewed]
+            job_warning(job_id, "Not queued automatically (no model chose these windows): clip "
+                                + ", ".join(f"#{clip.index}" for clip in unreviewed)
+                                + ". Review them and press upload to publish.")
+    # A row parked before the release clock existed has a due time and no slot.
+    # Left that way it uploads unscheduled, i.e. public the instant the queue
+    # reaches it, so the backlog gets slots continuing after the new ones.
+    unslotted = db.query(Clip).filter(
+        Clip.job_id == job_id,
+        Clip.publish_due_at.isnot(None),
+        Clip.scheduled_publish_at.is_(None),
+        or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
+    ).order_by(Clip.index.asc()).all()
+    if not pending and not unslotted:
         return 0
-    slot = next_publish_slot(db, now=now)
-    gap = max(0, int(settings.UPLOAD_MIN_GAP_SECONDS))
-    for offset, clip in enumerate(pending):
-        clip.publish_due_at = slot + timedelta(seconds=offset * gap)
+    lead = max(60, int(getattr(settings, "PUBLISH_UPLOAD_LEAD_SECONDS", 21600)))
+    release = next_release_slot(db, now=now, source_url=source_url)
+    release_gap = max(60, int(settings.PUBLISH_SCHEDULE_GAP_SECONDS))
+    # Each slot is placed after the one before it and snapped again on the way,
+    # so a job's own clips cannot straddle the window's edge: adding the cadence
+    # to a slot that was already pushed to 06:00 would otherwise hand the second
+    # clip a 00:15 release, which is the cron-job look the window exists to stop.
+    slot = release
+    for clip in pending:
+        clip.scheduled_publish_at = slot
+        clip.publish_due_at = slot - timedelta(seconds=lead)
+        slot = _snap_into_release_window(slot + timedelta(seconds=release_gap))
+    for clip in unslotted:
+        clip.scheduled_publish_at = slot
+        # Never earlier than the row already asks for: a due time an operator set
+        # by hand is a request to wait, and the release maths has no authority to
+        # cancel it. It may still be pushed later, which is the whole point.
+        clip.publish_due_at = max(clip.publish_due_at, slot - timedelta(seconds=lead))
+        slot = _snap_into_release_window(slot + timedelta(seconds=release_gap))
     db.commit()
     return len(pending)
 
@@ -1121,14 +1737,17 @@ def claim_clip_for_publish(db, clip_id: int, expected_due: datetime,
     job lease comes back to the queue.
     """
     now = now or datetime.utcnow()
-    result = db.execute(
-        text("UPDATE clips SET publish_due_at=:held "
-             "WHERE id=:cid AND publish_due_at=:expected"),
-        {"held": now + timedelta(minutes=PUBLISH_CLAIM_MINUTES),
-         "cid": clip_id, "expected": expected_due},
-    )
+    # Typed ORM comparison, not a raw text() bind: SQLite stores these columns as
+    # '...:SS.000000' and an untyped datetime parameter renders without the
+    # microsecond suffix, so a whole-second slot matched nothing and was never
+    # claimed.
+    result = db.query(Clip).filter(
+        Clip.id == clip_id,
+        Clip.publish_due_at == expected_due,
+    ).update({"publish_due_at": now + timedelta(minutes=PUBLISH_CLAIM_MINUTES)},
+             synchronize_session=False)
     db.commit()
-    return result.rowcount == 1
+    return result == 1
 
 
 def _clip_video_path(clip) -> Optional[str]:
@@ -1137,6 +1756,16 @@ def _clip_video_path(clip) -> Optional[str]:
     if os.path.exists(clip.file_path):
         return clip.file_path
     candidate = Path(settings.STORAGE_ROOT) / clip.file_path
+    return str(candidate) if candidate.exists() else None
+
+
+def _clip_thumbnail_path(clip) -> Optional[str]:
+    """The designed thumbnail the render step already wrote for this clip."""
+    if not getattr(clip, "thumbnail_path", None):
+        return None
+    if os.path.exists(clip.thumbnail_path):
+        return clip.thumbnail_path
+    candidate = Path(settings.STORAGE_ROOT) / clip.thumbnail_path
     return str(candidate) if candidate.exists() else None
 
 
@@ -1150,29 +1779,263 @@ def _source_title_for_job(job_id: int) -> Optional[str]:
     return None
 
 
+def _is_channel_auth_failure(message: str) -> bool:
+    """True when the refusal says the channel is not connected, not that this clip failed.
+
+    Two shapes reach here: the uploader's own `PermissionError` after its auth check,
+    and Google's `RefreshError` from the refresh inside the upload. Both mean the
+    refresh token is dead Google-side, which code cannot renew - only a person
+    re-consenting can. Job 109 lost five clips to the first shape in ninety minutes,
+    each on three strikes, with both clocks cleared so nothing could ever find them.
+    """
+    text = (message or "").lower()
+    return any(marker in text for marker in
+               ("not authenticated", "invalid_grant", "token has been expired or revoked"))
+
+
 def _record_publish_failure(db, clip, now: datetime, message: str) -> None:
     """Keep the clip queued and decide when it may be tried again.
 
     YouTube's upload limit is the channel's budget, not a fault in this clip, so it
     is not charged as an attempt: the clip waits hours instead of retiring after
-    three refusals on a busy day. Everything else counts, and a clip that fails
-    MAX_UPLOAD_RETRIES times leaves the queue for a human to read.
+    three refusals on a busy day. A disconnected channel is the same shape but worse
+    - every clip on it fails identically and no retry can ever succeed - so it is
+    forgiven too, and said out loud instead. Everything else counts, and a clip that
+    fails MAX_UPLOAD_RETRIES times leaves the queue for a human to read.
+
+    An exception here is an outcome, so the attempt marker goes: leaving it set
+    would hold a clip that simply needs another try alongside one whose upload
+    genuinely vanished mid-flight.
     """
     clip.upload_error = message
+    clip.publish_attempt_at = None
     if "uploadLimitExceeded" in message:
-        clip.publish_due_at = now + timedelta(
-            hours=max(1, int(settings.PUBLISH_LIMIT_RETRY_HOURS)))
+        retry_at = now + timedelta(hours=max(1, int(settings.PUBLISH_LIMIT_RETRY_HOURS)))
+        clear_at = next_budget_slot(db, now=now)
+        # A fixed wait is a guess about a window this code can measure: if the
+        # budget is already full of recent successes, the clip is not ready at
+        # +6 h, it is ready when the oldest success ages out of the rolling day.
+        clip.publish_due_at = max(retry_at, clear_at) if clear_at else retry_at
         db.commit()
+        return
+    if _is_channel_auth_failure(message):
+        clip.publish_due_at = now + timedelta(
+            minutes=max(1, int(settings.PUBLISH_RETRY_MINUTES)))
+        db.commit()
+        job_error(clip.job_id, "YouTube is not connected: the OAuth token is expired or "
+                               "revoked, so nothing on this channel can publish. Reconnect "
+                               "it in Settings -> YouTube; only a person can do that. "
+                               "No clip lost a retry and the release schedule is untouched.")
         return
     clip.upload_retry_count = (clip.upload_retry_count or 0) + 1
     if clip.upload_retry_count >= max(1, int(settings.MAX_UPLOAD_RETRIES)):
         clip.publish_due_at = None
+        # The release slot belongs to the channel, not the clip, so a clip that
+        # gave up must not keep the schedule open an hour past its own failure.
+        clip.scheduled_publish_at = None
         job_warning(clip.job_id, f"Clip #{clip.index} left the publish queue after "
                                  f"{clip.upload_retry_count} failed attempts: {message}")
     else:
         clip.publish_due_at = now + timedelta(
             minutes=max(1, int(settings.PUBLISH_RETRY_MINUTES)))
     db.commit()
+
+
+def _resolve_unresolved_attempts(db, now: datetime) -> int:
+    """Stop on rows whose recorded upload never came back with an outcome.
+
+    An attempt marker older than the claim window it was made under cannot still be
+    in flight. At that point the row genuinely does not know whether YouTube has the
+    video, and uploading again is the one action that turns an unknown into a
+    duplicate on the channel - so the clip leaves the queue with the instant it
+    started kept as evidence and the recovery named in its error, instead of going
+    out twice or vanishing quietly the way a third retry would have retired it.
+    """
+    cutoff = now - timedelta(minutes=PUBLISH_ATTEMPT_GRACE_MINUTES)
+    rows = db.query(Clip, Job).join(Job, Clip.job_id == Job.id).filter(
+        Clip.publish_attempt_at.isnot(None),
+        Clip.publish_attempt_at < cutoff,
+        Clip.publish_due_at.isnot(None),
+        or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
+    ).order_by(Clip.publish_attempt_at.asc()).all()
+    for clip, job in rows:
+        started = clip.publish_attempt_at
+        clip.upload_error = (
+            f"Publish attempt started {started:%Y-%m-%d %H:%M} UTC never recorded a video id, "
+            "so this clip may already be on YouTube. The queue refuses to upload it again. "
+            "Settle it by hand: if the video is on the channel, store its id and clear "
+            "publish_attempt_at; if it is not (`python -m scripts.reconcile_uploads --verify` "
+            f"says so), clear publish_attempt_at and give row {clip.id} a fresh publish_due_at "
+            "to queue it deliberately."
+        )
+        # Nulling the due time is also what keeps this announcement single: the row
+        # drops out of the query above on the next pass instead of warning again.
+        clip.publish_due_at = None
+        job_warning(job.id, f"Clip #{clip.index} stopped with an unresolved upload attempt: "
+                            f"{clip.upload_error}")
+    if rows:
+        db.commit()
+    return len(rows)
+
+
+def _ship_clip_to_youtube(db, clip, job, uploader: Optional[Callable], now: datetime,
+                          privacy_status: Optional[str] = None,
+                          category_id: Optional[str] = None) -> dict:
+    """Upload one clip and record it, in the order that survives being killed.
+
+    The single place this pipeline hands a file to YouTube. The order is the whole
+    point: resolve the file, settle the release slot, commit the *intent*
+    (`publish_attempt_at`), only then call the API, and clear the intent once the
+    outcome - success or a refusal - is on the row. Doing it the other way round
+    meant a process that died after the upload left a row that still looked
+    un-published, and the queue would have shipped a second copy of the same clip.
+
+    What remains is a narrower window, not a closed one: between the intent commit
+    and the outcome commit the truth is unknown, and the response to that is to stop
+    and tell a human (`_resolve_unresolved_attempts`), never to guess by re-uploading.
+    """
+    video_path = _clip_video_path(clip)
+    if not video_path:
+        message = "Rendered file is missing, nothing was uploaded"
+        _record_publish_failure(db, clip, now, message)
+        job_warning(job.id, f"Clip #{clip.index} could not be published: "
+                            f"no file at {clip.file_path}")
+        return {"status": "failed", "code": "missing_file", "error": message}
+
+    blocked = _blocked_script(clip)
+    if blocked is not None:
+        # The clip stays queued and the intent marker is cleared: this is not a
+        # failed upload, so holding it must not look like a publish that vanished
+        # mid-flight, which is what `_resolve_unresolved_attempts` exists to recover.
+        clip.publish_attempt_at = None
+        db.commit()
+        job_warning(job.id, f"Clip #{clip.index} held back: {blocked}. The title, "
+                            f"description and hashtags are what the channel reads, so a "
+                            f"non-Latin character there is a visible defect, not a "
+                            f"metadata one. Edit the copy and click again.")
+        return {"status": "held", "retry_at": clip.publish_due_at, "reason": blocked}
+
+    if uploader is None:
+        from services.youtube_upload import upload_clip_to_youtube
+        uploader = upload_clip_to_youtube
+
+    # A release slot can expire while the queue is being refused uploads, and
+    # YouTube reads a publishAt in the past as "publish now". Moving the row keeps
+    # the promise the clip is actually shipped with, and places the next clip
+    # after it rather than on top of it. A clip with no slot at all - parked
+    # before this column existed, or handed here by an operator's click - gets one
+    # here, because the alternative is publishing it the instant its turn comes.
+    lead_floor = now + timedelta(seconds=max(60, int(settings.PUBLISH_SCHEDULE_LEAD_SECONDS)))
+    if clip.scheduled_publish_at is None:
+        clip.scheduled_publish_at = next_release_slot(db, now=now,
+                                                      source_url=job.youtube_url)
+        db.commit()
+    if clip.scheduled_publish_at < lead_floor:
+        job_warning(job.id, f"Clip #{clip.index} release slot "
+                            f"{clip.scheduled_publish_at:%Y-%m-%d %H:%M} UTC had already "
+                            f"passed; moving it to {lead_floor:%Y-%m-%d %H:%M} UTC")
+        clip.scheduled_publish_at = lead_floor
+        db.commit()
+
+    clip.publish_attempt_at = now
+    db.commit()
+
+    upload_kwargs = {
+        "video_path": video_path,
+        "title": clip.title,
+        "description": clip.description or "",
+        "hashtags": clip.hashtags or ["#Shorts"],
+        "source_title": _source_title_for_job(job.id),
+        "source_url": job.youtube_url,
+        "privacy_status": privacy_status or getattr(job, "upload_privacy", None)
+                          or settings.AUTO_UPLOAD_PRIVACY,
+        "job_id": job.id,
+        "thumbnail_path": _clip_thumbnail_path(clip),
+        "publish_at": clip.scheduled_publish_at,
+    }
+    if category_id:
+        upload_kwargs["category_id"] = category_id
+
+    try:
+        res = uploader(**upload_kwargs)
+    except Exception as e:
+        _record_publish_failure(db, clip, now, str(e))
+        job_warning(job.id, f"Clip #{clip.index} failed to publish: {e}")
+        return {"status": "failed", "code": "upload_failed", "error": str(e)}
+
+    clip.uploaded = True
+    clip.youtube_video_id = res.get("video_id")
+    clip.published_at = datetime.utcnow()
+    # Both clocks go: a row that says "published" and "a publish is due" at the
+    # same time (clip 461) is a phantom every consumer of publish_due_at reads.
+    clip.publish_due_at = None
+    clip.publish_attempt_at = None
+    clip.upload_error = None
+    db.commit()
+    job_info(job.id, f"🎉 Clip #{clip.index} published: {res.get('shorts_url')}")
+    from utils.upload_pacing import note_upload
+    note_upload("youtube")
+    return {"status": "published", "result": res}
+
+
+def _blocked_script(clip) -> Optional[str]:
+    """The script of the copy this clip would be published with, or None when it is fine.
+
+    The gate is about the script, not the language: a Greek title is not a defect, and the
+    generator may write in any Latin or Greek word it likes. It is about the script, because
+    clip 233 went live on a Greek/English channel with a Chinese title and nothing in the
+    pipeline asked what script a published title was in before the upload call. The boundary
+    is what decides what leaves this machine, so the check lives here and not at the
+    generator: a clip an operator edits and re-clicks is still gated, and a clip rendered
+    before this column existed is gated too.
+    """
+    for field in ("title", "description", "hashtags"):
+        values = getattr(clip, field, None)
+        if values is None:
+            continue
+        if field != "hashtags":
+            values = [values]
+        for txt in values:
+            if not txt:
+                continue
+            for ch in txt:
+                code = ord(ch)
+                if ch.isspace() or ch.isdigit():
+                    continue
+                if ch.isascii():
+                    continue
+                if any(lo <= code <= hi for lo, hi in _ALLOWED_SCRIPT_RANGES):
+                    continue
+                category = unicodedata.category(ch)
+                if not category.startswith("L"):
+                    continue
+                name = _LETTER_CATEGORIES.get(category, category.lower())
+                offending = str(txt)[:60]
+                return (f"{field} contains a {name} letter: {offending}. The title, "
+                        f"description and hashtags are what the channel reads, so a "
+                        f"non-Latin character there is a visible defect, not a "
+                        f"metadata one. Edit the copy and click again.")
+    return None
+
+
+_LETTER_CATEGORIES = {
+    "Lu": "uppercase", "Ll": "lowercase", "Lt": "titlecase",
+    "Lm": "modifier", "Lo": "other",
+}
+
+
+_ALLOWED_SCRIPT_RANGES = (
+    (0x0041, 0x005A), (0x0061, 0x007F),   # Basic Latin letters
+    (0x00AA, 0x00AA), (0x00BA, 0x00BA),   # ordinal indicator, masculine ordinal
+    (0x0100, 0x024F),                     # Latin Extended-A / B
+    (0x1E00, 0x1EFF),                     # Latin Extended Additional
+    (0x2C60, 0x2C7F),                     # Latin Extended-C
+    (0xA720, 0xA7FF),                     # Latin Extended-D
+    (0xFB00, 0xFB04),                     # Latin ligatures (fi, fl, ...)
+    (0xFF21, 0xFF3A), (0xFF41, 0xFF5A),   # fullwidth Latin
+    (0x0370, 0x03FF),                     # Greek and Coptic
+    (0x1F00, 0x1FFF),                     # Greek Extended
+)
 
 
 def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[Callable] = None) -> int:
@@ -1185,56 +2048,189 @@ def publish_queued_clips(db, now: Optional[datetime] = None, uploader: Optional[
     the job's `auto_upload` flag decided whether to park it, and is not re-read here.
     """
     now = now or datetime.utcnow()
+    _resolve_unresolved_attempts(db, now)
     if now < next_publish_slot(db, now=now):
         return 0
     row = db.query(Clip, Job).join(Job, Clip.job_id == Job.id).filter(
         Clip.publish_due_at.isnot(None),
         Clip.publish_due_at <= now,
         or_(Clip.youtube_video_id.is_(None), Clip.youtube_video_id == ""),
+        # A row carrying an attempt that has not resolved is not waiting for its
+        # turn: it is either mid-upload in another process or the survivor of a
+        # crash, and neither wants a second upload.
+        Clip.publish_attempt_at.is_(None),
     ).order_by(Clip.publish_due_at.asc()).first()
     if not row:
         return 0
 
     clip, job = row
+    # The channel's upload budget is checked before the clip is claimed: an upload
+    # that will be refused still costs the row its turn, and a claim that then sits
+    # thirty minutes in the future is a clip that lost its slot for nothing.
+    clear_at = next_budget_slot(db, now=now)
+    if clear_at is not None:
+        clip.publish_due_at = clear_at
+        db.commit()
+        job_warning(job.id, f"Clip #{clip.index} held back: {int(settings.UPLOAD_DAILY_BUDGET)} "
+                            f"uploads already went out in the last 24 h. YouTube counts the "
+                            f"channel's unpublished budget as roughly ten, so the queue stops "
+                            f"short of it rather than learning it from a refusal. Trying again "
+                            f"at {clear_at:%Y-%m-%d %H:%M} UTC, when the oldest one ages out.")
+        return 0
     if not claim_clip_for_publish(db, clip.id, clip.publish_due_at, now=now):
         return 0
     db.expire_all()
 
-    video_path = _clip_video_path(clip)
-    if not video_path:
-        _record_publish_failure(db, clip, now,
-                                "Rendered file is missing, nothing was uploaded")
-        job_warning(job.id, f"Clip #{clip.index} could not be published: no file at {clip.file_path}")
-        return 0
+    outcome = _ship_clip_to_youtube(db, clip, job, uploader, now)
+    return 1 if outcome["status"] == "published" else 0
 
-    if uploader is None:
-        from services.youtube_upload import upload_clip_to_youtube
-        uploader = upload_clip_to_youtube
-    try:
-        res = uploader(
-            video_path=video_path,
-            title=clip.title or f"Viral Moment #{clip.index + 1}",
-            description=clip.description or "Watch this viral moment!",
-            hashtags=clip.hashtags or ["#Shorts", "#Viral", "#Trending"],
-            source_title=_source_title_for_job(job.id),
-            privacy_status=getattr(job, "upload_privacy", None) or settings.AUTO_UPLOAD_PRIVACY,
-            job_id=job.id,
-        )
-    except Exception as e:
-        _record_publish_failure(db, clip, now, str(e))
-        job_warning(job.id, f"Queued clip #{clip.index} failed to publish: {e}")
-        return 0
 
-    clip.uploaded = True
-    clip.youtube_video_id = res.get("video_id")
-    clip.published_at = datetime.utcnow()
-    clip.publish_due_at = None
-    clip.upload_error = None
+def _hold_clip_for_channel(db, clip, when: datetime, reason: str) -> dict:
+    """Park a clip the channel is not ready for, instead of dropping the request.
+
+    A click is consent to publish, so a refusal has to leave the clip queued for the
+    moment the channel allows it - that is the unattended half of the same promise.
+    An existing due time is never pulled earlier: the release schedule the queue
+    wrote belongs to the channel, and `max` keeps both promises at once.
+    """
+    if clip.publish_due_at is None or clip.publish_due_at < when:
+        clip.publish_due_at = when
     db.commit()
-    job_info(job.id, f"🎉 Clip #{clip.index} published from the queue: {res.get('shorts_url')}")
-    from utils.upload_pacing import note_upload
-    note_upload("youtube")
-    return 1
+    job_warning(clip.job_id, f"Clip #{clip.index} held back from a manual publish: {reason}")
+    return {"status": "held", "retry_at": clip.publish_due_at, "reason": reason}
+
+
+def publish_clip_for_operator(db, clip, *, uploader: Optional[Callable] = None,
+                              now: Optional[datetime] = None,
+                              privacy_status: Optional[str] = None,
+                              category_id: Optional[str] = None) -> dict:
+    """Publish one clip because a human asked, under every guard the queue obeys.
+
+    The Studio buttons used to call `services.youtube_upload.upload_clip_to_youtube`
+    straight from the endpoint, and that bypassed all of it: no duplicate check (a
+    double click put the short on the channel twice), no gap, no rolling budget, no
+    claim, no release slot (clip 461 went public on click with
+    `scheduled_publish_at IS NULL`), a `publish_due_at` left set behind a publish,
+    and a strike charged for `uploadLimitExceeded` - the refusal the queue forgives
+    cost clip 371 two of its three attempts.
+
+    Outcomes are data, not exceptions, because the queue and the API read them
+    differently: "published", "already_published", "unresolved_attempt", "held",
+    "contended", "failed".
+    """
+    now = now or datetime.utcnow()
+    job = db.query(Job).filter(Job.id == clip.job_id).first()
+    if job is None:
+        return {"status": "failed", "code": "no_job",
+                "error": f"Job {clip.job_id} is gone; nothing was uploaded"}
+
+    if clip.youtube_video_id or clip.uploaded:
+        return {"status": "already_published", "video_id": clip.youtube_video_id}
+
+    if clip.publish_attempt_at is not None:
+        return {"status": "unresolved_attempt", "attempt_at": clip.publish_attempt_at}
+
+    slot = next_publish_slot(db, now=now)
+    if now < slot:
+        return _hold_clip_for_channel(
+            db, clip, slot,
+            f"the channel's gap: the next upload may go out at {slot:%Y-%m-%d %H:%M} UTC")
+
+    clear_at = next_budget_slot(db, now=now)
+    if clear_at is not None:
+        return _hold_clip_for_channel(
+            db, clip, clear_at,
+            f"{int(settings.UPLOAD_DAILY_BUDGET)} uploads already went out in the last 24 h; "
+            f"the window clears at {clear_at:%Y-%m-%d %H:%M} UTC")
+
+    if not claim_clip_for_publish(db, clip.id, clip.publish_due_at, now=now):
+        return {"status": "contended"}
+    db.expire_all()
+
+    outcome = _ship_clip_to_youtube(db, clip, job, uploader, now,
+                                   privacy_status=privacy_status,
+                                   category_id=category_id)
+    return outcome
+
+
+def publish_clips_of_job_for_operator(db, job_id: int, *, uploader: Optional[Callable] = None,
+                                      now: Optional[datetime] = None,
+                                      privacy_status: Optional[str] = None,
+                                      category_id: Optional[str] = None) -> dict:
+    """The batch button on the queue's rules: at most one clip leaves now, the rest wait.
+
+    `upload_all_clips_for_job` was called with `pace=False` on the reasoning that a
+    human pressing "upload" asked for them now, which is the sentence that put five
+    clips of job 91 on the channel inside four seconds. The request is honoured as
+    consent to publish the job - every clip gets a release slot and a queue row -
+    while the channel's gap still ships only the first one.
+    """
+    now = now or datetime.utcnow()
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+    clips = db.query(Clip).filter(Clip.job_id == job_id).order_by(Clip.index.asc()).all()
+    if not clips:
+        raise ValueError(f"No clips found for Job {job_id}")
+
+    enqueue_clips_for_publish(db, job_id, now=now, include_unreviewed=True)
+
+    results = []
+    counts = {"uploaded": 0, "queued": 0, "failed": 0, "skipped": 0}
+    for clip in clips:
+        db.refresh(clip)
+        row = {"clip_id": clip.id, "clip_index": clip.index,
+               "title": clip.title or f"Clip #{clip.index + 1}"}
+        if clip.youtube_video_id:
+            counts["skipped"] += 1
+            row.update({"status": "uploaded", "video_id": clip.youtube_video_id,
+                        "shorts_url": f"https://youtube.com/shorts/{clip.youtube_video_id}"})
+            results.append(row)
+            continue
+
+        outcome = publish_clip_for_operator(db, clip, uploader=uploader, now=now,
+                                            privacy_status=privacy_status,
+                                            category_id=category_id)
+        status = outcome["status"]
+        if status == "published":
+            res = outcome["result"]
+            counts["uploaded"] += 1
+            row.update({"status": "uploaded", "video_id": res.get("video_id"),
+                        "shorts_url": res.get("shorts_url"),
+                        "privacy_status": res.get("privacy_status"),
+                        "publish_at": res.get("publish_at")})
+        elif status == "held":
+            counts["queued"] += 1
+            row.update({"status": "queued",
+                        "held_until": outcome["retry_at"].isoformat(timespec="seconds"),
+                        "error": f"Held by the publish queue: {outcome['reason']}"})
+        elif status == "already_published":
+            counts["skipped"] += 1
+            row.update({"status": "uploaded", "video_id": outcome["video_id"]})
+        elif status == "unresolved_attempt":
+            counts["failed"] += 1
+            row.update({"status": "blocked",
+                        "error": "an earlier publish attempt never recorded a video id; "
+                                 "this clip may already be on YouTube"})
+        elif status == "contended":
+            counts["queued"] += 1
+            row.update({"status": "queued",
+                        "error": "another publish owns this clip right now"})
+        else:
+            counts["failed"] += 1
+            row.update({"status": "failed", "error": outcome.get("error")})
+        results.append(row)
+
+    return {
+        "success": counts["uploaded"] > 0,
+        "job_id": job_id,
+        "total_clips": len(clips),
+        "uploaded_count": counts["uploaded"],
+        "queued_count": counts["queued"],
+        "failed_count": counts["failed"],
+        "skipped_count": counts["skipped"],
+        "results": results,
+    }
 
 
 async def stage_publish_all_clips(job_id: int, db: Session, job: Job, tiktok_privacy: str, update_progress: Callable[[str, int], None], lease_stop: Optional[threading.Event] = None) -> None:
@@ -1260,6 +2256,14 @@ async def stage_publish_all_clips(job_id: int, db: Session, job: Job, tiktok_pri
 
             # Auto upload to TikTok
             try:
+                # The sweep publishes every clip of the job on the spot and has no
+                # per-clip filter, so it does not run when the job holds a window
+                # no model chose. The per-clip step already sent the model picks.
+                unreviewed = [c.index for c in db.query(Clip).filter(Clip.job_id == job_id).all()
+                              if _needs_review_before_publish(c)]
+                if unreviewed:
+                    raise RuntimeError(
+                        f"skipped: clip(s) {unreviewed} were not chosen by a model and need review")
                 from services.tiktok_upload import upload_all_clips_to_tiktok_for_job
                 job_info(job_id, f"Auto-uploading to TikTok as '{tiktok_privacy}'...")
                 upload_all_clips_to_tiktok_for_job(job_id, db, privacy_level=tiktok_privacy,
@@ -1315,6 +2319,9 @@ def make_progress_writer(db: Session, job: Job, job_id: int) -> Callable[[str, i
 
     def update_progress(stage: str, percent: int):
         now = time.time()
+        # Any stage boundary is proof the main thread is alive: the watchdog reads
+        # this to tell a healthy long stage from a wedge.
+        _touch_main_tick()
         # Throttle: write when the value changed, otherwise at most every 0.5s.
         if percent != _last_prog_pct[0] or stage != _last_prog_stage[0] or (now - _last_prog_time[0]) >= 0.5:
             _last_prog_time[0] = now
@@ -1374,6 +2381,10 @@ async def process_job_async(job_id: int):
 
     threading.Thread(target=_lease_heartbeat, args=(lease_stop, job_id), daemon=True).start()
 
+    # Tell the watchdog this job is now in flight, and start its liveness clock.
+    _CURRENT_JOB[0] = job_id
+    _touch_main_tick()
+
     update_progress = make_progress_writer(db, job, job_id)
 
     job_info(job_id, f"Starting processing for job {job_id}")
@@ -1402,10 +2413,6 @@ async def process_job_async(job_id: int):
         segments, segments_file, words_file, source_title, source_channel = \
             await stage_transcribe(job_id, job, job_dir, audio_path, update_progress)
         # =====================
-        # 3b. SPEAKER DIARIZATION (who talks when, for the reframe decisions)
-        # =====================
-        await stage_diarize(job_id, job_dir, video_path, update_progress)
-        # =====================
         # 4. AUDIO ENERGY PRE-PASS (before clip selection)
         # =====================
         segments = await stage_score_audio_energy(job_id, video_path, segments,
@@ -1420,6 +2427,13 @@ async def process_job_async(job_id: int):
         # =====================
         clips = await stage_select_clips(job_id, job, segments_file, source_title,
                                          update_progress, temporal_events=temporal_events)
+
+        # =====================
+        # 4c. SPEAKER DIARIZATION — only over the selected clip windows
+        # =====================
+        # Runs after selection because its only consumer is the per-clip reframe
+        # (load_clip_diarization). Analysing the whole source wasted 40+ min/hour-long video.
+        await stage_diarize(job_id, job_dir, video_path, clips, update_progress)
 
         # =====================
         # 5. PROCESS EACH CLIP
@@ -1442,9 +2456,30 @@ async def process_job_async(job_id: int):
             db.commit()
             job_error(job_id, job.error_message)
         elif clip_errors:
-            job.status = "completed"
+            # Not a success. Calling this "completed" is what made a job with a
+            # third of its clips missing read green in the Studio UI, and every
+            # automatic path that keys off that status (api/clips.py's
+            # pending-upload filter, api/realtime.py's terminal set, the pruner)
+            # then treated a half-rendered job as a finished one.
+            job.status = "completed_with_errors"
             job.error_message = f"{len(clip_errors)}/{len(clips)} clips failed: {', '.join(c['error'] for c in clip_errors[:3])}"
-            update_progress("Completed", 100)
+
+            # The clips that did render still go to the queue. This is a
+            # database write, not a publish: the upload pass is what ships, and
+            # it only ever reaches a row the operator opted in by setting
+            # auto_upload on the job - the same thing the per-clip step already
+            # did for every clip that rendered. The completion sweep is NOT run
+            # here, because that half publishes to TikTok on the spot, and a
+            # partial job is not something to push out unreviewed.
+            if getattr(job, "auto_upload", False):
+                try:
+                    queued = enqueue_clips_for_publish(db, job_id)
+                    job_info(job_id, f"Job {job_id}: queued {queued} surviving clip(s) "
+                                     f"for YouTube despite {len(clip_errors)} clip failure(s)")
+                except Exception as q_err:
+                    job_warning(job_id, f"Could not queue the surviving clips: {q_err}")
+
+            update_progress("Completed with errors", 100)
             job.updated_at = datetime.utcnow()
             db.commit()
             job_info(job_id, f"Job {job_id} completed with {len(clip_errors)} clip failure(s)")
@@ -1474,6 +2509,8 @@ async def process_job_async(job_id: int):
 
     finally:
         lease_stop.set()
+        # No job in flight again: the watchdog must not judge idle time as a stall.
+        _CURRENT_JOB[0] = None
         db.close()
 
 def process_job(job_id: int):
@@ -1510,6 +2547,10 @@ def process_jobs():
     # of it costs nothing.
     init_database()
     missing = log_media_tools()
+
+    # Backstop against a wedged main thread: if process_job ever blocks with no
+    # progress past the timeout, fail the job and exit so NSSM restarts us.
+    threading.Thread(target=_stall_watchdog, args=(threading.Event(),), daemon=True).start()
 
     last_reclaim = 0.0
 

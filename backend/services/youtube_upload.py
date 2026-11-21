@@ -4,6 +4,7 @@ Handles token lifecycle, resumable video uploading, and shorts metadata formatti
 """
 import os
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from config import settings
@@ -27,15 +28,30 @@ def get_token_path() -> Path:
 
 
 def get_youtube_auth_status() -> Dict[str, Any]:
-    """Check if YouTube OAuth credentials and active token exist."""
+    """Report the channel connection, and say why when it is not there.
+
+    `authenticated: false` alone is three different problems wearing one face: no
+    OAuth client installed, a channel never connected, and a saved authorization
+    Google now refuses. Only the last one arrives by itself - it is the shape that
+    retired job 109's five clips - and it was a warning line in a rotating log.
+    """
     client_secrets = get_client_secrets_path()
     token_file = get_token_path()
 
     has_secrets = client_secrets.exists() and client_secrets.stat().st_size > 0
+    has_token = token_file.exists() and token_file.stat().st_size > 0
     is_authenticated = False
     channel_name = None
 
-    if has_secrets and token_file.exists() and token_file.stat().st_size > 0:
+    if not has_secrets:
+        reason = ("client_secrets.json is missing, so there is no OAuth client to ask "
+                  "Google with. Download it from Google Cloud Console and add it in "
+                  "Settings -> YouTube.")
+    elif not has_token:
+        reason = ("This channel has never been authorized on this machine. Connect it "
+                  "in Settings -> YouTube.")
+    else:
+        reason = None
         try:
             from google.oauth2.credentials import Credentials
             from googleapiclient.discovery import build
@@ -58,14 +74,29 @@ def get_youtube_auth_status() -> Dict[str, Any]:
                 items = resp.get("items", [])
                 if items:
                     channel_name = items[0]["snippet"].get("title")
+            else:
+                reason = ("Google returned no usable access token for the saved "
+                          "authorization. Reconnect the channel in Settings -> YouTube.")
         except Exception as e:
             job_warning(0, f"YouTube auth check warning: {e}")
             is_authenticated = False
+            detail = str(e)
+            if any(marker in detail.lower() for marker in
+                   ("invalid_grant", "token has been expired or revoked")):
+                reason = (f"Google refused the saved authorization ({detail}). The refresh "
+                          "token is expired or revoked Google-side, so no retry, restart or "
+                          "code change can renew it - reconnect the channel in "
+                          "Settings -> YouTube.")
+            else:
+                reason = (f"The saved authorization could not be checked ({detail}). "
+                          "This is not a revocation; if it keeps happening, reconnect the "
+                          "channel in Settings -> YouTube.")
 
     return {
         "has_client_secrets": has_secrets,
         "authenticated": is_authenticated,
         "channel_name": channel_name or ("Connected Channel" if is_authenticated else None),
+        "reason": reason,
         "client_secrets_path": str(client_secrets.resolve()),
         "token_path": str(token_file.resolve()),
     }
@@ -153,19 +184,29 @@ def save_client_secrets_json(secrets_json_content: str) -> bool:
     return True
 
 
+def resolve_stored_path(value: Optional[str]) -> Optional[str]:
+    """Absolute path for a clip asset stored in the database as job-relative."""
+    if not value:
+        return None
+    if os.path.exists(value):
+        return value
+    candidate = Path(settings.STORAGE_ROOT) / value
+    return str(candidate) if candidate.exists() else None
+
+
 def format_shorts_metadata(
     title: str,
     description: str,
     hashtags: Optional[List[str]] = None,
-    source_title: Optional[str] = None
+    source_title: Optional[str] = None,
+    source_url: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Format metadata specifically optimized for YouTube Shorts algorithm:
+    Format metadata specifically optimized for YouTube Shorts:
       - Title capped to 100 chars, with #Shorts suffix if not present
-      - Viral Hook & SEO description with structured tags and CTA
-      - Comprehensive tag cloud
+      - The clip's own niche tags, nothing else
     """
-    clean_title = (title or "Viral Moment").strip()
+    clean_title = (title or "").strip()
     if not clean_title.lower().endswith("#shorts") and "#shorts" not in clean_title.lower():
         if len(clean_title) <= 90:
             clean_title = f"{clean_title} #Shorts"
@@ -179,27 +220,49 @@ def format_shorts_metadata(
             if clean_h and clean_h.lower() not in [t.lower() for t in tags]:
                 tags.append(clean_h)
 
-    # Core viral tags for high Shorts reach
-    for default_tag in ["Shorts", "YouTubeShorts", "Viral", "Trending", "FYP", "ForYou", "Storytime", "Explore"]:
-        if default_tag.lower() not in [t.lower() for t in tags]:
-            tags.append(default_tag)
+    # The old list (Viral, Trending, FYP, ForYou, Storytime, Explore) was
+    # appended to every upload regardless of the clip, which is precisely the
+    # generic tag cloud a niche channel is trying to stop sending.
+    if not tags:
+        tags.append("Shorts")
 
-    hashtags_str = " ".join([f"#{t}" for t in tags[:8]])
-    
+    hashtags_str = " ".join([f"#{t}" for t in tags[:5]])
+
     desc_lines = []
-    desc_lines.append(f"🔥 {clean_title.replace(' #Shorts', '')}")
+    # The title used to be repeated as the first description line with a 🔥 in
+    # front of it. YouTube indexes both fields; the duplication adds nothing a
+    # viewer or a search needs, and a description that opens by restating its
+    # own title in emoji is a template, which is what a repost farm's looks like.
     if description and description.strip():
-        desc_lines.append(f"\n{description.strip()}")
+        desc_lines.append(description.strip())
+
+    # Saying where the footage came from is both the honest thing to do and the
+    # cheapest defence a channel has: an unattributed clip from someone else's
+    # stream is what a Content ID claim and a reused-content rejection are built on.
+    credit = ""
     if source_title and source_title.strip():
-        desc_lines.append(f"\n🎬 Original Story: {source_title.strip()}")
-    
-    desc_lines.append("\n👉 Like, Share & Subscribe for more daily viral clips!\n")
+        credit = f"🎬 From: {source_title.strip()}"
+        if source_url and source_url.strip():
+            credit = f"{credit} {source_url.strip()}"
+    elif source_url and source_url.strip():
+        credit = f"🎬 Source: {source_url.strip()}"
+    if credit:
+        desc_lines.append(credit)
+
+    # Was a hardcoded "Like, Share & Subscribe for more daily viral clips!" on
+    # every video since the beginning — one sentence, thousands of uploads, the
+    # most machine-readable signature a channel can carry. Now the operator's
+    # own line, and absent when they have not written one.
+    cta = (getattr(settings, "SHORTS_CTA", "") or "").strip()
+    if cta:
+        desc_lines.append(cta)
+
     desc_lines.append(hashtags_str)
 
     return {
         "title": clean_title[:100],
-        "description": "\n".join(desc_lines),
-        "tags": tags[:20]
+        "description": "\n\n".join(desc_lines),
+        "tags": tags[:15]
     }
 
 
@@ -209,16 +272,34 @@ def upload_clip_to_youtube(
     description: str,
     hashtags: Optional[List[str]] = None,
     source_title: Optional[str] = None,
+    source_url: Optional[str] = None,
     privacy_status: str = "unlisted",
     category_id: str = "24",  # 24: Entertainment, 22: People & Blogs
     progress_callback = None,
-    job_id: int = 0
+    job_id: int = 0,
+    thumbnail_path: Optional[str] = None,
+    publish_at: Optional[datetime] = None
 ) -> Dict[str, Any]:
     """
     Upload video file to YouTube as a Short using Resumable Upload protocol.
+
+    ``publish_at`` hands the release to YouTube: the video is uploaded private
+    with ``status.publishAt`` and goes public on its own at that instant, so the
+    schedule outlives this machine. It overrides ``privacy_status``, because a
+    release time is only accepted on a private video.
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file to upload does not exist: {video_path}")
+
+    # A placeholder title is a publishable defect, not a cosmetic one: it reads
+    # as spam in the feed and cannot be searched. Hold the clip instead of
+    # shipping it, so the queue keeps it and a human can regenerate the metadata.
+    from services.metadata import is_placeholder_title
+    if is_placeholder_title(title):
+        raise ValueError(
+            f"Refusing to publish a placeholder title ({title!r}) for job {job_id}. "
+            "Regenerate the clip metadata, then publish."
+        )
 
     # Pre-upload dimension validation with warning (non-blocking)
     try:
@@ -233,7 +314,9 @@ def upload_clip_to_youtube(
 
     status = get_youtube_auth_status()
     if not status["authenticated"]:
-        raise PermissionError("YouTube account is not authenticated. Please connect your YouTube account first.")
+        raise PermissionError(
+            "YouTube account is not authenticated. "
+            + (status.get("reason") or "Connect the channel in Settings -> YouTube first."))
 
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
@@ -252,7 +335,14 @@ def upload_clip_to_youtube(
 
     youtube = build("youtube", "v3", credentials=creds)
 
-    meta = format_shorts_metadata(title, description, hashtags, source_title=source_title)
+    meta = format_shorts_metadata(title, description, hashtags,
+                                  source_title=source_title, source_url=source_url)
+
+    # YouTube accepts a release time only on a private video, so a scheduled
+    # upload is never the caller's privacy: it is private until its slot and
+    # public after, whichever visibility the request asked for.
+    effective_privacy = "private" if publish_at is not None else privacy_status
+    publish_at_iso = publish_at.strftime("%Y-%m-%dT%H:%M:%SZ") if publish_at else None
 
     body = {
         "snippet": {
@@ -262,10 +352,12 @@ def upload_clip_to_youtube(
             "categoryId": str(category_id)
         },
         "status": {
-            "privacyStatus": privacy_status,
+            "privacyStatus": effective_privacy,
             "selfDeclaredMadeForKids": False
         }
     }
+    if publish_at_iso:
+        body["status"]["publishAt"] = publish_at_iso
 
     media = MediaFileUpload(
         video_path,
@@ -299,6 +391,26 @@ def upload_clip_to_youtube(
 
     job_info(0, f"YouTube Shorts upload SUCCESS: {shorts_url}")
 
+    # The clip ships with a designed thumbnail (clips.thumbnail_path). Until now
+    # nothing ever sent it, so YouTube picked a random frame for every short.
+    # A rejected thumbnail must not undo a publish that already happened.
+    thumbnail_status = "skipped"
+    if thumbnail_path and os.path.exists(thumbnail_path):
+        try:
+            from googleapiclient.http import MediaFileUpload as _ThumbMedia
+            # set() only builds the request. Without execute() nothing leaves
+            # this process and the log line below would be a lie, which is
+            # exactly how the first version of this shipped.
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=_ThumbMedia(thumbnail_path, mimetype="image/jpeg")
+            ).execute()
+            thumbnail_status = "set"
+            job_info(0, f"Thumbnail applied for {video_id}: {thumbnail_path}")
+        except Exception as thumb_err:
+            thumbnail_status = "failed"
+            job_warning(job_id, f"Upload succeeded but the thumbnail failed for {video_id}: {thumb_err}")
+
     # Every real publish resets the pacing clock, whichever path made it: the
     # worker's per-clip upload, a batch sweep, or a one-click from the UI.
     from utils.upload_pacing import note_upload
@@ -310,7 +422,9 @@ def upload_clip_to_youtube(
         "shorts_url": shorts_url,
         "watch_url": watch_url,
         "title": meta["title"],
-        "privacy_status": privacy_status
+        "privacy_status": effective_privacy,
+        "publish_at": publish_at_iso,
+        "thumbnail_status": thumbnail_status
     }
 
 
@@ -328,6 +442,13 @@ def upload_all_clips_for_job(
 
     ``pace`` spaces the publishes like the worker's per-clip path does; the API
     endpoints leave it off, because a human pressing "upload" asked for them now.
+
+    Kept for scripts. The /jobs/{id}/upload-all-youtube endpoint no longer calls it:
+    this loop uploads on the spot, so it skips the channel gap and rolling budget
+    checks, the claim, the release slot and the attempt record that
+    ``worker.publish_clips_of_job_for_operator`` now applies to every publish. A
+    caller that needs those - which is anything the operator can click - goes through
+    the worker.
     """
     from database.models import Clip, Job
     from datetime import datetime
@@ -336,7 +457,9 @@ def upload_all_clips_for_job(
 
     status = get_youtube_auth_status()
     if not status["authenticated"]:
-        raise PermissionError("YouTube account is not connected. Please connect your YouTube account in settings first.")
+        raise PermissionError(
+            "YouTube account is not authenticated. "
+            + (status.get("reason") or "Connect the channel in Settings -> YouTube first."))
 
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
@@ -407,9 +530,9 @@ def upload_all_clips_for_job(
         if clip_progress_callback:
             clip_progress_callback(idx + 1, total_clips, clip.title or f"Clip #{clip.index + 1}")
 
-        title = clip.title or f"Viral Moment #{clip.index + 1}"
-        description = clip.description or "Watch this viral moment!"
-        hashtags = clip.hashtags or ["#Shorts", "#Viral", "#Trending"]
+        title = clip.title
+        description = clip.description or ""
+        hashtags = clip.hashtags or ["#Shorts"]
 
         if pace:
             from utils.upload_pacing import wait_for_slot
@@ -430,9 +553,11 @@ def upload_all_clips_for_job(
                 description=description,
                 hashtags=hashtags,
                 source_title=source_title,
+                source_url=getattr(job, "youtube_url", None),
                 privacy_status=privacy_status,
                 category_id=category_id,
-                job_id=job_id
+                job_id=job_id,
+                thumbnail_path=resolve_stored_path(getattr(clip, "thumbnail_path", None))
             )
 
             clip.uploaded = True
@@ -453,7 +578,12 @@ def upload_all_clips_for_job(
         except Exception as e:
             clip.uploaded = False
             clip.upload_error = str(e)
-            clip.upload_retry_count += 1
+            # The same rule the publish queue applies: YouTube's upload limit is the
+            # channel's budget, not a fault in this clip, so it may not burn one of
+            # MAX_UPLOAD_RETRIES strikes. Charging it there is how clip 371 lost two
+            # of its three attempts to a refusal that said nothing about it.
+            if "uploadLimitExceeded" not in str(e):
+                clip.upload_retry_count = (clip.upload_retry_count or 0) + 1
             db.commit()
             results.append({
                 "clip_id": clip.id,

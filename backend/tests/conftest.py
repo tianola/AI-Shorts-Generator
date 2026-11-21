@@ -30,6 +30,16 @@ _LOG_DIR = tempfile.mkdtemp(prefix="ai-shorts-test-logs-")
 os.environ.setdefault("APP_LOG_PATH", os.path.join(_LOG_DIR, "app.log"))
 atexit.register(shutil.rmtree, _LOG_DIR, ignore_errors=True)
 
+# The clip selector routes to Claude whenever a key is configured, and tests replace
+# only the OmniRoute call. With a real key in backend/.env a bare `pytest` would
+# send transcripts to the paid API. An environment variable outranks .env, so an
+# empty one here keeps every run on the fakes.
+os.environ["ANTHROPIC_API_KEY"] = ""
+# The render loop corrects caption names with a real OmniRoute call per clip; a
+# worker test that drives the loop would wait on the live gateway for each clip.
+# test_caption_name_fix.py exercises the correction against a fake.
+os.environ["CAPTION_FIX_ENABLED"] = "false"
+
 import pytest
 
 FFMPEG_AVAILABLE = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))

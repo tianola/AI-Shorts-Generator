@@ -253,3 +253,59 @@ def test_assign_speakers_uses_max_overlap_and_skips_gaps():
     assert assigned[0]["speaker"] == "A"  # 0.3s of overlap beats B's 0.2s
     assert "speaker" not in assigned[1]
     assert "speaker" not in words[0]  # input list is not mutated
+
+
+# --------------------------------------------------------------------------
+# window-scoped diarization: only the selected clip windows are analysed
+# --------------------------------------------------------------------------
+
+def _wire_windows(monkeypatch, local_spans, duration_s=200.0):
+    """Decode a fake duration of audio; the stub returns the SAME local spans for
+    every window slice, so we can assert the function offsets each to global time."""
+    import numpy as np
+
+    sr = 16000
+    pipeline = _StubPipeline(_DiarizeOutput(_Annotation(local_spans)))
+    monkeypatch.setattr(diarization, "_load_pipeline", lambda: pipeline)
+    monkeypatch.setattr(
+        diarization, "_decode_full_samples",
+        lambda path: (np.zeros(int(sr * duration_s), dtype="float32"), sr),
+    )
+    return pipeline
+
+
+def test_diarize_windows_offsets_each_window_to_global_time(monkeypatch):
+    _wire_windows(monkeypatch, [(0.0, 1.0, "SPEAKER_00")])
+    turns = diarization.try_diarize_windows(
+        "audio.wav", [{"start": 100.0, "end": 110.0}, {"start": 20.0, "end": 30.0}])
+    # local [0,1] shifted by each window's start; merged and sorted by global start
+    assert turns == [
+        {"speaker": "SPEAKER_00", "start": 20.0, "end": 21.0},
+        {"speaker": "SPEAKER_00", "start": 100.0, "end": 101.0},
+    ]
+
+
+def test_diarize_windows_applies_margin_before_the_window(monkeypatch):
+    _wire_windows(monkeypatch, [(0.0, 1.0, "SPEAKER_00")])
+    turns = diarization.try_diarize_windows(
+        "audio.wav", [{"start": 50.0, "end": 60.0}], margin=2.0)
+    assert turns == [{"speaker": "SPEAKER_00", "start": 48.0, "end": 49.0}]
+
+
+def test_diarize_windows_empty_window_list_is_no_turns(monkeypatch):
+    _wire_windows(monkeypatch, [(0.0, 1.0, "SPEAKER_00")])
+    assert diarization.try_diarize_windows("audio.wav", []) == []
+
+
+def test_diarize_windows_without_token_is_none(monkeypatch):
+    monkeypatch.setattr(settings, "HF_KEY", None)
+    assert diarization.try_diarize_windows(
+        "audio.wav", [{"start": 5.0, "end": 6.0}]) is None
+
+
+def test_diarize_windows_decode_failure_is_none(monkeypatch):
+    def boom(path):
+        raise RuntimeError("decode exploded")
+    monkeypatch.setattr(diarization, "_decode_full_samples", boom)
+    assert diarization.try_diarize_windows(
+        "audio.wav", [{"start": 5.0, "end": 6.0}]) is None

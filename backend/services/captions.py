@@ -17,7 +17,7 @@ class CaptionPreset:
     """Preset styling configuration for TikTok & OpusClip-style subtitles."""
     name: str
     font_name: str = "Montserrat ExtraBold"
-    font_size: int = 50
+    font_size: int = 50                # Em size in pixels at 1080x1920 (see _ass_font_size)
     primary_color: str = "#FFFFFF"     # Inactive text color
     highlight_color: str = "#FFE500"   # Active word color
     secondary_colors: Optional[List[str]] = None
@@ -35,6 +35,7 @@ class CaptionPreset:
     jump: bool = True
     pop_scale: int = 120               # Percentage scale for pop animation (120%)
     add_emojis: bool = True
+    uppercase: bool = False            # Set the words in capitals (Greek without tonos)
 
 
 # 6 Curated High-Engagement Presets
@@ -42,7 +43,7 @@ PRESETS: Dict[str, CaptionPreset] = {
     "hormozi": CaptionPreset(
         name="Hormozi Viral",
         font_name="Montserrat ExtraBold",
-        font_size=54,
+        font_size=88,
         primary_color="#FFFFFF",
         highlight_color="#FFE500",      # Alex Hormozi Iconic Yellow
         secondary_colors=["#22C55E", "#00F0FF", "#FF3B30"],
@@ -53,11 +54,12 @@ PRESETS: Dict[str, CaptionPreset] = {
         jump=True,
         pop_scale=125,
         add_emojis=True,
+        uppercase=True,
     ),
     "capcut_aqua": CaptionPreset(
         name="CapCut Aqua Glow",
         font_name="Montserrat ExtraBold",
-        font_size=50,
+        font_size=80,
         primary_color="#FFFFFF",
         highlight_color="#00F0FF",      # Neon Aqua
         secondary_colors=["#38BDF8", "#818CF8", "#F43F5E"],
@@ -72,7 +74,7 @@ PRESETS: Dict[str, CaptionPreset] = {
     "mrbeast": CaptionPreset(
         name="MrBeast Impact",
         font_name="Montserrat ExtraBold",
-        font_size=56,
+        font_size=92,
         primary_color="#FFFFFF",
         highlight_color="#FFE500",      # Bright Yellow base
         secondary_colors=[
@@ -90,11 +92,12 @@ PRESETS: Dict[str, CaptionPreset] = {
         jump=True,
         pop_scale=130,
         add_emojis=True,
+        uppercase=True,
     ),
     "cyber_neon": CaptionPreset(
         name="Cyber Neon",
         font_name="Montserrat ExtraBold",
-        font_size=50,
+        font_size=80,
         primary_color="#E0E7FF",
         highlight_color="#FF007F",      # Hot Neon Pink
         secondary_colors=["#A855F7", "#06B6D4", "#FACC15"],
@@ -109,7 +112,7 @@ PRESETS: Dict[str, CaptionPreset] = {
     "clean_box": CaptionPreset(
         name="Clean Minimal Box",
         font_name="Montserrat ExtraBold",
-        font_size=46,
+        font_size=66,
         primary_color="#FFFFFF",
         highlight_color="#FFE500",
         outline_color="#000000",
@@ -124,7 +127,7 @@ PRESETS: Dict[str, CaptionPreset] = {
     "underline_wave": CaptionPreset(
         name="Underline Wave",
         font_name="Montserrat ExtraBold",
-        font_size=48,
+        font_size=74,
         primary_color="#FFFFFF",
         highlight_color="#38BDF8",
         outline_color="#000000",
@@ -240,29 +243,163 @@ def escape_ass(text: str) -> str:
 from PIL import ImageFont
 
 
-def _get_caption_font(style: CaptionPreset):
-    """Load a truetype font for layout calculations with robust cross-platform fallbacks."""
-    from services.font_resolve import find_font
-    font_candidates = [
-        find_font(bold=True),
-        os.path.join(settings.STORAGE_ROOT, "assets", "fonts", "Montserrat-ExtraBold.ttf"),
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "fonts", "Montserrat-ExtraBold.ttf"),
-        "C:/Windows/Fonts/montserrat-extrabold.ttf",
-        "C:/Windows/Fonts/arialbd.ttf",
-        "C:/Windows/Fonts/segoeuib.ttf",
+# Where the caption families live on disk. libass is pointed at FONTS_DIR (see
+# services/render.py), so the bundled Montserrat really is the face that renders;
+# before that the family was not installed and every caption fell back to a thin
+# Arial. Montserrat has no Greek glyphs, so Greek text is set in Segoe UI Black,
+# a system face of the same weight.
+FONTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fonts")
+GREEK_CAPABLE_FONT = "Segoe UI Black"
+_FONT_FILES = {
+    "Montserrat ExtraBold": [
+        os.path.join(FONTS_DIR, "Montserrat-ExtraBold.ttf"),
         "/usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf",
+    ],
+    GREEK_CAPABLE_FONT: [
+        "C:/Windows/Fonts/seguibl.ttf",
+        "C:/Windows/Fonts/ariblk.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ],
+}
+
+
+def _needs_greek_capable_font(words: List[Dict]) -> bool:
+    """True when any caption word has a letter outside the Latin blocks."""
+    for item in words:
+        for ch in str(item.get("word", "")):
+            if ch.isalpha() and ord(ch) >= 0x250:
+                return True
+    return False
+
+
+def _caption_font_file(style: CaptionPreset) -> str:
+    """Path of the face the captions render in, or "" when none is on disk."""
+    from services.font_resolve import find_font
+    font_candidates = list(_FONT_FILES.get(style.font_name, [])) + [
+        find_font(bold=True),
+        "C:/Windows/Fonts/arialbd.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
     for p in font_candidates:
-        if os.path.exists(p):
-            try:
-                return ImageFont.truetype(p, style.font_size)
-            except Exception:
-                pass
+        if p and os.path.exists(p):
+            return p
+    return ""
+
+
+_LINE_HEIGHT_RATIOS: Dict[str, float] = {}
+
+
+def _line_height_ratio(font_file: str) -> float:
+    """Line height over em size for a font, the way libass on Windows reads it.
+
+    An ASS Fontsize is not the em size: libass scales the face so that its
+    usWinAscent + usWinDescent equals the number. For Montserrat ExtraBold that sum
+    is 1.56 em, so "Fontsize 56" drew a 36 px face - which is why the captions
+    looked small however the presets were tuned, and why word positions computed
+    from a 56 px PIL font spread the words apart.
+    """
+    if font_file in _LINE_HEIGHT_RATIOS:
+        return _LINE_HEIGHT_RATIOS[font_file]
+    ratio = 1.2
+    try:
+        from fontTools.ttLib import TTFont
+        face = TTFont(font_file, fontNumber=0, lazy=True)
+        os2 = face["OS/2"]
+        ratio = (os2.usWinAscent + os2.usWinDescent) / float(face["head"].unitsPerEm)
+    except Exception:
+        try:
+            ascent, descent = ImageFont.truetype(font_file, 1000).getmetrics()
+            ratio = (ascent + descent) / 1000.0
+        except Exception:
+            pass
+    _LINE_HEIGHT_RATIOS[font_file] = ratio if ratio > 0 else 1.2
+    return _LINE_HEIGHT_RATIOS[font_file]
+
+
+def _ass_font_size(style: CaptionPreset, scale: float = 1.0) -> int:
+    """The ASS Fontsize that draws this preset at its em size (times `scale`)."""
+    font_file = _caption_font_file(style)
+    ratio = _line_height_ratio(font_file) if font_file else 1.2
+    return max(12, int(round(style.font_size * scale * ratio)))
+
+
+def _get_caption_font(style: CaptionPreset):
+    """Load the face the captions render in, at its em size, for layout measurement."""
+    font_file = _caption_font_file(style)
+    if font_file:
+        try:
+            return ImageFont.truetype(font_file, style.font_size)
+        except Exception:
+            pass
     try:
         return ImageFont.load_default()
     except Exception:
         return None
+
+
+def _caption_gaps(widths: List[float], space_w: float, style: CaptionPreset) -> List[float]:
+    """Gap after each word but the last, wide enough for the active word's pop.
+
+    The active word scales about its centre to pop_scale, so it grows by
+    (pop_scale - 1) * width / 2 on each side, plus one pixel of extra outline.
+    A fixed 1.5-space gap let long words like VENTURE or REGULATION cover their
+    neighbours on job 112 ("WASVENTURE", "ANDTHEREFORE"). Only one word pops at
+    a time, so each gap needs room for the wider of its two neighbours.
+    """
+    growth = max(0.0, (float(style.pop_scale) / 100.0) - 1.0) if style.jump else 0.0
+    pad = 2.0 * (float(style.outline) + 1.0)
+    gaps = []
+    for i in range(len(widths) - 1):
+        overhang = growth * max(widths[i], widths[i + 1]) / 2.0
+        gaps.append(space_w + overhang + pad)
+    return gaps
+
+
+def _display_word(word: Dict, style: CaptionPreset) -> str:
+    """The text a caption word is drawn as (case, emoji), before ASS escaping."""
+    raw_word = str(word.get("word", word.get("text", "")) or "").strip()
+    if style.uppercase:
+        from services.motion_title import _headline_upper
+        raw_word = _headline_upper(raw_word)
+    if style.add_emojis:
+        raw_word = inject_emojis(raw_word)
+    return raw_word
+
+
+def _available_width(style: CaptionPreset) -> float:
+    return 1080.0 - style.margin_l - style.margin_r
+
+
+def _block_metrics(texts: List[str], style: CaptionPreset):
+    """(widths, gaps, lead, tail) of a caption block at the preset's full size."""
+    font = _get_caption_font(style)
+    if font and hasattr(font, "getlength"):
+        widths = [font.getlength(t) if t else 0.0 for t in texts]
+        space_w = font.getlength(" ")
+    else:
+        # Approximate measurement fallback
+        widths = [len(t) * (style.font_size * 0.52) for t in texts]
+        space_w = style.font_size * 0.30
+    gaps = _caption_gaps(widths, space_w, style)
+    # The first and last word pop outward too; keep that inside the margins.
+    growth = max(0.0, (float(style.pop_scale) / 100.0) - 1.0) if style.jump else 0.0
+    lead = growth * widths[0] / 2.0 if widths else 0.0
+    tail = growth * widths[-1] / 2.0 if widths else 0.0
+    return widths, gaps, lead, tail
+
+
+# A group may shrink this far to keep a second word on the line; beyond it the
+# word moves to the next group. At 1.0 the big presets showed mostly one word
+# per line; with no floor job 113 drew three-word groups at about half size.
+MIN_GROUP_FIT = 0.85
+
+
+def _block_fits(words: List[Dict], style: CaptionPreset) -> bool:
+    """True when these words fit one caption line, pops included, shrinking at most to MIN_GROUP_FIT."""
+    if not words:
+        return True
+    widths, gaps, lead, tail = _block_metrics([escape_ass(_display_word(w, style)) for w in words], style)
+    return (sum(widths) + sum(gaps) + lead + tail) * MIN_GROUP_FIT <= _available_width(style)
 
 
 def create_caption_block(
@@ -289,37 +426,33 @@ def create_caption_block(
     block_start = float(words[0].get("start", words[0].get("start_time", 0.0)))
     block_end = float(words[-1].get("end", words[-1].get("end_time", block_start + 0.5)))
 
-    # Pre-process word strings
-    processed_words = []
-    for w in words:
-        raw_word = w.get("word", w.get("text", "")).strip()
-        if style.add_emojis:
-            raw_word = inject_emojis(raw_word)
-        word_escaped = escape_ass(raw_word)
-        processed_words.append(word_escaped)
-
+    processed_words = [escape_ass(_display_word(w, style)) for w in words]
     num_words = len(words)
-    font = _get_caption_font(style)
 
     # Calculate exact horizontal center coordinates for each word with natural inter-word spacing
     y_base = 1920 - style.margin_v  # default ~1480px in 1080x1920 space
-    if font and hasattr(font, "getlength"):
-        widths = [font.getlength(pw) if pw else 0.0 for pw in processed_words]
-        space_w = font.getlength(" ")
-    else:
-        # Approximate measurement fallback
-        widths = [len(pw) * (style.font_size * 0.52) for pw in processed_words]
-        space_w = style.font_size * 0.30
-
-    total_w = sum(widths) + (num_words - 1) * space_w
-    start_x = max((1080.0 - total_w) / 2.0, float(style.margin_l))
+    widths, gaps, lead, tail = _block_metrics(processed_words, style)
+    total_w = sum(widths) + sum(gaps)
+    # Large type is the point, but a long group must still fit between the
+    # margins: shrink that one block rather than let it run off the frame.
+    available_w = _available_width(style)
+    span = total_w + lead + tail
+    fit = min(1.0, available_w / span) if span > 0 else 1.0
+    if fit < 1.0:
+        widths = [width * fit for width in widths]
+        gaps = [gap * fit for gap in gaps]
+        total_w *= fit
+        lead *= fit
+        tail *= fit
+    fs_tag = "\\fs" + str(_ass_font_size(style, fit))
+    start_x = max((1080.0 - (total_w + lead + tail)) / 2.0 + lead, float(style.margin_l) + lead)
 
     word_centers = []
     curr_x = start_x
     for i in range(num_words):
         cx = curr_x + widths[i] / 2.0
         word_centers.append(cx)
-        curr_x += widths[i] + space_w
+        curr_x += widths[i] + (gaps[i] if i < len(gaps) else 0.0)
 
     events = []
 
@@ -343,7 +476,7 @@ def create_caption_block(
         if w_start > block_start:
             events.append(
                 f"Dialogue: 0,{ass_time(block_start)},{ass_time(w_start)},Default,,0,0,0,,"
-                f"{{\\an5\\pos({cx:.1f},{y_base})\\bord{style.outline}\\shad{style.shadow}\\c{base_color}\\3c{outline_color}\\b1\\fscx100\\fscy100}}{word_str}\n"
+                f"{{\\an5{fs_tag}\\pos({cx:.1f},{y_base})\\bord{style.outline}\\shad{style.shadow}\\c{base_color}\\3c{outline_color}\\b1\\fscx100\\fscy100}}{word_str}\n"
             )
 
         # 2. ACTIVE WORD (Layer 1: vibrant highlight color, scale pop & upward jump)
@@ -364,7 +497,7 @@ def create_caption_block(
             settle_t = min(100, max(45, dur_ms // 4))
             return_t = max(dur_ms - 40, settle_t + 1)
             pop_tag = (
-                f"{{\\an5\\pos({cx:.1f},{y_base})\\bord{style.outline + 1}\\shad{style.shadow + 1}"
+                f"{{\\an5{fs_tag}\\pos({cx:.1f},{y_base})\\bord{style.outline + 1}\\shad{style.shadow + 1}"
                 f"\\c{active_color}\\3c{outline_color}\\b1"
                 f"\\t(0,{settle_t},\\fscx{peak}\\fscy{peak}\\pos({cx:.1f},{y_base - jump_y}))"
                 f"\\t({settle_t},{return_t},\\fscx{settle_x}\\fscy{settle_y}\\pos({cx:.1f},{y_base - jump_y + 4}))"
@@ -372,7 +505,7 @@ def create_caption_block(
             )
         else:
             pop_tag = (
-                f"{{\\an5\\pos({cx:.1f},{y_base})\\bord{style.outline + 1}\\shad{style.shadow}"
+                f"{{\\an5{fs_tag}\\pos({cx:.1f},{y_base})\\bord{style.outline + 1}\\shad{style.shadow}"
                 f"\\c{active_color}\\3c{outline_color}\\b1\\fscx100\\fscy100"
             )
 
@@ -385,7 +518,7 @@ def create_caption_block(
         if w_end < block_end:
             events.append(
                 f"Dialogue: 0,{ass_time(w_end)},{ass_time(block_end)},Default,,0,0,0,,"
-                f"{{\\an5\\pos({cx:.1f},{y_base})\\bord{style.outline}\\shad{style.shadow}\\c{base_color}\\3c{outline_color}\\b1\\fscx100\\fscy100}}{word_str}\n"
+                f"{{\\an5{fs_tag}\\pos({cx:.1f},{y_base})\\bord{style.outline}\\shad{style.shadow}\\c{base_color}\\3c{outline_color}\\b1\\fscx100\\fscy100}}{word_str}\n"
             )
 
     return "".join(events)
@@ -402,7 +535,7 @@ WrapStyle: 2
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{style.font_name},{style.font_size},{ass_color(style.primary_color)},{ass_color(style.highlight_color)},{ass_color(style.outline_color)},{ass_color(style.back_color)},{int(style.bold)},{int(style.italic)},{style.border_style},{style.outline},{style.shadow},{style.alignment},{style.margin_l},{style.margin_r},{style.margin_v},1
+Style: Default,{style.font_name},{_ass_font_size(style)},{ass_color(style.primary_color)},{ass_color(style.highlight_color)},{ass_color(style.outline_color)},{ass_color(style.back_color)},{int(style.bold)},{int(style.italic)},{style.border_style},{style.outline},{style.shadow},{style.alignment},{style.margin_l},{style.margin_r},{style.margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -412,11 +545,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 def _group_words_by_natural_phrasing(
     words: List[Dict],
     max_group_size: int = 5,
-    max_chars: int = 30
+    max_chars: int = 30,
+    style: Optional[CaptionPreset] = None,
 ) -> List[List[Dict]]:
     """
     Group words dynamically into punchy 4-5 word phrases (or 3-4 if words are long),
     respecting word character limits (24-32 char cap, default 30), punctuation, and natural speech pauses.
+
+    With ``style`` a word also starts a new group when it would not fit on the
+    line at full size: job 113 shrank "VALENTINE INITIALLY PASSES." to fit
+    rather than carry the last word over, and long groups became hard to read.
     """
     if not words:
         return []
@@ -431,7 +569,9 @@ def _group_words_by_natural_phrasing(
         added_len = word_len if not current_group else (1 + word_len)
 
         # If adding this word exceeds character limit (24-32 char cap) and we already have 3+ words, break
-        if current_group and (current_chars + added_len > max_chars) and len(current_group) >= 3:
+        too_wide = bool(style is not None and current_group
+                        and not _block_fits(current_group + [item], style))
+        if current_group and (too_wide or ((current_chars + added_len > max_chars) and len(current_group) >= 3)):
             groups.append(current_group)
             current_group = []
             current_chars = 0
@@ -478,6 +618,28 @@ def _group_words_by_natural_phrasing(
         groups.append(current_group)
 
     return groups
+
+
+# Only tails that cannot start a word of their own: "1990" "2000" stay two words.
+_NUMBER_TAIL = re.compile(r"^[.,]\d|^%")
+_HYPHEN_TAIL = re.compile(r"^-\w")
+
+
+def _continues_number(previous: str, token: str) -> bool:
+    """True when `token` is the rest of the word `previous` ends with.
+
+    Whisper's tokens split "300,000" into "300" ",000", "3.5" into "3" ".5" and
+    "face-to-face" into "face" "-to" "-face"; job 112 showed them as "300 ,000"
+    and "FACE -TO -FACE".
+    """
+    prev = str(previous or "").rstrip()
+    tok = str(token or "")
+    if not prev or tok[:1].isspace():
+        return False
+    tok = tok.strip()
+    if prev[-1].isdigit() and _NUMBER_TAIL.match(tok):
+        return True
+    return prev[-1].isalnum() and bool(_HYPHEN_TAIL.match(tok))
 
 
 def create_captions(
@@ -550,14 +712,25 @@ def create_captions(
         if end <= start:
             continue
 
+        # Whisper splits numbers into tokens: "300" ",000", "$3" ".5", "10" "%".
+        # Shown as words they read "300 ,000"; glue them back onto the number.
+        if clean_words and _continues_number(clean_words[-1]["word"], word):
+            clean_words[-1]["word"] = clean_words[-1]["word"].rstrip() + str(word).strip()
+            clean_words[-1]["end"] = end
+            continue
+
         clean_words.append({
             "word": word,
             "start": start,
             "end": end
         })
 
+    if _needs_greek_capable_font(clean_words) and style.font_name != GREEK_CAPABLE_FONT:
+        style = copy.deepcopy(style)
+        style.font_name = GREEK_CAPABLE_FONT
+
     # Group words cleanly using natural phrasing (3-5 words default)
-    word_groups = _group_words_by_natural_phrasing(clean_words, max_group_size=group_size)
+    word_groups = _group_words_by_natural_phrasing(clean_words, max_group_size=group_size, style=style)
     events = []
     for block in word_groups:
         if block:

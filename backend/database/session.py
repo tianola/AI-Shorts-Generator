@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from config import settings
 from database.base import Base
+from database.migrations import CLIP_UNIQUE_INDEX, ensure_clip_index_uniqueness
 import os
 
 
@@ -120,6 +121,12 @@ def init_database():
 
     for table_name, column_name in added:
         print(f"[db] added missing column {table_name}.{column_name}")
+
+    # Row-level constraints, after the columns exist. This one refuses to run
+    # against data that already breaks it and says why - see database.migrations.
+    report = ensure_clip_index_uniqueness(engine)
+    if report.note == "index created":
+        print(f"[db] created unique index {CLIP_UNIQUE_INDEX} on clips(job_id, index)")
 
     # A schema the models do not match is not survivable: every ORM query would
     # raise, and the caller would look healthy while doing nothing.

@@ -38,18 +38,61 @@ def test_create_job_stores_style_prompt(client, db):
     assert job.style_prompt == "cyberpunk"
 
 
-def test_new_job_does_not_auto_publish(client, db):
-    """Publishing must stay opt-in: a job created without explicit flags must
-    never be uploaded automatically, and must inherit the configured default
-    visibility (shipped as 'unlisted'; an operator may change it in .env)."""
+def test_new_job_publish_default_comes_from_settings(client, db, monkeypatch):
+    """Whether a finished job queues itself for publishing is a .env decision.
+
+    DEFAULT_AUTO_UPLOAD is the switch; the endpoints must read it instead of
+    deciding for themselves, and the visibility still comes from
+    AUTO_UPLOAD_PRIVACY (shipped as 'unlisted').
+    """
     from config import settings
 
+    monkeypatch.setattr(settings, "DEFAULT_AUTO_UPLOAD", True, raising=False)
+    response = client.post("/api/jobs", params={"youtube_url": "https://youtube.com/test"})
+    assert response.status_code == 200
+
+    job = db.query(Job).filter(Job.id == response.json()["job_id"]).one()
+    assert job.auto_upload is True
+    assert job.upload_privacy == settings.AUTO_UPLOAD_PRIVACY
+
+
+def test_new_job_publish_default_can_be_switched_off(client, db, monkeypatch):
+    from config import settings
+
+    monkeypatch.setattr(settings, "DEFAULT_AUTO_UPLOAD", False, raising=False)
     response = client.post("/api/jobs", params={"youtube_url": "https://youtube.com/test"})
     assert response.status_code == 200
 
     job = db.query(Job).filter(Job.id == response.json()["job_id"]).one()
     assert job.auto_upload is False
-    assert job.upload_privacy == settings.AUTO_UPLOAD_PRIVACY
+
+
+def test_job_can_override_the_publish_default(client, db, monkeypatch):
+    from config import settings
+
+    monkeypatch.setattr(settings, "DEFAULT_AUTO_UPLOAD", True, raising=False)
+    response = client.post(
+        "/api/jobs",
+        params={"youtube_url": "https://youtube.com/test", "auto_upload": "false"},
+    )
+    assert response.status_code == 200
+
+    job = db.query(Job).filter(Job.id == response.json()["job_id"]).one()
+    assert job.auto_upload is False
+
+
+def test_diagnostic_job_uses_the_same_publish_default(client, db, monkeypatch):
+    from config import settings
+
+    monkeypatch.setattr(settings, "DEFAULT_AUTO_UPLOAD", True, raising=False)
+    response = client.post(
+        "/api/test/zero-view-diagnostic",
+        data={"youtube_url": "https://youtube.com/test"},
+    )
+    assert response.status_code == 200
+
+    job = db.query(Job).filter(Job.id == response.json()["job_id"]).one()
+    assert job.auto_upload is True
 
 
 def test_create_job_rejects_invalid_privacy(client):

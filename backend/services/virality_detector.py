@@ -4,8 +4,10 @@ Computes visual engagement, facial expression intensity, movement dynamics,
 and audio/transcript curiosity cues to rank clips scientifically with OpusClip-grade breakdowns.
 """
 import os
+
 import cv2
 import numpy as np
+from loguru import logger
 
 
 def detect_visual_activity(video_path: str, sample_rate: int = 15) -> dict:
@@ -85,19 +87,23 @@ def compute_composite_virality(
         "μυστικό", "λεφτά", "λάθος", "αλήθεια", "τρελό", "προσοχή"
     }
     impact_count = sum(1 for w in words if any(kw in w for kw in high_impact_words))
-    transcript_boost = min(0.25, impact_count * 0.05)
 
     base_score = llm_score if llm_score else 0.80
     visual_score = visual_stats.get("intensity_score", 0.5)
 
-    final_virality = (base_score * 0.50) + (visual_score * 0.35) + (transcript_boost * 0.15)
-    final_virality_100 = round(min(99.0, max(50.0, final_virality * 100.0)), 1)
+    # The selector's own score (the editor's verdict on what the viewer hears) carries
+    # the number; picture activity is a small correction. It used to weigh 35% and the
+    # keyword boost 15%, and the result was floored at 50: a talk-over-diagrams video
+    # has no faces or motion, so every clip scored below 50 and showed exactly 50.
+    # The keyword count stays out of the score: its word list is English-only.
+    final_virality = (base_score * 0.85) + (visual_score * 0.15)
+    final_virality_100 = round(min(99.0, max(1.0, final_virality * 100.0)), 1)
 
     # Generate clear OpusClip-style explainer
-    if final_virality_100 >= 90:
+    if final_virality_100 >= 85:
         tier = "God-Tier Viral Potential"
         explanation = f"Exceptional hook strength with immediate curiosity trigger ({impact_count} power keywords) and continuous dynamic pacing."
-    elif final_virality_100 >= 80:
+    elif final_virality_100 >= 70:
         tier = "High Virality Candidate"
         explanation = "Solid retention structure with clear topic focus, good conversational energy, and strong TikTok keyword density."
     else:
@@ -114,3 +120,40 @@ def compute_composite_virality(
         "face_presence": visual_stats["face_presence"],
         "power_keywords_count": impact_count
     }
+
+
+def resolve_virality_stats(
+    llm_score,
+    transcript: str,
+    video_path: str = ""
+) -> dict:
+    """Compute the multimodal virality breakdown, but never fail silently.
+
+    compute_composite_virality can raise on a corrupt vertical mp4 or an
+    OpenCV/ffmpeg problem. The old call site swallowed that behind a bare
+    `except Exception` and stored a hardcoded 85.0, which sits *above* the
+    real computed band (~60-70) — so a crashed clip outranked a scored one and
+    the failure left no trace. This wrapper passes the real result through, and
+    on failure falls back to the selector's own 0-1 composite scaled to 100
+    (flagged, and logged) instead of the inverted constant.
+    """
+    try:
+        return compute_composite_virality(llm_score, transcript, video_path)
+    except Exception as exc:
+        base = float(llm_score) if llm_score else 0.80
+        fallback_100 = round(min(99.0, max(0.0, base * 100.0)), 1)
+        logger.warning(
+            "compute_composite_virality failed for {} ({}); storing the selector "
+            "score {} as the virality fallback instead of a constant",
+            video_path or "<no video>", exc, fallback_100,
+        )
+        return {
+            "virality_score_100": fallback_100,
+            "virality_score": round(base, 2),
+            "tier": "Standard Clip",
+            "virality_explanation": (
+                "Visual/keyword analysis was unavailable for this clip, so its "
+                "score reflects the content-selection signal alone."
+            ),
+            "fallback": True,
+        }

@@ -1,0 +1,205 @@
+/**
+ * studios.js - the Narrate Studio and Live Studio views, and the tabs that switch to them.
+ *
+ * Everything lives on the same page as the clip dashboard: the tab buttons only show or
+ * hide the three <main> blocks, so nothing here reloads or leaves the page.
+ */
+
+import { asMediaUrl, escapeHtml, fetchJson } from './util.js';
+
+const $ = (id) => document.getElementById(id);
+const post = (url, body) => fetchJson(url, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+});
+
+let livePoll = null;
+let liveError = '';
+
+function showView(viewId) {
+  document.querySelectorAll('.view-tab').forEach((b) => b.classList.toggle('active', b.dataset.view === viewId));
+  ['viewClips', 'viewNarrate', 'viewLive'].forEach((id) => { $(id).hidden = id !== viewId; });
+  if (viewId === 'viewNarrate') loadNarrateLists();
+  clearInterval(livePoll);
+  if (viewId === 'viewLive') { refreshLive(); livePoll = setInterval(refreshLive, 3000); }
+}
+
+function setNote(el, text, isError) {
+  // The API reports errors as {"detail": "..."}; show just the sentence.
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed.detail === 'string') text = parsed.detail;
+  } catch (_) { /* plain text */ }
+  el.textContent = text || '';
+  el.classList.toggle('error', !!isError);
+}
+
+/* ------------------------------ Narrate ------------------------------ */
+
+async function loadNarrateLists() {
+  try {
+    const [voices, lib] = await Promise.all([fetchJson('/api/narrate/voices'), fetchJson('/api/narrate/library')]);
+    const voiceSel = $('nrVoice');
+    const keep = voiceSel.value;
+    voiceSel.innerHTML = '';
+    (voices.voices || []).forEach((v) => {
+      const o = document.createElement('option');
+      o.value = v.id;
+      o.textContent = `${v.name} (${v.engine}${v.language ? ', ' + v.language : ''})`;
+      voiceSel.appendChild(o);
+    });
+    if (!voiceSel.options.length) voiceSel.innerHTML = '<option value="">No voice found</option>';
+    if (keep) voiceSel.value = keep;
+    const bg = $('nrBackground');
+    const keepBg = bg.value;
+    bg.innerHTML = '<option value="">Automatic (stock footage that fits the story)</option>';
+    (lib.videos || []).forEach((v) => {
+      const o = document.createElement('option');
+      o.value = v.name;
+      o.textContent = v.name;
+      bg.appendChild(o);
+    });
+    bg.value = keepBg;
+    setNote($('nrNote'), (lib.videos || []).length ? '' : 'Background footage is found automatically; add your own video only if you prefer it.');
+  } catch (err) {
+    setNote($('nrNote'), err.message, true);
+  }
+}
+
+async function writeScript() {
+  const btn = $('nrWriteBtn');
+  btn.disabled = true;
+  setNote($('nrNote'), 'Writing the script...');
+  try {
+    const res = await post('/api/narrate/script', {
+      idea: $('nrIdea').value, style: $('nrStyle').value,
+      seconds: parseInt($('nrSeconds').value, 10), language: $('nrLang').value.trim(),
+    });
+    $('nrScript').value = res.script;
+    setNote($('nrNote'), 'Script ready. Edit it if you like, then make the video.');
+  } catch (err) {
+    setNote($('nrNote'), err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function uploadBackground(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  setNote($('nrNote'), `Uploading ${file.name}...`);
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    // Not fetchJson: it forces a JSON Content-Type, and an upload needs the multipart boundary.
+    const res = await fetch('/api/narrate/library', { method: 'POST', body: form });
+    if (!res.ok) throw new Error(await res.text());
+    await loadNarrateLists();
+    $('nrBackground').value = file.name;
+    setNote($('nrNote'), `${file.name} added.`);
+  } catch (err) {
+    setNote($('nrNote'), err.message, true);
+  }
+  event.target.value = '';
+}
+
+async function renderNarration() {
+  const btn = $('nrRenderBtn');
+  btn.disabled = true;
+  $('nrVideo').hidden = true;
+  $('nrDownload').hidden = true;
+  $('nrProgress').hidden = false;
+  $('nrBar').style.width = '2%';
+  $('nrMsg').textContent = 'Starting';
+  setNote($('nrNote'), '');
+  try {
+    const { job_id: id } = await post('/api/narrate/render', {
+      script: $('nrScript').value, voice: $('nrVoice').value,
+      background: $('nrBackground').value || null, caption_style: $('nrCaption').value,
+    });
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const st = await fetchJson(`/api/narrate/status/${encodeURIComponent(id)}`);
+      $('nrBar').style.width = `${st.percent || 0}%`;
+      $('nrMsg').textContent = st.message || '';
+      if (st.state === 'done') {
+        const url = asMediaUrl(st.path);
+        $('nrVideo').src = url;
+        $('nrVideo').hidden = false;
+        $('nrDownload').href = url;
+        $('nrDownload').hidden = false;
+        break;
+      }
+      if (st.state === 'failed') throw new Error(st.message || 'The video could not be made');
+    }
+  } catch (err) {
+    setNote($('nrNote'), err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* -------------------------------- Live -------------------------------- */
+
+function syncLiveSource() {
+  const obs = $('lvSource').value === 'obs';
+  $('lvUrlWrap').hidden = obs;
+  $('lvObs').hidden = !obs;
+}
+
+async function refreshLive() {
+  try {
+    const st = await fetchJson('/api/live/status');
+    const badge = $('lvStatus');
+    badge.textContent = `${st.status}${st.elapsed ? ' · ' + Math.floor(st.elapsed / 60) + ' min' : ''}`;
+    badge.className = `studio-badge ${st.status}`;
+    // A failed button press stays on screen until the next press; otherwise the
+    // refresh that follows it would replace the reason with the session's status text.
+    if (liveError) setNote($('lvNote'), liveError, true);
+    else if (st.detail && st.status !== 'live') setNote($('lvNote'), st.detail, st.status === 'disconnected');
+    else setNote($('lvNote'), '');
+    const tr = $('lvTranscript');
+    tr.innerHTML = (st.transcript || []).length
+      ? st.transcript.map((t) => `<div>${escapeHtml(t.text)}</div>`).join('')
+      : '<em>Nothing yet</em>';
+    tr.scrollTop = tr.scrollHeight;
+    const grid = $('lvClips');
+    grid.innerHTML = (st.clips || []).length ? '' : '<em>No clips yet</em>';
+    (st.clips || []).forEach((c) => {
+      const card = document.createElement('div');
+      card.className = 'studio-clip';
+      card.innerHTML = `<video controls preload="metadata" src="${escapeHtml(asMediaUrl(c.path))}"></video>
+        <strong>${escapeHtml(c.title)}</strong><small>${escapeHtml(c.category || '')}</small>
+        <button class="ghost-btn" type="button">Delete</button>`;
+      card.querySelector('button').addEventListener('click', async () => {
+        try { await fetchJson(`/api/live/clips/${encodeURIComponent(c.id)}`, { method: 'DELETE' }); refreshLive(); }
+        catch (err) { setNote($('lvNote'), err.message, true); }
+      });
+      grid.appendChild(card);
+    });
+  } catch (err) {
+    setNote($('lvNote'), err.message, true);
+  }
+}
+
+async function liveAction(fn) {
+  liveError = '';
+  try { await fn(); } catch (err) { liveError = err.message; }
+  refreshLive();
+}
+
+export function setupStudios() {
+  document.querySelectorAll('.view-tab').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
+  $('nrWriteBtn').addEventListener('click', writeScript);
+  $('nrRenderBtn').addEventListener('click', renderNarration);
+  $('nrUpload').addEventListener('change', uploadBackground);
+
+  $('lvSource').addEventListener('change', syncLiveSource);
+  $('lvSens').addEventListener('input', () => { $('lvSensVal').textContent = $('lvSens').value; });
+  $('lvConnectBtn').addEventListener('click', () => liveAction(() => post('/api/live/connect', {
+    source: $('lvSource').value, url: $('lvUrl').value.trim(), sensitivity: parseInt($('lvSens').value, 10),
+    buffer_minutes: parseInt($('lvBuffer').value, 10), auto_clip: $('lvAuto').value === '1',
+  })));
+  $('lvStopBtn').addEventListener('click', () => liveAction(() => post('/api/live/disconnect')));
+  $('lvInstantBtn').addEventListener('click', () => liveAction(() => post('/api/live/instant-clip', { seconds: 30 })));
+  syncLiveSource();
+}

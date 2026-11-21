@@ -120,6 +120,10 @@ def detect_objects_in_frame(frame: np.ndarray, conf: float = 0.25) -> list:
         return []
 
 
+# At or above this spacing, seeking to each sample beats decoding every frame.
+SEEK_SAMPLE_INTERVAL = 2.0
+
+
 def sample_frames(video_path: str, sample_interval: float = 0.5) -> list:
     """Sample frames and return [(timestamp, [{cls,name,conf,box}...]), ...]."""
     cap = cv2.VideoCapture(video_path)
@@ -131,6 +135,23 @@ def sample_frames(video_path: str, sample_interval: float = 0.5) -> list:
     frame_interval = max(1, int(fps * sample_interval))
     results = []
     count = 0
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if sample_interval >= SEEK_SAMPLE_INTERVAL and n_frames > 0:
+        # grab() still decodes each frame: the whole-source sweep (one sample per
+        # 11.4 s of job 112's 46 min source) decoded all ~82k frames to keep 240,
+        # about 11 of its 16 minutes. A seek decodes one GOP per sample.
+        try:
+            for index in range(0, n_frames, frame_interval):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                dets = detect_objects_in_frame(frame, conf=0.25)
+                dets.sort(key=lambda d: (d["cls"] != 0, -d["conf"]))
+                results.append((index / fps, dets))
+        finally:
+            cap.release()
+        return results
     try:
         while True:
             if count % frame_interval == 0:
@@ -149,6 +170,38 @@ def sample_frames(video_path: str, sample_interval: float = 0.5) -> list:
     finally:
         cap.release()
     return results
+
+
+# A pinned focus that moves further than this (fraction of source width) between
+# two samples has changed person, not walked there.
+SPEAKER_JUMP_FRAC = 0.20
+# How long before a jump keyframe the previous position is still held.
+CUT_HOLD_SECONDS = 0.04
+# Below this best overlap between the people of two consecutive samples, nobody
+# stayed where they were: the shot changed.
+SHOT_CHANGE_MAX_IOU = 0.15
+
+
+def _box_iou(a, b) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0.0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0.0, min(ay + ah, by + bh) - max(ay, by))
+    inter = ix * iy
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _is_shot_change(previous: list, current: list) -> bool:
+    """True when no person of the previous sample is still roughly in place.
+
+    Read from the detections the samples already carry: across a hard cut every
+    box lands somewhere else, inside a shot at least one person overlaps where
+    they were half a second ago. Says nothing when either sample has no people.
+    """
+    if not previous or not current:
+        return False
+    return max(_box_iou(p, c) for p in previous for c in current) < SHOT_CHANGE_MAX_IOU
 
 
 def _person_centers(dets: list) -> list:
@@ -180,7 +233,8 @@ def compute_smooth_yolo_trajectory(
     Without it the largest box in each frame wins, which in a three-person
     shot drifts to whoever happens to be closest to the camera. Samples where
     the focus is not in frame are skipped, so the crop holds its last position
-    through a brief occlusion instead of jumping to a bystander.
+    through a brief occlusion instead of jumping to a bystander - until the shot
+    changes, after which the crop follows the person the new shot shows.
     """
     crop_w = int(src_h * target_w / target_h)
     crop_h = src_h
@@ -192,19 +246,40 @@ def compute_smooth_yolo_trajectory(
     if crop_w < 2 or crop_h < 2:
         return []
 
-    raw_centers = []
-    valid_ts = []
-
+    # (ts, cx, cy, snap): snap means the picture changed under the crop, so the
+    # crop must jump there instead of gliding.
+    points = []
     focus_map = {round(float(ts), 4): box for ts, box in (focus_boxes or [])}
+    last_person_boxes: list = []
+    # Until the focus first shows up there is no position of it to hold, so
+    # follow whoever is on screen. Starting at False parked the crop, for the
+    # opening shots, where the focus would appear seconds later: job 112 clip 7
+    # cut the presenter out of his own 6 s intro to wait for a figure at the
+    # right edge of a later shot.
+    cut_since_focus = True
     for ts, dets in samples:
+        person_boxes = [d["box"] for d in dets if d["cls"] == 0]
+        is_cut = _is_shot_change(last_person_boxes, person_boxes)
+        if person_boxes:
+            last_person_boxes = person_boxes
+
         if focus_map:
             box = focus_map.get(round(float(ts), 4))
-            if box is None:
-                continue
+            if box is not None:
+                cut_since_focus = False
+            else:
+                if is_cut:
+                    cut_since_focus = True
+                # Same shot, focus briefly hidden: hold the last position rather
+                # than jump to a bystander. After a cut that position belongs to a
+                # picture that is gone - a multi-camera edit left the crop parked
+                # on a mic arm for the whole of the other speaker's shot - so the
+                # crop follows whoever the new shot shows.
+                if not (cut_since_focus and person_boxes):
+                    continue
+                box = max(person_boxes, key=lambda b: b[2] * b[3])
             x, y, w, h = box
-            cx, cy = x + w / 2.0, y + h / 2.0
-            raw_centers.append((cx, cy))
-            valid_ts.append(ts)
+            points.append((ts, x + w / 2.0, y + h / 2.0, is_cut))
             continue
 
         persons = [d for d in dets if d["cls"] == 0]
@@ -221,30 +296,37 @@ def compute_smooth_yolo_trajectory(
             x, y, w, h = largest["box"]
             cx, cy = x + w // 2, y + h // 2
 
-        raw_centers.append((cx, cy))
-        valid_ts.append(ts)
+        points.append((ts, cx, cy, is_cut))
 
-    if not raw_centers:
+    if not points:
         return []
 
-    # Apply Deadband + Exponential Moving Average
-    smoothed = []
-    curr_cx, curr_cy = float(raw_centers[0][0]), float(raw_centers[0][1])
+    # Deadband + Exponential Moving Average inside a shot; a hard jump on a cut,
+    # and when a pinned focus moves to another person (a speaker change), which an
+    # editor cuts to rather than pans across.
     deadband_px = src_w * deadband_pct
-
-    for cx, cy in raw_centers:
-        # If movement within deadband, keep current smoothed center
-        if abs(cx - curr_cx) > deadband_px:
-            curr_cx = curr_cx + ema_alpha * (cx - curr_cx)
-        if abs(cy - curr_cy) > deadband_px:
-            curr_cy = curr_cy + ema_alpha * (cy - curr_cy)
-        smoothed.append((int(curr_cx), int(curr_cy)))
-
+    jump_px = src_w * SPEAKER_JUMP_FRAC
+    curr_cx, curr_cy = float(points[0][1]), float(points[0][2])
     trajectory = []
-    for i, ts in enumerate(valid_ts):
-        cx, cy = smoothed[i]
-        crop_x = max(0, min(int(cx - crop_w // 2), src_w - crop_w))
-        crop_y = max(0, min(int(cy - crop_h // 2), src_h - crop_h))
+    for i, (ts, cx, cy, is_cut) in enumerate(points):
+        jumped = i > 0 and (is_cut or (bool(focus_map) and abs(cx - curr_cx) > jump_px))
+        if jumped:
+            curr_cx, curr_cy = float(cx), float(cy)
+        else:
+            # If movement within deadband, keep current smoothed center
+            if abs(cx - curr_cx) > deadband_px:
+                curr_cx = curr_cx + ema_alpha * (cx - curr_cx)
+            if abs(cy - curr_cy) > deadband_px:
+                curr_cy = curr_cy + ema_alpha * (cy - curr_cy)
+        crop_x = max(0, min(int(curr_cx) - crop_w // 2, src_w - crop_w))
+        crop_y = max(0, min(int(curr_cy) - crop_h // 2, src_h - crop_h))
+        if jumped and trajectory:
+            # The filter interpolates linearly between keyframes; holding the old
+            # position until just before this one turns the glide into a cut.
+            prev_ts, prev_x, prev_y, _w, _h = trajectory[-1]
+            hold_ts = max(prev_ts + 0.001, ts - CUT_HOLD_SECONDS)
+            if hold_ts < ts:
+                trajectory.append((hold_ts, prev_x, prev_y, crop_w, crop_h))
         trajectory.append((ts, crop_x, crop_y, crop_w, crop_h))
 
     return trajectory

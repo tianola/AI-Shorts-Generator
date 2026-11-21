@@ -2,9 +2,31 @@ from pathlib import Path
 from typing import Optional, Callable
 from urllib.parse import urlparse
 import os
+import shutil
 import yt_dlp
 from config import settings
 from utils.disk import NotEnoughSpaceError, free_gb
+
+
+def _resolve_js_runtime(node_path: str = "") -> str:
+    """Absolute path to a JS runtime yt-dlp can run the EJS n-solver in.
+
+    yt-dlp only enables deno by default and this box has node, not deno, so the
+    web client comes back as "The page needs to be reloaded". The SYSTEM service
+    PATH has no node dir, so shutil.which fails there and the hardcoded install
+    location is what saves it. Returns "" when no runtime is found.
+    """
+    candidates = (
+        node_path,
+        shutil.which("node"),
+        r"C:\Program Files\nodejs\node.exe",
+        "/usr/bin/node",
+        "/usr/local/bin/node",
+    )
+    for cand in candidates:
+        if cand and os.path.exists(cand):
+            return cand
+    return ""
 
 
 def _remove_partials(output_dir: Path):
@@ -46,6 +68,12 @@ def download_youtube(url: str, job_id: int, progress_callback: Optional[Callable
         components = {c.strip() for c in (settings.YT_REMOTE_COMPONENTS or "").split(",") if c.strip()}
         if components:
             base_ydl_opts["remote_components"] = components
+            # EJS is JS code; yt-dlp runs it in a JS runtime it only auto-enables
+            # for deno. Point it at node (the API wants {runtime: {config}}, and
+            # an explicit path so the SYSTEM service PATH lacking node still works).
+            node = _resolve_js_runtime(getattr(settings, "YT_NODE_PATH", "") or "")
+            if node:
+                base_ydl_opts["js_runtimes"] = {"node": {"path": node}}
     else:
         # Direct media links (MP4/WebM/MOV etc.)
         base_ydl_opts.update({

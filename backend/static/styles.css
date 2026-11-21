@@ -928,3 +928,35 @@ input:focus, select:focus {
 .virality-card {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
 }
+
+/* ---- Narrate / Live views inside the same page ---- */
+.view-tabs { display: flex; gap: 8px; margin: 0 0 18px; flex-wrap: wrap; }
+.view-tab {
+  background: rgba(255,255,255,0.04); color: var(--muted); border: 1px solid var(--line);
+  border-radius: 999px; padding: 0.6rem 1.2rem; font-weight: 600; cursor: pointer;
+}
+.view-tab.active { color: white; border-color: var(--pink); background: rgba(255,77,141,0.16); }
+.studio-view[hidden], .layout[hidden] { display: none; }
+.studio-view { display: block; max-width: 980px; }
+.studio-card { padding: 22px; display: flex; flex-direction: column; gap: 14px; }
+.studio-card textarea {
+  width: 100%; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+  color: var(--text); border-radius: 14px; padding: 0.8rem; outline: none; resize: vertical; font-family: inherit;
+}
+.studio-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.studio-note { color: var(--muted); font-size: 0.85rem; margin: 0; }
+.studio-note.error { color: #ff7b7b; }
+.studio-sub { margin: 6px 0 0; font-size: 0.95rem; color: var(--muted); }
+.studio-progress small { color: var(--muted); }
+.studio-bar { height: 8px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; margin-bottom: 6px; }
+.studio-bar span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--cyan), var(--pink)); transition: width .4s; }
+.studio-video { width: 100%; max-width: 320px; border-radius: 16px; background: #000; }
+.studio-badge { padding: 0.3rem 0.8rem; border-radius: 999px; background: rgba(255,255,255,0.08); font-size: 0.8rem; }
+.studio-badge.live { background: rgba(104,240,179,0.2); color: var(--green); }
+.studio-badge.disconnected { background: rgba(255,123,123,0.2); color: #ff7b7b; }
+.studio-transcript { max-height: 170px; overflow: auto; font-size: 0.85rem; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+.studio-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+.studio-clip { background: rgba(255,255,255,0.04); border: 1px solid var(--line); border-radius: 14px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.studio-clip video { width: 100%; border-radius: 10px; background: #000; }
+.studio-clip strong { font-size: 0.85rem; }
+.file-btn { cursor: pointer; display: inline-block; }

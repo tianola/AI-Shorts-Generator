@@ -39,24 +39,35 @@ def _load_pipeline():
         return _PIPELINE
 
 
-def _decode_to_waveform(audio_path: str) -> Dict[str, Any]:
-    """ffmpeg-decoded mono float32 @16 kHz, shaped (channel, time) for pyannote.
+def _decode_full_samples(audio_path: str):
+    """Decode the whole track to mono float32 @16 kHz as a 1-D numpy array.
 
-    Reuses the decoder transcription already depends on, so PyAV/torchcodec
-    never touch the file.
+    Returns ``(samples, sample_rate)``. Reuses the decoder transcription already
+    depends on, so PyAV/torchcodec never touch the file.
     """
-    import torch
-
     from services.audio import TRANSCRIPTION_SAMPLE_RATE, decode_audio_for_transcription
 
     samples = decode_audio_for_transcription(audio_path)
     if samples.size == 0:
         raise RuntimeError(f"no audio samples decoded from {audio_path}")
+    return samples, TRANSCRIPTION_SAMPLE_RATE
+
+
+def _payload_from(samples, sample_rate: int, uri: str) -> Dict[str, Any]:
+    """Wrap a float32 mono slice as the (channel, time) waveform dict pyannote 4.x wants."""
+    import torch
+
     return {
         "waveform": torch.from_numpy(samples).unsqueeze(0),
-        "sample_rate": TRANSCRIPTION_SAMPLE_RATE,
-        "uri": os.path.splitext(os.path.basename(audio_path))[0],
+        "sample_rate": sample_rate,
+        "uri": uri,
     }
+
+
+def _decode_to_waveform(audio_path: str) -> Dict[str, Any]:
+    """ffmpeg-decoded mono float32 @16 kHz, shaped (channel, time) for pyannote."""
+    samples, sample_rate = _decode_full_samples(audio_path)
+    return _payload_from(samples, sample_rate, os.path.splitext(os.path.basename(audio_path))[0])
 
 
 def _turns_from_result(result: Any) -> List[Dict[str, Any]]:
@@ -93,6 +104,59 @@ def try_diarize(audio_path: str) -> Optional[List[Dict[str, Any]]]:
         logger.warning(
             f"Diarization failed ({type(exc).__name__}: {exc}); continuing without speaker turns"
         )
+        return None
+
+
+def try_diarize_windows(
+    audio_path: str,
+    windows: List[Dict[str, float]],
+    margin: float = 0.0,
+) -> Optional[List[Dict[str, Any]]]:
+    """Speaker turns over just the given clip windows, in GLOBAL seconds.
+
+    Diarizing the whole source is the most expensive step on a long video, yet
+    the result is consumed only per clip (``slice_turns`` re-zeros turns to
+    clip-local time), so we run pyannote over each window (plus ``margin``)
+    instead of the entire track. Speaker ids are meaningful only within a window
+    here — per-clip consumers never compare ids across windows, so analysing each
+    window independently is fine.
+
+    Returns merged global-time turns, ``[]`` when no window produced speech, or
+    ``None`` on failure (no token, gated model, undecodable) — same contract as
+    :func:`try_diarize`.
+    """
+    try:
+        if not windows:
+            return []
+        if not _hf_token():
+            logger.info(
+                "Windowed diarization skipped: no HuggingFace token configured (HF_KEY)")
+            return None
+        samples, sample_rate = _decode_full_samples(audio_path)
+        duration = samples.shape[0] / sample_rate
+        pipeline = _load_pipeline()
+        merged: List[Dict[str, Any]] = []
+        for win in windows:
+            a = max(0.0, float(win["start"]) - margin)
+            b = min(duration, float(win["end"]) + margin)
+            if b <= a:
+                continue
+            segment = samples[int(a * sample_rate):int(b * sample_rate)]
+            if segment.size == 0:
+                continue
+            turns = _turns_from_result(
+                pipeline(_payload_from(segment, sample_rate, f"win_{int(a * 1000)}")))
+            for t in turns:
+                merged.append(
+                    {"speaker": t["speaker"],
+                     "start": round(a + t["start"], 3),
+                     "end": round(a + t["end"], 3)})
+        merged.sort(key=lambda t: (t["start"], t["end"]))
+        return merged
+    except Exception as exc:
+        logger.warning(
+            f"Windowed diarization failed ({type(exc).__name__}: {exc}); "
+            "continuing without speaker turns")
         return None
 
 

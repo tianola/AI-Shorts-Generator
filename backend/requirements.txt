@@ -52,3 +52,4 @@ typing-extensions>=4.8.0
 # Optional — install only if the feature is used:
 #   fal-client          -> AI B-roll (services/broll_ai.py, needs FAL_KEY)
 #   openai-whisper      -> 'local_pt_<name>' checkpoints (services/whisper.py)
+anthropic>=2.8.0

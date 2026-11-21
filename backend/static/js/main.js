@@ -9,10 +9,12 @@ import { setupBatchUpload } from './batch.js';
 import { listJobs, loadSystemInfo } from './jobs.js';
 import { state } from './state.js';
 import { setupStudioModal } from './studio.js';
+import { setupStudios } from './studios.js';
 import { checkTikTokStatus, setupTikTokIntegration } from './tiktok.js';
 import { checkYouTubeStatus, setupYouTubeIntegration } from './youtube.js';
 
 setupStudioModal();
+setupStudios();
 setupYouTubeIntegration();
 setupTikTokIntegration();
 setupBatchUpload();

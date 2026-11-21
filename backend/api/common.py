@@ -21,6 +21,11 @@ def resolve_upload_privacy(value: Optional[str]) -> str:
     return normalized
 
 
+def resolve_auto_upload(value: Optional[bool]) -> bool:
+    """Per-job publish flag, falling back to DEFAULT_AUTO_UPLOAD rather than False."""
+    return bool(settings.DEFAULT_AUTO_UPLOAD) if value is None else bool(value)
+
+
 def clip_payload(clip: Clip) -> dict:
     """Single wire shape for a clip, used by every endpoint that returns one.
 

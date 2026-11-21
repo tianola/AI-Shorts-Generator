@@ -5,6 +5,7 @@ main.py mounts this router under /api. /clips/pending-upload is declared before
 """
 import json
 import logging
+import math
 import os
 import re
 from datetime import datetime
@@ -14,6 +15,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from api.common import clip_payload
 from config import settings
@@ -29,6 +31,36 @@ router = APIRouter()
 # placeholders such as "queued" here, which marked a clip as published and made
 # the worker duplicate-guard skip the real upload forever.
 YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+def probe_media_duration(video_path: str) -> Optional[float]:
+    """Real duration of a media file, or None when it cannot be known.
+
+    None means "no evidence", never "zero": a failed probe must not become a
+    ceiling that rejects every window the operator asks for.
+    """
+    try:
+        from services.trim import probe_media
+        duration = float(probe_media(video_path)["duration"])
+    except Exception as exc:  # no ffprobe, unreadable file, no video stream
+        logger.info("Could not probe %s: %s", video_path, exc)
+        return None
+    return duration if duration > 0 else None
+
+
+def source_duration(job_id: Optional[int]) -> Optional[float]:
+    """Length of a job's downloaded source, which is what clip windows index.
+
+    ffprobe on a multi-hundred-megabyte mp4 only reads the container header, but
+    it is still a blocking subprocess, so callers on the event loop must reach
+    this through ``run_in_threadpool``.
+    """
+    if job_id is None:
+        return None
+    source = Path(settings.JOBS_DIR) / str(job_id) / "source.mp4"
+    if not source.exists():
+        return None
+    return probe_media_duration(str(source))
 
 
 class ClipUploadStatus(BaseModel):
@@ -74,13 +106,145 @@ class ClipCaptionUpdate(BaseModel):
     hashtags: Optional[List[str]] = None
 
 
+def _rerender_media(clip_dir, source_video: str, words_file: str, *, window,
+                   layout_mode: str, caption_style: str, title: Optional[str],
+                   karaoke_enabled: bool, motion_title_enabled: bool,
+                   thumbnail_template: Optional[int], job_id: Optional[int],
+                   clip_index: int, trim) -> dict:
+    """The blocking half of a re-render, run in a worker thread.
+
+    ``cut_clip`` through ``generate_thumbnail`` is minutes of ffmpeg and PIL work
+    per clip; it must never run on the event loop, and it must not hold a session
+    either, so everything here takes plain values and returns plain values and
+    the endpoint does the recording.
+
+    ``trim`` is the row's recorded ``(trim_start, trim_end)`` or ``None``: the
+    render is rebuilt from ``window`` alone, so without this the operator's
+    manual trim would be silently undone by their own re-render.
+    """
+    from worker import cut_clip
+    from services.smart_crop import smart_crop_video
+    from services.word_cropper import crop_words
+    from services.captions import create_captions
+    from services.render import burn_captions
+    from services.motion_title import add_motion_title
+    from services.sfx import add_automatic_sfx
+    from services.thumbnail import generate_thumbnail
+    from services.trim import TrimValidationError
+    from utils import clip_trim, derived_cache
+
+    # This endpoint rebuilds with inputs the worker's cache key does not know
+    # about (karaoke, thumbnail template), so any manifest left behind would
+    # vouch for artifacts it did not build. Drop the claims first; the next
+    # worker run then rebuilds on its own terms instead of trusting a key that
+    # no longer describes this output. The trimmed artifact is in that list
+    # because the render it was cut from is about to be replaced.
+    for _stale in ("short.mp4", "vertical.mp4", "words.json", "captions.ass",
+                   "final_short.mp4", "final_with_title.mp4", "final_with_sfx.mp4",
+                   "final_video.mp4", clip_trim.TRIMMED_ARTIFACT_NAME):
+        derived_cache.forget(os.path.join(str(clip_dir), _stale))
+
+    # 1. Cut clip
+    short_path = os.path.join(str(clip_dir), "short.mp4")
+    cut_clip(source_video, window[0], window[1], short_path)
+
+    # 2. Vertical layout
+    vertical_path = os.path.join(str(clip_dir), "vertical.mp4")
+    smart_crop_video(short_path, vertical_path, mode=layout_mode)
+
+    # 3. Crop words & generate captions
+    clip_words_file = os.path.join(str(clip_dir), "words.json")
+    if os.path.exists(words_file):
+        crop_words(words_file, window[0], window[1], clip_words_file)
+
+    captions_path = os.path.join(str(clip_dir), "captions.ass")
+    create_captions(clip_words_file, captions_path, style_name=caption_style,
+                    karaoke=karaoke_enabled)
+
+    # 4. Burn captions
+    final_short = os.path.join(str(clip_dir), "final_short.mp4")
+    burn_captions(vertical_path, captions_path, final_short)
+
+    # 5. Add motion title (conditionally)
+    if motion_title_enabled:
+        title_path = os.path.join(str(clip_dir), "final_with_title.mp4")
+        try:
+            add_motion_title(final_short, title or "Viral Moment", title_path)
+            rendered_path = title_path
+        except Exception:
+            rendered_path = final_short
+    else:
+        rendered_path = final_short
+
+    # 6. Add SFX with 100% voice preservation
+    final_video_path = os.path.join(str(clip_dir), "final_video.mp4")
+    add_automatic_sfx(rendered_path, final_video_path, title=title or "", transcript="")
+
+    # 7. Re-generate thumbnail with chosen template style
+    thumbnail_relative = None
+    thumbnail_path = os.path.join(str(clip_dir), "thumbnail.jpg")
+    tpl_idx = thumbnail_template if thumbnail_template is not None else (clip_index or 0)
+    try:
+        generate_thumbnail(final_video_path, thumbnail_path, title or "Viral Moment",
+                           clip_index=tpl_idx, job_id=job_id or 0)
+        thumbnail_relative = os.path.relpath(thumbnail_path, settings.STORAGE_ROOT)
+    except Exception as _te:
+        logger.warning("Could not re-generate thumbnail for job %s clip %s: %s",
+                       job_id, clip_index, _te)
+
+    # Clean scratch files - aggressively remove all intermediate artifacts,
+    # keeping only what the clip actually serves. The trimmed cut is not in the
+    # keep list on purpose: it is rebuilt from the new render just below, so a
+    # trim of the previous render cannot survive this pass looking current.
+    keep_files = {"final_video.mp4", "thumbnail.jpg", "metadata.json",
+                  "storyboard.jpg", "words.json"}
+    for entry in os.listdir(str(clip_dir)):
+        if entry not in keep_files and (entry.endswith(".mp4") or entry.endswith(".ass")
+                                        or entry.endswith(".wav")):
+            fp = os.path.join(str(clip_dir), entry)
+            if os.path.exists(fp):
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
+
+    served_path = final_video_path
+    trim_reapplied = False
+    trim_error = None
+    if trim is not None and trim[0] is not None and trim[1] is not None:
+        try:
+            trimmed = clip_trim.sync_stored_trim(clip_dir, window, trim[0], trim[1])
+            if trimmed:
+                served_path = trimmed
+                trim_reapplied = True
+        except TrimValidationError as e:
+            # The new render is not the media the window was chosen against
+            # (shorter, or re-cropped). Serving the untrimmed render is the
+            # honest fallback, but it has to be said out loud: the alternative
+            # is a clip that publishes whole while the Studio shows it trimmed.
+            trim_error = str(e)
+            logger.warning("Clip %s of job %s keeps an untrimmed re-render: its "
+                           "recorded trim %s-%ss no longer fits (%s)", clip_index,
+                           job_id, trim[0], trim[1], e)
+
+    return {"served_path": served_path, "final_video_path": final_video_path,
+            "thumbnail_relative": thumbnail_relative,
+            "trim_reapplied": trim_reapplied, "trim_error": trim_error}
+
+
 @router.post("/clips/{clip_id}/rerender")
 async def rerender_clip(
     clip_id: int,
     request: RerenderClipRequest,
     db: Session = Depends(get_database)
 ):
-    """Re-render a clip with updated subtitle preset, layout mode, and title overlay."""
+    """Re-render a clip with updated subtitle preset, layout mode, and title overlay.
+
+    The render itself is a worker-thread job (see ``_rerender_media``); this
+    function only reads the row, dispatches, and records what came back. The
+    clip's recorded manual trim is re-applied to the fresh render, so a
+    re-render cannot publish something the operator already rejected.
+    """
     clip = db.query(Clip).filter(Clip.id == clip_id).first()
     if not clip:
         raise HTTPException(status_code=404, detail=f"Clip {clip_id} not found")
@@ -113,87 +277,55 @@ async def rerender_clip(
     if not os.path.exists(source_video):
         raise HTTPException(status_code=400, detail="Source video not found for re-rendering")
 
+    # Snapshot everything the pipeline needs as plain values: the thread that
+    # runs it must not reach through the ORM or the session.
+    plan = {
+        "clip_dir": clip_dir,
+        "source_video": source_video,
+        "words_file": words_file,
+        "window": (clip.start, clip.end),
+        "layout_mode": clip.layout_mode,
+        "caption_style": clip.caption_style,
+        "title": clip.title,
+        "karaoke_enabled": karaoke_enabled,
+        "motion_title_enabled": motion_title_enabled,
+        "thumbnail_template": request.thumbnail_template,
+        "job_id": clip.job_id,
+        "clip_index": clip.index,
+        "trim": (clip.trim_start, clip.trim_end),
+    }
+
     try:
-        from worker import cut_clip
-        from services.smart_crop import smart_crop_video
-        from services.word_cropper import crop_words
-        from services.captions import create_captions
-        from services.render import burn_captions
-        from services.motion_title import add_motion_title
-        from services.sfx import add_automatic_sfx
-
-        # 1. Cut clip
-        short_path = os.path.join(str(clip_dir), "short.mp4")
-        cut_clip(source_video, clip.start, clip.end, short_path)
-
-        # 2. Vertical layout
-        vertical_path = os.path.join(str(clip_dir), "vertical.mp4")
-        smart_crop_video(short_path, vertical_path, mode=clip.layout_mode)
-
-        # 3. Crop words & generate captions
-        clip_words_file = os.path.join(str(clip_dir), "words.json")
-        if os.path.exists(words_file):
-            crop_words(words_file, clip.start, clip.end, clip_words_file)
-
-        captions_path = os.path.join(str(clip_dir), "captions.ass")
-        create_captions(clip_words_file, captions_path, style_name=clip.caption_style, karaoke=karaoke_enabled)
-
-        # 4. Burn captions
-        final_short = os.path.join(str(clip_dir), "final_short.mp4")
-        burn_captions(vertical_path, captions_path, final_short)
-
-        # 5. Add motion title (conditionally)
-        if motion_title_enabled:
-            title_path = os.path.join(str(clip_dir), "final_with_title.mp4")
-            try:
-                add_motion_title(final_short, clip.title or "Viral Moment", title_path)
-                rendered_path = title_path
-            except Exception:
-                rendered_path = final_short
-        else:
-            rendered_path = final_short
-
-        # 6. Add SFX with 100% voice preservation
-        final_video_path = os.path.join(str(clip_dir), "final_video.mp4")
-        add_automatic_sfx(rendered_path, final_video_path, title=clip.title or "", transcript="")
-
-        # 7. Re-generate thumbnail with chosen template style
-        from services.thumbnail import generate_thumbnail
-        thumbnail_path = os.path.join(str(clip_dir), "thumbnail.jpg")
-        tpl_idx = request.thumbnail_template if request.thumbnail_template is not None else (clip.index or 0)
-        try:
-            generate_thumbnail(final_video_path, thumbnail_path, clip.title or "Viral Moment", clip_index=tpl_idx, job_id=clip.job_id or 0)
-            clip.thumbnail_path = os.path.relpath(thumbnail_path, settings.STORAGE_ROOT)
-        except Exception as _te:
-            logger.warning(f"Could not re-generate thumbnail for clip {clip.id}: {_te}")
-
-        # Clean scratch files — aggressively remove all intermediate artifacts, keeping only final_video.mp4
-        keep_files = {"final_video.mp4", "thumbnail.jpg", "metadata.json", "storyboard.jpg", "words.json"}
-        for entry in os.listdir(str(clip_dir)):
-            if entry not in keep_files and (entry.endswith(".mp4") or entry.endswith(".ass") or entry.endswith(".wav")):
-                fp = os.path.join(str(clip_dir), entry)
-                if os.path.exists(fp):
-                    try:
-                        os.remove(fp)
-                    except Exception:
-                        pass
-
-        clip.file_path = os.path.relpath(final_video_path, settings.STORAGE_ROOT)
-        db.commit()
-        db.refresh(clip)
-
-        return {
-            "message": "Clip successfully re-rendered",
-            "clip": {
-                "id": clip.id,
-                "title": clip.title,
-                "caption_style": clip.caption_style,
-                "layout_mode": clip.layout_mode,
-                "file_path": clip.file_path
-            }
-        }
+        result = await run_in_threadpool(_rerender_media, **plan)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Re-render failed: {str(e)}")
+
+    if result["thumbnail_relative"]:
+        clip.thumbnail_path = result["thumbnail_relative"]
+    clip.file_path = os.path.relpath(result["served_path"], settings.STORAGE_ROOT)
+    db.commit()
+    db.refresh(clip)
+
+    if result["trim_error"]:
+        message = ("Clip successfully re-rendered, but its recorded trim could not "
+                   f"be re-applied to the new render: {result['trim_error']}")
+    elif result["trim_reapplied"]:
+        message = "Clip successfully re-rendered and re-trimmed"
+    else:
+        message = "Clip successfully re-rendered"
+
+    return {
+        "message": message,
+        "clip": {
+            "id": clip.id,
+            "title": clip.title,
+            "caption_style": clip.caption_style,
+            "layout_mode": clip.layout_mode,
+            "file_path": clip.file_path
+        },
+        "trim_reapplied": result["trim_reapplied"],
+        "trim_error": result["trim_error"],
+    }
 
 
 @router.post("/clips/{clip_id}/ai-edit")
@@ -322,7 +454,15 @@ async def update_clip_bounds(
     payload: dict,
     db: Session = Depends(get_database)
 ):
-    """Update clip start/end times."""
+    """Update clip start/end times: the window the next render will cut.
+
+    ``start``/``end`` are source-absolute seconds and feed straight into the
+    worker's ``cut_clip`` call and its derived-cache window key, so a value that
+    is not a real window does not fail here — it fails an ffmpeg run later, or
+    worse keys a cache entry on NaN. ``float()`` accepts "nan"/"inf" and every
+    comparison against NaN is False, which is why the old ``end <= start`` guard
+    let them through; the finite checks below are what close that.
+    """
     clip = db.query(Clip).filter(Clip.id == clip_id).first()
     if not clip:
         raise HTTPException(
@@ -336,8 +476,24 @@ async def update_clip_bounds(
     except (TypeError, ValueError) as e:
         raise HTTPException(status_code=422, detail=f"Invalid start/end values: {e}")
 
+    for name, value in (("start", new_start), ("end", new_end)):
+        if not math.isfinite(value):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{name} must be a finite number of seconds, got {payload.get(name)!r}")
+
+    if new_start < 0:
+        raise HTTPException(status_code=422, detail="start must be >= 0")
+
     if new_end <= new_start:
         raise HTTPException(status_code=422, detail="end must be greater than start")
+
+    duration = await run_in_threadpool(source_duration, clip.job_id)
+    if duration is not None and new_end > duration:
+        raise HTTPException(
+            status_code=422,
+            detail=f"end {new_end:.3f}s is past the end of the source "
+                   f"({duration:.3f}s); nothing could be cut there")
 
     clip.start = new_start
     clip.end = new_end
@@ -392,7 +548,20 @@ async def update_clip_upload_status(
     status_data: ClipUploadStatus,
     db: Session = Depends(get_database)
 ):
-    """Update upload status for a clip."""
+    """Record what a caller observed about one publish.
+
+    The strike counter is NOT this endpoint's to spend. `worker._record_publish_failure`
+    already charges the attempt when an upload fails - through the queue's own pass or
+    through `publish_clip_for_operator`, which is what the Studio's publish buttons now
+    call - and the Studio then reports the same outcome here. Charging twice retired a
+    clip after ~1.5 real attempts, and retirement nulls `publish_due_at` and
+    `scheduled_publish_at`, so the clip lost its release slot and left the queue without
+    a word. One failure, one strike, spent in exactly one place.
+
+    Success does still belong here, and it clears the queue's clocks the same way
+    `_ship_clip_to_youtube` does: a row that reads `uploaded=1` with a due time still set
+    is the clip-461 phantom, and every consumer of `publish_due_at` treats it as work.
+    """
     clip = db.query(Clip).filter(Clip.id == clip_id).first()
     if not clip:
         raise HTTPException(
@@ -407,10 +576,14 @@ async def update_clip_upload_status(
         clip.youtube_video_id = status_data.youtube_video_id
     clip.upload_error = status_data.upload_error
 
-    if not status_data.uploaded:
-        clip.upload_retry_count += 1
-    else:
+    # A failure report changes nothing else: no retry_count (see the docstring)
+    # and no clock, because a caller's report is not the queue's decision to
+    # retry, retire, or move the release.
+    if status_data.uploaded:
         clip.published_at = datetime.utcnow()
+        clip.publish_due_at = None
+        clip.publish_attempt_at = None
+        clip.upload_error = None
 
     db.commit()
     db.refresh(clip)

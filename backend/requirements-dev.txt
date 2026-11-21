@@ -2,6 +2,10 @@
 #   pip install -r backend/requirements.txt -r backend/requirements-dev.txt
 pytest>=8.0.0
 pytest-timeout>=2.2.0
+# Without this every `async def` test fails as "async def functions are not
+# natively supported", which reads like 19 broken features instead of one
+# missing plugin. Tests mark themselves with @pytest.mark.asyncio.
+pytest-asyncio>=0.24
 
 # Static checks; see .github/workflows/ci.yml for the rules CI enables.
 ruff>=0.6.0

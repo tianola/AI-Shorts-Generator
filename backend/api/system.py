@@ -1,19 +1,48 @@
 """System introspection: caption presets, health, source metadata, hardware estimates.
 
 main.py mounts this router under /api. None of these endpoints touch the database,
-which is why they are the easiest to reason about on their own.
+which is why they are the easiest to reason about on their own - but two of them
+reach outside the process (yt-dlp over the network, `wmic` as a subprocess), so
+both are checked at the boundary and run off the event loop.
 """
 import logging
 import os
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
+from starlette.concurrency import run_in_threadpool
 
 from config import settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# The registrable domains YouTube serves from. Checked as host-or-subdomain, not
+# as a substring: `"youtube.com" in netloc` (the test services/youtube.py uses to
+# pick its format string) also matches youtube.com.evil.tld and notyoutube.com,
+# which is fine for choosing a format and not fine for deciding what to fetch.
+YOUTUBE_DOMAINS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+
+
+def is_youtube_url(url: str) -> bool:
+    """True only for an http(s) URL whose host really is YouTube's."""
+    if not url or not url.strip():
+        return False
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:  # urlparse raises on some malformed IPv6 literals
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    # `hostname` is already lower-cased and free of the userinfo and port, which
+    # is what kills the https://youtube.com@attacker.tld/ shape.
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        return False
+    return any(host == domain or host.endswith("." + domain)
+               for domain in YOUTUBE_DOMAINS)
 
 
 @router.get("/system/presets")
@@ -45,48 +74,78 @@ async def health_check():
     return {"status": "ok"}
 
 
+def _extract_video_metadata(url: str) -> dict:
+    """Blocking yt-dlp probe, run in a thread. Raises HTTPException on failure.
+
+    A failed lookup used to answer 200 with ``title: null, duration: 0``, which
+    the Studio renders as an empty badge and then lets the operator create a job
+    from the same URL. An outcome this machine cannot determine is an error, and
+    it says so.
+    """
+    import yt_dlp
+
+    ydl_opts = {
+        "extract_flat": True,
+        "quiet": True,
+        "skip_download": True,
+        "no_warnings": True,
+        "socket_timeout": 15,
+    }
+    if getattr(settings, "YT_COOKIES_FILE", None) and os.path.exists(settings.YT_COOKIES_FILE):
+        ydl_opts["cookiefile"] = settings.YT_COOKIES_FILE
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        logger.warning("Failed to fetch metadata for %s: %s", url, e)
+        raise HTTPException(status_code=502,
+                            detail=f"Could not read metadata from YouTube: {e}")
+
+    if not isinstance(info, dict):
+        raise HTTPException(status_code=502,
+                            detail=f"YouTube returned no metadata for {url}")
+    title = info.get("title")
+    duration = float(info.get("duration") or 0)
+    if not title and duration <= 0:
+        raise HTTPException(
+            status_code=502,
+            detail=f"YouTube reported neither a title nor a duration for {url}; "
+                   "the video is unavailable, private, or the id does not exist")
+
+    mins = int(duration // 60)
+    secs = int(duration % 60)
+    return {
+        "title": title or "Unknown Video",
+        "duration": duration,
+        "duration_formatted": f"{mins}m {secs}s" if mins > 0 else f"{secs}s",
+        "thumbnail": info.get("thumbnail"),
+    }
+
+
 @router.get("/video/metadata")
 async def get_video_metadata(url: str):
-    """Quickly extract video metadata (title, duration, thumbnail) without downloading."""
-    if not url or not url.strip():
+    """Quickly extract video metadata (title, duration, thumbnail) without downloading.
+
+    Restricted to YouTube hosts: this endpoint hands the URL to yt-dlp, which
+    fetches it from this machine - a machine that keeps a YouTube-authenticated
+    cookie store - so an arbitrary caller-supplied URL is an SSRF request, not a
+    convenience. YouTube is also the only source the pipeline can process.
+    """
+    target = (url or "").strip()
+    if not target:
         raise HTTPException(status_code=400, detail="URL is required")
-    try:
-        import yt_dlp
-        ydl_opts = {
-            "extract_flat": True,
-            "quiet": True,
-            "skip_download": True,
-            "no_warnings": True,
-            "socket_timeout": 15,
-        }
-        if getattr(settings, "YT_COOKIES_FILE", None) and os.path.exists(settings.YT_COOKIES_FILE):
-            ydl_opts["cookiefile"] = settings.YT_COOKIES_FILE
+    if not is_youtube_url(target):
+        raise HTTPException(
+            status_code=400,
+            detail="Only YouTube URLs (youtube.com, youtu.be, music.youtube.com, "
+                   "youtube-nocookie.com) can be looked up here")
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url.strip(), download=False)
-            dur = float(info.get("duration") or 0)
-            mins = int(dur // 60)
-            secs = int(dur % 60)
-            dur_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-            return {
-                "title": info.get("title") or "Unknown Video",
-                "duration": dur,
-                "duration_formatted": dur_str,
-                "thumbnail": info.get("thumbnail"),
-            }
-    except Exception as e:
-        logger.warning(f"Failed to fetch metadata for {url}: {e}")
-        return {
-            "title": None,
-            "duration": 0,
-            "duration_formatted": None,
-            "thumbnail": None,
-        }
+    return await run_in_threadpool(_extract_video_metadata, target)
 
 
-@router.get("/system/info")
-async def get_system_info(duration: Optional[float] = None):
-    """Get accurate hardware specs and dynamically estimated Whisper models based on video duration."""
+def _collect_system_info(duration: Optional[float]) -> dict:
+    """Blocking hardware probe (``wmic``, psutil, torch) run in a thread."""
     try:
         import psutil
     except ImportError:
@@ -242,4 +301,15 @@ async def get_system_info(duration: Optional[float] = None):
         },
         "models": formatted_models,
     }
+
+
+@router.get("/system/info")
+async def get_system_info(duration: Optional[float] = None):
+    """Get accurate hardware specs and dynamically estimated Whisper models based on video duration.
+
+    ``wmic`` gets a 5 s timeout and ``torch.cuda.is_available`` can take longer
+    than that; both are subprocess/driver calls, so they run in a thread. On the
+    event loop they freeze the UI and the job websocket for the whole wait.
+    """
+    return await run_in_threadpool(_collect_system_info, duration)
 

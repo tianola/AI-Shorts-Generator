@@ -5,10 +5,9 @@ Includes dynamic multi-layout rendering: Solo speaker follow, Podcast split-scre
 """
 import cv2
 import numpy as np
-import subprocess
 from typing import List, Tuple, Optional
-from config import settings
-from utils.logger import job_warning, logger
+from utils.logger import logger
+
 
 def _probe_size(video_path: str) -> Tuple[int, int]:
     """Return (width, height) of a video, releasing the capture on every path."""
@@ -83,71 +82,6 @@ def detect_faces_in_frame(frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
         pass
 
     return []
-
-def sample_frames_for_face_tracking(
-    video_path: str,
-    sample_interval: float = 0.5
-) -> List[Tuple[float, List[Tuple[int, int, int, int]]]]:
-    """
-    Sample frames from video and detect faces in each.
-    """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return []
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        fps = 30.0
-
-    frame_interval = max(1, int(fps * sample_interval))
-    results = []
-    frame_idx = 0
-
-    try:
-        while True:
-            if frame_idx % frame_interval == 0:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                results.append((frame_idx / fps, detect_faces_in_frame(frame)))
-            elif not cap.grab():
-                break
-            frame_idx += 1
-    finally:
-        cap.release()
-    return results
-
-def compute_crop_box(
-    frame_width: int,
-    frame_height: int,
-    face_boxes: List[Tuple[int, int, int, int]]
-) -> Tuple[int, int, int, int]:
-    """
-    Compute 9:16 crop box based on detected faces.
-    """
-    target_aspect = 9 / 16
-    crop_height = frame_height
-    crop_width = int(crop_height * target_aspect)
-
-    if crop_width > frame_width:
-        crop_width = frame_width
-        crop_height = int(crop_width / target_aspect)
-
-    if not face_boxes:
-        crop_x = (frame_width - crop_width) // 2
-        crop_y = (frame_height - crop_height) // 2
-        return (crop_x, crop_y, crop_width, crop_height)
-
-    center_x = sum(x + w / 2 for x, y, w, h in face_boxes) / len(face_boxes)
-    center_y = sum(y + h / 2 for x, y, w, h in face_boxes) / len(face_boxes)
-
-    crop_x = int(center_x - crop_width / 2)
-    crop_y = int(center_y - crop_height / 2)
-
-    crop_x = max(0, min(frame_width - crop_width, crop_x))
-    crop_y = max(0, min(frame_height - crop_height, crop_y))
-
-    return (crop_x, crop_y, crop_width, crop_height)
 
 def _piecewise_expr(points: list, coord_idx: int) -> str:
     """Nested if(lt(t, ...)) expression interpolating one coordinate over time.
@@ -262,6 +196,20 @@ def build_vertical_filter(
             target_w=target_width, target_h=target_height,
         ).replace("[outv]", "[vsingle]")
 
+    if mode == "gaming":
+        src_w, src_h = _probe_size(input_video)
+        try:
+            from services.gaming_layout import build_gaming_filter, detect_facecam
+            cam = detect_facecam(input_video)
+            if cam:
+                return build_gaming_filter(src_w, src_h, cam, target_width, target_height
+                                           ).replace("[outv]", "[vsingle]")
+            logger.info("gaming layout: no facecam found, showing the whole frame over a blur")
+        except Exception as e:
+            logger.warning(f"gaming layout unavailable, using the blurred fit: {e}")
+        return _build_blur(src_w=src_w, src_h=src_h, target_w=target_width,
+                           target_h=target_height).replace("[outv]", "[vsingle]")
+
     if mode == "split_screen":
         try:
             two_shot = analysis.get("two_shot")
@@ -312,191 +260,3 @@ def build_vertical_filter(
         f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
         f"crop={target_width}:{target_height}[vsingle]"
     )
-
-
-def make_vertical(
-    input_video: str,
-    output_video: str,
-    target_width: int = 1080,
-    target_height: int = 1920
-) -> str:
-    """
-    Convert horizontal video to vertical 9:16 format with smart face tracking.
-    """
-    cap = cv2.VideoCapture(input_video)
-    if not cap.isOpened():
-        raise Exception(f"Could not open video file: {input_video}")
-
-    orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
-
-    samples = sample_frames_for_face_tracking(input_video, sample_interval=0.5)
-
-    if samples:
-        all_faces = [face for _, faces in samples for face in faces]
-        crop_x, crop_y, crop_w, crop_h = compute_crop_box(orig_width, orig_height, all_faces)
-    else:
-        target_aspect = 9 / 16
-        crop_h = orig_height
-        crop_w = int(crop_h * target_aspect)
-        if crop_w > orig_width:
-            crop_w = orig_width
-            crop_h = int(crop_w / target_aspect)
-        crop_x = (orig_width - crop_w) // 2
-        crop_y = (orig_height - crop_h) // 2
-
-    filter_complex = (
-        f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
-        f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
-        f"crop={target_width}:{target_height}"
-    )
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", input_video,
-        "-vf", filter_complex,
-        "-c:v", "libx264",
-        "-preset", settings.FFMPEG_PRESET,
-        "-crf", str(settings.FFMPEG_CRF),
-        "-c:a", "copy",
-        output_video
-    ]
-
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return output_video
-    except subprocess.CalledProcessError as e:
-        err = e.stderr
-        error_msg = err.decode(errors='ignore') if isinstance(err, (bytes, bytearray)) else str(e)
-        raise Exception(f"Vertical conversion failed: {error_msg}")
-
-def make_vertical_static(
-    input_video: str,
-    output_video: str,
-    target_width: int = 1080,
-    target_height: int = 1920
-) -> str:
-    """
-    Center crop without face tracking.
-    """
-    filter_complex = f"crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale={target_width}:{target_height}"
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", input_video,
-        "-vf", filter_complex,
-        "-c:v", "libx264",
-        "-preset", settings.FFMPEG_PRESET,
-        "-crf", str(settings.FFMPEG_CRF),
-        "-c:a", "copy",
-        output_video
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return output_video
-    except subprocess.CalledProcessError as e:
-        err = e.stderr
-        error_msg = err.decode(errors='ignore') if isinstance(err, (bytes, bytearray)) else str(e)
-        raise Exception(f"Static vertical conversion failed: {error_msg}")
-
-def make_vertical_blurred_fit(
-    input_video: str,
-    output_video: str,
-    target_width: int = 1080,
-    target_height: int = 1920
-) -> str:
-    """
-    Convert video to 9:16 using blurred background fit.
-    """
-    # Half-resolution backdrop blur, upscaled afterwards - same look, ~4x less
-    # filter work (see build_blurred_fit_filter for the measurement).
-    bg_w, bg_h = target_width // 2, target_height // 2
-    filter_complex = (
-        f"[0:v]scale={bg_w}:{bg_h}:force_original_aspect_ratio=increase,crop={bg_w}:{bg_h},boxblur=16:2,scale={target_width}:{target_height}[bg];"
-        f"[0:v]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease[fg];"
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
-    )
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", input_video,
-        "-filter_complex", filter_complex,
-        "-c:v", "libx264",
-        "-preset", settings.FFMPEG_PRESET,
-        "-crf", str(settings.FFMPEG_CRF),
-        "-c:a", "copy",
-        output_video
-    ]
-
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return output_video
-    except subprocess.CalledProcessError as e:
-        err = e.stderr
-        error_msg = err.decode(errors='ignore') if isinstance(err, (bytes, bytearray)) else str(e)
-        raise Exception(f"Blurred fit conversion failed: {error_msg}")
-
-def make_vertical_split_screen(
-    input_video: str,
-    output_video: str,
-    target_width: int = 1080,
-    target_height: int = 1920
-) -> str:
-    """
-    Convert horizontal video to 2-speaker vertical split-screen.
-    Probes actual source dimensions and locates speaker bounding boxes
-    before building the split-screen filter.
-    """
-    from services.focus_tracking import build_split_screen_filter, sample_frames
-
-    # Probe real source dimensions
-    cap = cv2.VideoCapture(input_video)
-    if not cap.isOpened():
-        raise Exception(f"Could not open video: {input_video}")
-    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
-
-    # Locate the two speaker boxes via YOLO sampling
-    samples = sample_frames(input_video, sample_interval=0.5)
-    persons_list = []
-    for _ts, dets in samples:
-        p = [d for d in dets if d.get("cls") == 0]
-        if len(p) >= 2:
-            p.sort(key=lambda d: d["box"][0])
-            persons_list = p
-            break
-
-    if len(persons_list) < 2:
-        # Fall back to static center-split when speakers can't be located
-        job_warning(0, "make_vertical_split_screen: could not locate 2 speakers; falling back to static")
-        return make_vertical_static(input_video, output_video, target_width, target_height)
-
-    filter_complex = build_split_screen_filter(
-        persons_list[0]["box"], persons_list[1]["box"],
-        src_w=src_w, src_h=src_h,
-        target_w=target_width, target_h=target_height,
-    )
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", input_video,
-        "-filter_complex", filter_complex,
-        "-c:v", "libx264",
-        "-preset", settings.FFMPEG_PRESET,
-        "-crf", str(settings.FFMPEG_CRF),
-        "-c:a", "copy",
-        output_video
-    ]
-
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return output_video
-    except subprocess.CalledProcessError as e:
-        err = e.stderr
-        error_msg = err.decode(errors='ignore') if isinstance(err, (bytes, bytearray)) else str(e)
-        raise Exception(f"Split-screen conversion failed: {error_msg}")

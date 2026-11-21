@@ -5,7 +5,7 @@ resolved_layout guard.
 AC:
   - split-screen crop boxes stay within source bounds (720p, 4K)
   - single_speaker fallback when no second face detected
-  - make_vertical_split_screen doesn't crash (returns file > 0 bytes)
+  - a split_screen request without two people still produces a video
   - worker uses resolved_layout, never raw layout_choice=='auto'
 
 Run from backend/:  PYTHONPATH=. python -m pytest tests/test_layout_adaptive.py -v
@@ -129,27 +129,25 @@ class TestSingleSpeakerFallback:
 
 
 # ---------------------------------------------------------------------------
-# 3. make_vertical_split_screen doesn't crash; returns an output file > 0 bytes
+# 3. A split_screen request with fewer than 2 people still produces a video
 # ---------------------------------------------------------------------------
 
-class TestMakeVerticalSplitScreen:
+class TestSplitScreenWithoutTwoPeople:
     """
-    make_vertical_split_screen on a black video (< 2 persons found) must fall
-    back gracefully to make_vertical_static and produce a non-empty output.
-    This was a guaranteed crash before the fix (missing required args).
+    smart_crop_video(mode="split_screen") on a clip where < 2 people are found must
+    fall back to a static crop and produce a non-empty 1080x1920 output.
     """
 
     @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="requires ffmpeg on PATH")
-    def test_make_vertical_split_screen_no_crash(self, tmp_path):
-        from services.vertical import make_vertical_split_screen
+    def test_split_screen_without_two_people_does_not_crash(self, tmp_path):
+        from services.smart_crop import smart_crop_video
 
         src = _fixture("test_720p.mp4")
         assert os.path.exists(src), f"Missing fixture: {src}"
 
         out = str(tmp_path / "split_out.mp4")
-        result = make_vertical_split_screen(src, out)
+        result = smart_crop_video(src, out, mode="split_screen")
 
-        assert result is not None, "make_vertical_split_screen returned None"
         assert os.path.exists(result), f"Output file does not exist: {result}"
         assert os.path.getsize(result) > 0, "Output file is empty (0 bytes)"
 

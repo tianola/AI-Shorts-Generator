@@ -16,6 +16,9 @@ from fastapi.responses import FileResponse
 from database.session import init_database
 from utils.env_check import log_media_tools
 from api.analytics import router as analytics_router
+from api.branding import router as branding_router
+from api.live import router as live_router
+from api.narrate import router as narrate_router
 from api.clips import router as clips_router
 from api.features import router as features_router
 from api.jobs import router as jobs_router
@@ -74,6 +77,9 @@ app.include_router(features_router, prefix="/api")
 app.include_router(youtube_router, prefix="/api")
 app.include_router(tiktok_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
+app.include_router(branding_router, prefix="/api")
+app.include_router(narrate_router, prefix="/api")
+app.include_router(live_router, prefix="/api")
 
 # Serve UI assets
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

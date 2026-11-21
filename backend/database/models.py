@@ -2,10 +2,19 @@
 Database models for AI Shorts Generator.
 SQLAlchemy ORM models with proper relationships.
 """
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, Float, JSON, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, Float, JSON, ForeignKey, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database.base import Base
+from database.migrations import CLIP_UNIQUE_INDEX
+
+# Statuses a job sits at when no worker is working on it any more. The worker
+# writes 'completed_with_errors' for a run where some clips rendered and some
+# did not, so every place that used to compare against 'completed' has to know
+# about both shapes or it will keep a finished job in the live set: the
+# websocket poller never stops, the pruner never reclaims the source, and the
+# Resume button has no path back.
+TERMINAL_JOB_STATUSES = ("completed", "completed_with_errors", "failed")
 
 class Job(Base):
     """Represents a video processing job."""
@@ -14,7 +23,7 @@ class Job(Base):
     id = Column(Integer, primary_key=True, index=True)
     youtube_url = Column(String, nullable=False)
     style_prompt = Column(Text, nullable=True)
-    status = Column(String, default="created")  # created|processing|completed|failed
+    status = Column(String, default="created")  # created|processing|completed|completed_with_errors|failed
     # Lease bookkeeping. A worker that died mid-job left the row at 'processing'
     # forever, because the poller only queries 'created' and never reclaimed it.
     claimed_by = Column(String, nullable=True)
@@ -33,9 +42,11 @@ class Job(Base):
     # Content safety: smart blur of unsafe objects
     smart_blur_enabled = Column(Boolean, nullable=True, default=False)
     target_clips = Column(Integer, nullable=True, default=10)
-    # Publishing is opt-in. The previous default of True meant a job created by
-    # an API client that never mentioned auto_upload (n8n, curl, scripts) was
-    # pushed straight to public YouTube/TikTok feeds.
+    # Editing mode steering clip selection: auto (picked per video) or viral|funny|dramatic|educational|story|meme|gaming
+    clip_mode = Column(String, nullable=True, default="auto")
+    # The API fills this from settings.DEFAULT_AUTO_UPLOAD, so the operator's
+    # .env decides. The column itself still defaults to False: a Job row built
+    # directly (a script, a test) is local until somebody asks for publishing.
     auto_upload = Column(Boolean, nullable=True, default=False)
     # "public" | "unlisted" | "private"; NULL falls back to AUTO_UPLOAD_PRIVACY
     upload_privacy = Column(String, nullable=True, default=None)
@@ -68,6 +79,17 @@ class JobProgress(Base):
 class Clip(Base):
     """Represents a generated clip from a job."""
     __tablename__ = "clips"
+
+    # One row per clip slot, enforced by the database instead of by whoever got
+    # there first. Without it a second worker on the same job re-creates the row
+    # (job 70: 214/232, 215/233, 216/234 - the same shorts published twice) or
+    # overwrites one (job 93: no index 0 at all, while clip_0/final_video.mp4
+    # sits on disk unpublished). An existing database that already holds
+    # duplicates cannot accept this index, so database.migrations creates it
+    # conditionally and only ever reports the violations.
+    __table_args__ = (
+        Index(CLIP_UNIQUE_INDEX, "job_id", "index", unique=True),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False)
@@ -119,6 +141,19 @@ class Clip(Base):
     # workers uploading the same video, and it is why the spacing survives a
     # restart: the clock is this column, not a dict in a process.
     publish_due_at = Column(DateTime, nullable=True)
+    # The release clock, and the only reason the schedule survives the PC being off.
+    # YouTube is handed this instant as status.publishAt when the clip is uploaded
+    # (private until then), so a clip that has already been uploaded publishes itself
+    # whether or not this machine is awake. The queue reads the latest value here to
+    # place the next one, exactly as it reads published_at for the upload clock.
+    scheduled_publish_at = Column(DateTime, nullable=True)
+    # The intent record. Written and committed before the file is handed to YouTube
+    # and cleared as soon as the outcome is known, so a process that dies in the
+    # window between the API returning a video id and the row being written leaves a
+    # row that says "an upload started here at this instant and nobody recorded what
+    # became of it" - which the queue stops on - instead of one that looks untouched
+    # and gets a second copy of the same clip uploaded.
+    publish_attempt_at = Column(DateTime, nullable=True)
 
     # The experiment record. A zero-view diagnostic job gives every clip of the
     # job a different hook style, but a style only means something next to the

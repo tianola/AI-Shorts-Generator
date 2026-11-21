@@ -38,10 +38,23 @@ def db():
 
 @pytest.fixture(autouse=True)
 def _one_hour_gap(monkeypatch):
+    """The queue mechanics, with the channel-hygiene guards switched off.
+
+    `test_publish_hygiene.py` owns the upload budget, the release window and the
+    same-source spread; leaving them inherited here would make these assertions
+    depend on the wall-clock hour. What this file pins is that the spacing lives in
+    the database and that one pass ships one clip.
+    """
     monkeypatch.setattr(settings, "UPLOAD_MIN_GAP_SECONDS", 3600, raising=False)
     monkeypatch.setattr(settings, "UPLOAD_GAP_JITTER_SECONDS", 0, raising=False)
     monkeypatch.setattr(settings, "PUBLISH_LIMIT_RETRY_HOURS", 6, raising=False)
     monkeypatch.setattr(settings, "PUBLISH_RETRY_MINUTES", 30, raising=False)
+    monkeypatch.setattr(settings, "UPLOAD_DAILY_BUDGET", 0, raising=False)
+    monkeypatch.setattr(settings, "PUBLISH_RELEASE_WINDOW_UTC", "", raising=False)
+    monkeypatch.setattr(settings, "PUBLISH_SAME_SOURCE_MIN_GAP_SECONDS", 0, raising=False)
+    monkeypatch.setattr(settings, "PUBLISH_SCHEDULE_GAP_SECONDS", 3600, raising=False)
+    monkeypatch.setattr(settings, "PUBLISH_SCHEDULE_LEAD_SECONDS", 900, raising=False)
+    monkeypatch.setattr(settings, "PUBLISH_UPLOAD_LEAD_SECONDS", 21600, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +93,8 @@ class _Recorder:
         self.fail_with = fail_with
 
     def __call__(self, *, video_path, title, description, hashtags, source_title,
-                 privacy_status, job_id):
+                 source_url=None, privacy_status, job_id, thumbnail_path=None,
+                 publish_at=None):
         self.calls.append(title)
         if self.fail_with:
             raise self.fail_with
@@ -117,11 +131,14 @@ def test_a_clip_already_waiting_keeps_its_place(db):
     assert clip.publish_due_at == first
 
 
-def test_parking_a_whole_job_staggers_its_clips_one_per_hour(db):
+def test_parking_a_whole_job_writes_its_schedule_into_the_database(db):
     """The schedule is readable in the database, not only implied by the guard.
 
-    Five clips rendered from one job get 0 h, 1 h, 2 h … so a person inspecting the
-    queue can see when each one is expected to leave.
+    Three clips rendered from one job get three release slots and an upload time
+    on the way to each, so a person inspecting the queue can see when each one
+    leaves and when each one is released. The upload used to be dated off the
+    machine's own clock — 0 h, 1 h, 2 h after this call — which spent a day of
+    YouTube's upload budget on clips the channel would not release for a week.
     """
     job = Job(youtube_url="https://youtu.be/x", status="completed", auto_upload=True)
     db.add(job)
@@ -133,8 +150,12 @@ def test_parking_a_whole_job_staggers_its_clips_one_per_hour(db):
     db.commit()
 
     assert worker.enqueue_clips_for_publish(db, job.id, now=now) == 3
-    dues = sorted(clip.publish_due_at for clip in db.query(Clip).filter_by(job_id=job.id))
-    assert dues == [now, now + timedelta(hours=1), now + timedelta(hours=2)]
+    rows = db.query(Clip).filter_by(job_id=job.id).order_by(Clip.index.asc()).all()
+    assert [r.scheduled_publish_at for r in rows] == [now + timedelta(minutes=15),
+                                                      now + timedelta(hours=1, minutes=15),
+                                                      now + timedelta(hours=2, minutes=15)]
+    for row in rows:
+        assert row.publish_due_at == row.scheduled_publish_at - timedelta(hours=6)
 
 
 # ------------------------------------------------------- the gap, read from disk
@@ -251,6 +272,23 @@ def test_two_workers_cannot_upload_the_same_clip(db):
                                          now=now) is False
 
 
+def test_a_clip_due_on_a_whole_second_is_still_claimable(db):
+    """The claim has to compare datetimes the way the column stores them.
+
+    A slot landing on an exact second is the normal case, not an edge: utcnow
+    happens to be microseconds=0 in a fraction of passes, and a release schedule
+    reads like 12:00 / 13:00. The raw UPDATE bound the datetime without the
+    column's type, so SQLite compared the stored '...00:00:00.000000' against
+    '...00:00:00' and matched nothing - the clip stayed queued forever and the
+    pass returned 0 with no error line anywhere.
+    """
+    now = datetime(2026, 10, 16, 12, 0, 0)
+    clip = _clip(db, due=now - timedelta(seconds=1))
+    assert clip.publish_due_at.microsecond == 0
+
+    assert worker.claim_clip_for_publish(db, clip.id, clip.publish_due_at, now=now) is True
+
+
 # ----------------------------------------------------------------- bookkeeping
 
 def test_success_clears_the_queue_row(db):
@@ -342,10 +380,11 @@ def test_the_completion_sweep_queues_rather_than_uploads(db, monkeypatch):
     assert clip.publish_due_at is not None
 
 
-def test_the_shipped_defaults_space_publishes_an_hour_apart():
+def test_the_shipped_retry_budget_defaults_are_what_the_queue_documents():
+    """The cadence defaults moved to test_scheduled_publish.py, where the release
+    clock lives; this one still pins how long a clip keeps trying."""
     from config import Settings
 
     fields = Settings.model_fields
-    assert fields["UPLOAD_MIN_GAP_SECONDS"].default == 3600
     assert fields["UPLOAD_GAP_JITTER_SECONDS"].default == 600
     assert fields["PUBLISH_LIMIT_RETRY_HOURS"].default == 6
