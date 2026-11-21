@@ -31,7 +31,7 @@ jobs:
           python -m pip install -r backend/requirements.txt -r backend/requirements-dev.txt
 
       - name: Syntax-check the frontend
-        run: node --check backend/static/app.js
+        run: for f in backend/static/js/*.js; do node --check "$f" || exit 1; done
 
       - name: Run backend tests
         run: python -m pytest -q --timeout=180
