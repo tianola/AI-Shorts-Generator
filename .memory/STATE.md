@@ -55,3 +55,19 @@
 - 2026-11-18 (uncommitted): Narrate + Live now tabs in the main page (`static/js/studios.js`, tabs Clips/Narrate/Live). Narrate finds footage itself from Pexels (`services/stock_footage.py`, key in .env; NOT YouTube/gameplay: copyright), captions use the script words timed by Whisper (`align_script_to_words`). Live: yt-dlp via `python -m yt_dlp`, video+audio HLS = 2 inputs, transcription decodes with ffmpeg (faster-whisper/PyAV `metadata_errors` bug). Real tests done: Narrate EUV/Wow-signal video with Zira voice (test_stock), Live on Al Jazeera English (3 auto clips). User wants English only. Tests 864.
 - Open: service needs restart (admin PowerShell) to load narrate/live fixes; live clips crop news graphics at the sides (face-follow), fit_blur would keep them.
 - 2026-11-18 evening: Live Studio takes `context` (stream title + user text), LLM names clips (title+description), keyword fallback only when the model fails; gaming layout detects small edge facecams. Uploaded to YouTube public (not queued): KjkRGUKDRPU, wL6JlAdVc0w (old weak titles/blur layout), OcpeoZIfPXA, yiGOKQegCWI (IShowSpeed GTA 6 live, qSyo5d-dVzA). GTA 6 official release 2026-11-19 (preload 11-12); stream says early access, unverified. Uncommitted.
+
+## Done 2026-11-21 (committed as 4f4dfb4 and 7fea202, not pushed)
+- 4f4dfb4: Narrate + Live tabs, Pexels stock footage, live context, edge facecam detection (the 2026-11-18 "uncommitted" items are now committed).
+- 7fea202: live clips use a fixed webcam panel on top (672 px) and cover-cropped gameplay below (1248 px) in 1080x1920. Webcam auto-detected per session: face boxes pooled on a 16:9 grid (16000x9000), locked when one corner has >=8 hits and >=80% of corner hits (`LiveSession._find_facecam`, `gaming_layout.pick_facecam`, `sample_faces`). Unlocked clips use their own box or `smart_crop_video`.
+- Live capture: yt-dlp format `bv*[height<=1080]+ba/b[height<=1080]/b` (was 720). Twitch channels accepted (`TWITCH_RE`). Concat encode adds `aresample=async=1:first_pts=0` (audio-delay fix, not confirmed by the user). Title overlay via `motion_title.add_motion_title` on live clips.
+- Verified on Speed and Kai (cam found, locked, layout correct). yt3 (TimTheTatman) never locks: static top-right graphic (~17 hits) beats the real top-left cam (10 hits); falls back to normal framing.
+- Tests: 868 passed, 1 skipped.
+
+## Pending (2026-11-21)
+- Services need restart (`Restart-Service ShortsBackend, ShortsWorker`, admin) before UI/worker use the 1080p and layout code. No live run since the change; no 1080p clip seen yet.
+- Live capture has no reconnect: capture died after ~32 min in the last multi-stream run. Needs auto-reconnect until the stream really ends.
+- Twitch ad breaks ("Commercial break in progress") get captured into clips. No filter.
+- yt3 webcam detection (static false face). Possible fix: ignore corners with static graphics or require the box to move with the face.
+- Audio delay: not reproduced by measurement; aresample fix unverified.
+- Weak titles already uploaded (e.g. "... moment" / 3-word titles). Edit only in YouTube Studio (OAuth scope lacks edit/delete).
+- Multi-stream relaunch (`storage/live_multi`, GAP=180 s uploads): not started; user chose commit only.
