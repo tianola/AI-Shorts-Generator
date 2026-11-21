@@ -58,3 +58,9 @@ def test_heuristic_title_uses_the_topic():
     hit = ls.heuristic_highlight("this is insane, no way! wow!! what?!", 0, 20, context="Some stream",
                                  topic="GTA 6")
     assert hit is not None and hit.title.startswith("GTA 6:")
+
+
+def test_live_capture_prefers_h264_video():
+    """AV1 video cannot go into the MPEG-TS buffer, so the capture asks for H.264 first."""
+    assert "avc1" in ls.LIVE_FORMAT
+    assert ls.LIVE_FORMAT.startswith("bv*[height<=1080][vcodec^=avc1]")

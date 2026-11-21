@@ -197,6 +197,11 @@ def validate_source(kind: str, url: str) -> Optional[str]:
     return "Source must be youtube, twitch, tiktok or obs"
 
 
+# H.264 first: yt-dlp can offer AV1 video, which the MPEG-TS buffer cannot hold, and the buffer then
+# records audio only. The first address is the video, the second the audio.
+LIVE_FORMAT = "bv*[height<=1080][vcodec^=avc1]+ba/bv*[height<=1080]+ba/b[height<=1080]/b"
+
+
 class LiveSession:
     def __init__(self, root: Path, kind: str, url: str, sensitivity: int = 5,
                  buffer_minutes: int = 10, auto_clip: bool = True, min_gap: float = 30.0,
@@ -249,7 +254,7 @@ class LiveSession:
         if self.kind == "obs":
             return ["-listen", "1", "-i", OBS_URL]
         out = subprocess.run([sys.executable, "-m", "yt_dlp", "-g", "--no-warnings",
-                              "-f", "bv*[height<=1080]+ba/b[height<=1080]/b", self.url],
+                              "-f", LIVE_FORMAT, self.url],
                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
         lines = [ln.strip() for ln in out.stdout.splitlines() if ln.startswith("http")]
         if out.returncode or not lines:
@@ -419,6 +424,11 @@ class LiveSession:
                                "-c:a", "aac", str(raw)], capture_output=True, text=True, encoding="utf-8", errors="replace")
         if proc.returncode:
             raise RuntimeError(f"ffmpeg concat failed: {proc.stderr[-300:]}")
+        probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
+                                "stream=codec_type", "-of", "csv=p=0", str(raw)],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if "video" not in probe.stdout:
+            raise RuntimeError("The buffer has no video for this moment (stream format not recorded)")
         try:
             done = False
             if self.facecam or self.layout in ("auto", "gaming"):

@@ -241,7 +241,7 @@ def test_a_youtube_live_with_separate_video_and_audio_gets_two_inputs(monkeypatc
     monkeypatch.setattr(live.subprocess, "run", fake_run)
     args = session._stream_url()
     assert args == ["-i", "https://v.example/video.m3u8", "-i", "https://a.example/audio.m3u8"]
-    assert "-m" in seen["cmd"] and "yt_dlp" in seen["cmd"] and "bv*[height<=1080]+ba/b[height<=1080]/b" in seen["cmd"]
+    assert "-m" in seen["cmd"] and "yt_dlp" in seen["cmd"] and live.LIVE_FORMAT in seen["cmd"]
 
 
 def test_a_refused_stream_reports_the_reason_not_a_wall_of_warnings(monkeypatch, tmp_path):
