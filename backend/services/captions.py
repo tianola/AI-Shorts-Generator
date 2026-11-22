@@ -216,18 +216,23 @@ for _emoji, _keywords in EMOJI_KEYWORD_MAP.items():
             _EMOJI_GREEK_STEMS.append((_folded[:-1], _emoji))
 
 
-def inject_emojis(word: str) -> str:
-    """Inject contextual emoji if word matches high-impact triggers."""
+def emoji_for(word: str) -> Optional[str]:
+    """The emoji a word calls for, or None. Matching ignores case and accents."""
     clean_w = _fold(word)
     if not clean_w:
-        return word
-
+        return None
     emoji = _EMOJI_EXACT.get(clean_w)
     if emoji is None and _is_greek(clean_w):
         for stem, candidate in _EMOJI_GREEK_STEMS:
             if clean_w.startswith(stem) and len(clean_w) <= len(stem) + 3:
                 emoji = candidate
                 break
+    return emoji
+
+
+def inject_emojis(word: str) -> str:
+    """Inject contextual emoji if word matches high-impact triggers."""
+    emoji = emoji_for(word)
     return f"{word} {emoji}" if emoji else word
 
 
@@ -389,12 +394,17 @@ def _caption_gaps(widths: List[float], space_w: float, style: CaptionPreset) -> 
 
 
 def _display_word(word: Dict, style: CaptionPreset) -> str:
-    """The text a caption word is drawn as (case, emoji), before ASS escaping."""
+    """The text a caption word is drawn as (case, emoji), before ASS escaping.
+
+    Emoji are written into the text only in 'text' mode. By default they are laid over the
+    video as colour PNG stickers (services/emoji_stickers), because libass draws an emoji
+    glyph as an empty box or a flat outline.
+    """
     raw_word = str(word.get("word", word.get("text", "")) or "").strip()
     if style.uppercase:
         from services.motion_title import _headline_upper
         raw_word = _headline_upper(raw_word)
-    if style.add_emojis:
+    if style.add_emojis and settings.CAPTION_EMOJI_MODE == "text":
         raw_word = inject_emojis(raw_word)
     return raw_word
 
@@ -437,7 +447,8 @@ def _block_fits(words: List[Dict], style: CaptionPreset) -> bool:
 
 def create_caption_block(
     words: List[Dict],
-    style: CaptionPreset = DEFAULT_STYLE
+    style: CaptionPreset = DEFAULT_STYLE,
+    stickers: Optional[List[Dict]] = None,
 ) -> str:
     """
     Create ASS caption dialogue lines for a phrase block with isolated word-by-word
@@ -504,6 +515,24 @@ def create_caption_block(
             w_end = max(cur_end, next_start)
         else:
             w_end = float(w_curr.get("end", w_curr.get("end_time", w_start + 0.2)))
+
+        # An emoji sticker for this word: above its right edge, shown while it is spoken.
+        # The caption text itself carries no emoji, so the layout above is unchanged.
+        if stickers is not None:
+            emoji = emoji_for(str(w_curr.get("word", w_curr.get("text", "")) or ""))
+            if emoji:
+                fs_px = _ass_font_size(style, fit)
+                size = max(60, min(150, round(fs_px * 0.85)))
+                half = size / 2.0 + 16.0
+                sticker_x = min(max(cx + widths[i] / 2.0, half), 1080.0 - half)
+                stickers.append({
+                    "emoji": emoji,
+                    "x": round(sticker_x, 1),
+                    "y": round(y_base - fs_px * 0.95, 1),
+                    "size": size,
+                    "start": round(w_start, 3),
+                    "end": round(min(block_end, w_start + max(w_end - w_start, 0.9)), 3),
+                })
 
         # 1. Inactive period BEFORE word is spoken (Layer 0, 100% scale, pure white bold)
         if w_start > block_start:
@@ -764,10 +793,18 @@ def create_captions(
 
     # Group words cleanly using natural phrasing (3-5 words default)
     word_groups = _group_words_by_natural_phrasing(clean_words, max_group_size=group_size, style=style)
+    from services import emoji_stickers
+
+    # Stickers are collected only when they can be drawn: the preset wants emoji, the mode is
+    # 'sticker' and an emoji font exists. Otherwise no emoji is drawn, never a box.
+    sticker_list = None
+    if style.add_emojis and settings.CAPTION_EMOJI_MODE == "sticker" and emoji_stickers.available():
+        sticker_list = []
+
     events = []
     for block in word_groups:
         if block:
-            events.append(create_caption_block(block, style))
+            events.append(create_caption_block(block, style, stickers=sticker_list))
 
     os.makedirs(os.path.dirname(output_ass) if os.path.dirname(output_ass) else ".", exist_ok=True)
 
@@ -775,6 +812,9 @@ def create_captions(
         f.write(generate_ass_header(style))
         for event in events:
             f.write(event)
+
+    # Always rewritten (or removed), so a rebuilt caption file never keeps an old sticker list.
+    emoji_stickers.write_sidecar(output_ass, sticker_list or [])
 
     job_info(0, f"ASS captions created with preset '{style.name}': {output_ass}")
     return output_ass

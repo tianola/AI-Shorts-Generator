@@ -49,10 +49,20 @@ def test_inject_apostrophe_keyword_matches():
 # =====================
 
 @pytest.mark.parametrize("preset_name", ["mrbeast", "hormozi"])
-def test_uppercase_preset_emojis_greek_accented_word(preset_name):
+def test_uppercase_preset_emojis_greek_accented_word(preset_name, monkeypatch):
+    from config import settings
+    monkeypatch.setattr(settings, "CAPTION_EMOJI_MODE", "text")
     style = PRESETS[preset_name]
     assert style.uppercase is True
     assert MONEY in _display_word({"word": "λεφτά"}, style)
+
+
+@pytest.mark.parametrize("preset_name", ["mrbeast", "hormozi"])
+def test_sticker_mode_keeps_the_caption_text_emoji_free_but_still_finds_the_emoji(preset_name):
+    from services.captions import emoji_for
+    style = PRESETS[preset_name]
+    assert MONEY not in _display_word({"word": "λεφτά"}, style)
+    assert emoji_for("ΛΕΦΤΑ") == MONEY
 
 
 def test_clean_box_preset_adds_no_emoji():

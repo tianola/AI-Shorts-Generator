@@ -310,14 +310,28 @@ def burn_captions(
     captions_escaped = captions_path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
     subtitle_filter = f"subtitles='{captions_escaped}'{_fontsdir_option()}"
 
+    # Colour emoji stickers listed next to the captions file are laid over the burned captions,
+    # the same as in the single-pass render, so a re-render does not lose them.
+    from services.emoji_stickers import build_overlay_graph, load_stickers
+    stickers = load_stickers(captions_path)
+    sticker_inputs: list = []
+    if stickers:
+        sticker_inputs, em_parts, last_label, _next = build_overlay_graph(stickers, 1, "[vsub]")
+        filter_complex = (
+            f"[0:v]{subtitle_filter}[vsub];" + ";".join(em_parts) + f";{last_label}format=yuv420p[vout]"
+        )
+        input_args = ["-i", video_path]
+        for item in sticker_inputs:
+            input_args += ["-loop", "1", "-i", item["path"]]
+        video_args = input_args + ["-filter_complex", filter_complex, "-map", "[vout]", "-map", "0:a?"]
+    else:
+        video_args = ["-i", video_path, "-vf", subtitle_filter, "-map", "0:v", "-map", "0:a?"]
+
     # FFmpeg command with settings from config
     cmd = [
         "ffmpeg",
         "-y",
-        "-i", video_path,
-        "-vf", subtitle_filter,
-        "-map", "0:v",
-        "-map", "0:a?",
+        *video_args,
         "-c:v", "libx264",
         "-fps_mode", "cfr",
         "-preset", settings.FFMPEG_PRESET,
@@ -390,6 +404,8 @@ def build_single_pass_filter(
     popup_position: str = "upper_third",
     popups: list = None,
     loudnorm_chain: str = "",
+    emoji_stickers: list = None,
+    title_center_frac: float = 0.58,
 ) -> tuple:
     """
     Construct an all-in-one FFmpeg filter_complex that combines all visual
@@ -465,6 +481,15 @@ def build_single_pass_filter(
         fc_parts.append(cur_v + "subtitles='" + cap_esc + "'" + _fontsdir_option() + "[vsub]")
         cur_v = "[vsub]"
 
+    # ---- Stage 2b: colour emoji stickers over the captions (optional) ----
+    # libass cannot draw colour emoji, so the caption code leaves them out of the
+    # text and lists them (services/emoji_stickers) for this stage to lay on top.
+    if emoji_stickers:
+        from services.emoji_stickers import build_overlay_graph
+        em_inputs, em_parts, cur_v, next_idx = build_overlay_graph(emoji_stickers, next_idx, cur_v)
+        extra_inputs.extend(em_inputs)
+        fc_parts.extend(em_parts)
+
     # ---- Stage 3: Contextual visual popup card overlay (optional) ----
     popup_list = []
     if popups:
@@ -516,9 +541,11 @@ def build_single_pass_filter(
             "+0.12*sin(clip(t/0.6,0,1)*PI)"
             "+0.015*sin(2*PI*t/2.4)"
         )
-        # Two-thirds down the frame, so the title sits over the gameplay and never over the
-        # webcam at the top. The small drop-in on entry is kept.
-        y_expr = "H*2/3+36*(1-clip(t/0.45,0,1))"
+        # The card is centred on title_center_frac of the frame height, so it grows and shrinks
+        # around that line. In the gaming layout that line is the seam between the webcam panel
+        # and the gameplay (the title used to sit lower and landed on top of the captions at
+        # y=1480). The small drop-in on entry is kept.
+        y_expr = f"H*{float(title_center_frac):.4f}-h/2+36*(1-clip(t/0.45,0,1))"
         # Inside '...' a comma is literal to the graph parser (this is the form
         # ffmpeg's own docs use for scale/select), so the quoted scale factors
         # must NOT be escaped — but the unquoted overlay y= must be.
@@ -615,6 +642,18 @@ def _run_ffmpeg_and_verify(
     return output_path
 
 
+def _title_center_frac(mode: str) -> float:
+    """Where the title card is centred, as a share of the frame height from the top.
+
+    Gaming layout: the seam between the webcam panel (top) and the gameplay, so the title
+    covers neither the face nor the captions near the bottom. Other layouts: above the captions.
+    """
+    if mode == "gaming":
+        from services.gaming_layout import PANEL_SPLIT
+        return 1.0 - PANEL_SPLIT
+    return 0.58
+
+
 def render_single_pass(
     input_video: str,
     start: float,
@@ -634,6 +673,7 @@ def render_single_pass(
     popup_position: str = "upper_third",
     popups: list = None,
     source_channel: str = None,
+    emoji_stickers: list = None,
 ) -> str:
     """
     Render a clip in a SINGLE ffmpeg pass (Task D).
@@ -653,13 +693,28 @@ def render_single_pass(
             from PIL import Image
             frame = render_title_frame(title_text, source_channel=source_channel)
             title_png = output_path + ".title.png"
-            Image.fromarray(frame, "RGBA").save(title_png)
+            title_img = Image.fromarray(frame, "RGBA")
+            # render_title_frame draws a card on a full 1080x1920 canvas. Cut it to the card so
+            # the overlay's position and size mean the card's, and it can be centred on a line.
+            box = title_img.getchannel("A").point(lambda v: 255 if v > 8 else 0).getbbox()
+            if box:
+                pad = 24
+                title_img = title_img.crop((
+                    max(0, box[0] - pad), max(0, box[1] - pad),
+                    min(title_img.width, box[2] + pad), min(title_img.height, box[3] + pad),
+                ))
+            title_img.save(title_png)
             job_info(0, "Rendered title PNG: " + title_png)
         except Exception as e:
             job_warning(0, "Title PNG render failed, skipping: " + str(e))
             title_png = None
 
     has_audio = _has_audio_stream(input_video)
+
+    # Emoji stickers come from the list next to the captions file unless the caller gave one.
+    if emoji_stickers is None and captions_path:
+        from services.emoji_stickers import load_stickers
+        emoji_stickers = load_stickers(captions_path)
 
     # Loudness pass 1, on exactly the window about to be rendered. Without it
     # consecutive clips cut from one source land anywhere from -23 to -17 LUFS
@@ -702,13 +757,15 @@ def render_single_pass(
             popup_position=popup_position,
             popups=popups,
             loudnorm_chain=loudnorm_chain,
+            emoji_stickers=emoji_stickers,
+            title_center_frac=_title_center_frac(mode),
         )
 
     # Build ffmpeg command: 0 = main video, then extra inputs
     cmd = ["ffmpeg", "-y", "-ss", str(start), "-t", str(end - start), "-i", input_video]
     for ei in extra:
-        # Loop PNG / popup image inputs
-        if ei.get("kind") in ("png", "popup"):
+        # Loop PNG / popup / emoji image inputs
+        if ei.get("kind") in ("png", "popup", "emoji"):
             cmd += ["-loop", "1"]
         cmd += ["-i", ei["path"]]
 

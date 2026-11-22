@@ -211,6 +211,17 @@ class Settings(BaseSettings):
         description="Max words per caption burst. Three large words read at a glance; "
                     "five had to be set small to fit the frame."
     )
+    CAPTION_EMOJI_MODE: str = Field(
+        default="sticker",
+        description="How caption emoji are drawn. 'sticker' lays a colour PNG over the video "
+                    "(libass cannot draw colour emoji); 'text' writes the emoji into the "
+                    "subtitle text (shows as a box or flat shape); 'off' draws none."
+    )
+    EMOJI_FONT_PATH: Optional[str] = Field(
+        default=None,
+        description="Colour emoji font used to make the stickers. Empty: look for Segoe UI Emoji "
+                    "(Windows) or Noto Color Emoji (Linux)."
+    )
 
     # ====================
     # VERTICAL CONVERSION
