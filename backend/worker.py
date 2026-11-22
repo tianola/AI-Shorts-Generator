@@ -364,7 +364,8 @@ def _clear_derived_artifacts(job_dir, job_id):
 # toward it: pruning it would delete the only file matching the row's
 # trim_start/trim_end, and the next resume would repoint the row at the long cut.
 RENDER_KEEP_NAMES = ("final_video.mp4", clip_trim.TRIMMED_ARTIFACT_NAME,
-                     "thumbnail.jpg", "metadata.json", "storyboard.jpg", "words.json")
+                     "thumbnail.jpg", "metadata.json", "storyboard.jpg", "words.json",
+                     "final_plain.mp4")
 
 
 def _prune_render_intermediates(clip_dir) -> None:
@@ -1224,6 +1225,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # ---- Render: single-pass unified OR sequential fallback ----
         _used_single_pass = False
         _sfx_events = None
+        _main_graph = None
         if getattr(settings, "SINGLE_PASS_RENDER", False):
             try:
                 from services.vertical import build_vertical_filter
@@ -1253,14 +1255,10 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                 _title = final_title or derive_title_from_text(clip_transcript)
                 # short_path is already cut from clip_start to clip_end, so relative duration is 0..duration
                 clip_dur = max(0.1, clip_end - clip_start)
-                _rsp(
-                    short_path, 0.0, clip_dur, final_path,
+                _rsp_args = dict(
                     vertical_frag=vertical_frag,
                     captions_path=captions_path,
                     title_text=_title,
-                    sfx_files=None if _sfx_events is not None else (sfx_files or None),
-                    sfx_timestamps=None if _sfx_events is not None else (sfx_ts or None),
-                    sfx_events=_sfx_events,
                     mode=resolved_layout,
                     smart_blur_frag=smart_blur_frag,
                     popup_png=popup_png,
@@ -1268,10 +1266,30 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                     popup_duration=popup_duration,
                     popup_position="game_top" if resolved_layout == "gaming" else popup_position,
                     source_channel=source_channel,
+                )
+                _rsp(
+                    short_path, 0.0, clip_dur, final_path,
+                    sfx_files=None if _sfx_events is not None else (sfx_files or None),
+                    sfx_timestamps=None if _sfx_events is not None else (sfx_ts or None),
+                    sfx_events=_sfx_events,
                     effects=[t.model_dump() for t in _timeline.visual_tracks] if _timeline else None,
+                    **_rsp_args,
                 )
                 _used_single_pass = True
+                from services import render as _rm_graph
+                _main_graph = _rm_graph.last_filtergraph()
                 job_info(job_id, f"Single-pass render complete: {final_path}")
+
+                # A plain copy of the same clip (no effects, no sound design, no emoji stickers) to
+                # set beside the finished one in the studio and to check the effects against.
+                if getattr(settings, "RENDER_PLAIN_PREVIEW", False):
+                    try:
+                        _rsp(short_path, 0.0, clip_dur, os.path.join(str(clip_dir), "final_plain.mp4"),
+                             sfx_files=None, sfx_timestamps=None, sfx_events=None, effects=None,
+                             emoji_stickers=[], **_rsp_args)
+                        job_info(job_id, f"Plain preview rendered for Clip #{index + 1}")
+                    except Exception as _pl_err:
+                        job_warning(job_id, f"Plain preview failed for Clip #{index + 1}: {_pl_err}")
             except Exception as e:
                 job_warning(job_id, f"Single-pass render failed ({e}); falling back to sequential")
 
@@ -1478,7 +1496,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                 sticker_paths=_sticker_files,
                 sfx_paths=[e["path"] for e in (_sfx_events or [])],
                 font_paths=[os.path.join(_FONTS_DIR, "Montserrat-ExtraBold.ttf")],
-                filtergraph=_render_mod.last_filtergraph() if _used_single_pass else None,
+                filtergraph=_main_graph if _used_single_pass else None,
                 expect_audio=True,
                 speed=_ANTIFP_PARAMS["speed"] if _antifp_applied else 1.0,
                 anti_fingerprint=dict(_ANTIFP_PARAMS, applied=_antifp_applied),

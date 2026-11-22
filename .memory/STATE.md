@@ -78,3 +78,23 @@
 - Titles: `LiveSession(topic=...)` -> `llm_highlight`/`heuristic_highlight` keep the topic in every title (`_keep_topic`). Multi-live script uses topic "GTA 6" and no hardcoded cam.
 - Tests: 874 passed, 1 skipped (new `tests/test_facecam_finder_and_titles.py`). One real LLM spot-check: "GTA 6 Stolen Car Chase Ends in Water".
 - Limitation: Tim's webcam is ~320 px wide in the source, so the zoomed panel is soft at 1080.
+
+## Done 2026-11-22 (branch `editing-intelligence`, not pushed; details in `docs/EDITING_INTELLIGENCE.md`)
+- Also earlier on the branch: LLM health indicator + readable job errors (fd9ddac), titles <= 40 chars with complete-phrase fallback, job 117 requeued.
+- Phase 0 360fe97: Greek emoji match + somber gate, `tone_category` stored. Phase 1 0baf165: colour emoji stickers, title centred on webcam seam. Phase 2 92e27d4: `services/editing/` timeline + profiles + planner. Phase 3 c06283e: zoom/shake/flash/tint. Phase 4 916f321: sound design + sidechain on SFX bus. Phase 5 a40405a: caption motions, popup clears webcam. Phase 6 3bbd981: technical quality evaluator, render manifest + fingerprint, publish gate on `failed`. Phase 7 1fb03ee: title claim check, advisory editorial evaluator (off by default, paid).
+- New DB columns on Clip: `tone_category`, `edit_profile`, `quality_report`, `render_manifest`, `render_fingerprint`. New endpoints: `GET /clips/{id}/quality`, (uncommitted) `GET /clips/{id}/edit`, `POST /clips/{id}/ab-check`.
+- Tests at Phase 7 commit: 1178 passed, 1 skipped.
+- Phase 9 uncommitted: visual regression (`services/visual_regression.py`, golden scene in `tests/visual/`), A/B effect check (`services/editing/ab.py`), plain preview render (`RENDER_PLAIN_PREVIEW`, default off), `api/editing.py`, `static/js/timeline_view.js` (unreviewed, unwired). Real 12 s render: all four effects detected as visible by the A/B check.
+
+## Pending 2026-11-22
+- Finish Phase 9: review + wire `timeline_view.js`, tests `test_ab_check.py`/`test_editing_api.py`, browser check, full suite, commit.
+- Restart services, run one real job, review clips; decide on `RENDER_PLAIN_PREVIEW` / `EDITORIAL_EVALUATOR_ENABLED`.
+- Re-render parity (`_rerender_media`), caption style precedence, anti-fingerprint study, true peak -0.04 dBTP, `reproduce_render.py`, editorial calibration, Phase 8 music, project skills, SFX provenance for the 31 old files, push + PR.
+
+## Done 2026-11-22 (Phase 9 finished; uncommitted, waiting for approval)
+- Work lives in the recovery worktree `claude/editing-intelligence-recovery-925a80`: fast-forwarded to `1fb03ee`, Phase 9 applied on top. The main checkout still holds its older uncommitted Phase 9 copy; do not commit from it without reconciling.
+- `static/js/timeline_view.js` reviewed (textContent only, no change needed), wired: `#studioEditDetails` / `#studioEditPanel` in `templates/index.html`, lazy load in `studio.js`, `.edit-*` CSS in `styles.css`.
+- Tests: `tests/test_ab_check.py` (16) and `tests/test_editing_api.py` (16). Full backend suite: **1226 passed, 3 skipped, 0 failed** (baseline 1178 + 1 skipped, plus 50 new = 1229).
+- Two suite failures fixed: `test_burned_in_title` now reads the `_rsp_args` block; `/media` guard checks only the path inside `STORAGE_ROOT` (the worktree lives under `.claude\`, which blocked every media file).
+- Browser check on an isolated scratch DB/storage (backend on port 5055, two synthetic clips, live watcher off): panel renders; "Check effects" runs real ffmpeg (control SSIM 0.999 / PSNR 55; red-box effect visible); timeline-only clip shows "Quality not checked" and no compare block; Style/Cut/AI tabs and Publish unaffected; no console errors.
+- Not done: production validation (services not restarted, no real job with `RENDER_PLAIN_PREVIEW`), playback-sync check of the Before/After transport, Phase 8, and the rest of the list above.

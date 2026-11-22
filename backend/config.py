@@ -245,6 +245,13 @@ class Settings(BaseSettings):
         description="Claude model id for the editorial evaluator"
     )
 
+    RENDER_PLAIN_PREVIEW: bool = Field(
+        default=False,
+        description="Also render a plain copy of each clip (no effects, sound design or emoji stickers) "
+                    "next to the finished one, for the studio's side-by-side view and the check that "
+                    "every planned effect shows up. Adds one extra single-pass render per clip."
+    )
+
     # ====================
     # EDITING EFFECTS
     # ====================

@@ -1,0 +1,21 @@
+{
+  "label": "synthetic scene",
+  "frames": [
+    {
+      "time": 0.5,
+      "file": "frame_0.png"
+    },
+    {
+      "time": 1.6,
+      "file": "frame_1.png"
+    },
+    {
+      "time": 2.7,
+      "file": "frame_2.png"
+    },
+    {
+      "time": 3.5,
+      "file": "frame_3.png"
+    }
+  ]
+}

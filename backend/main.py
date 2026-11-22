@@ -21,6 +21,7 @@ from api.live import router as live_router
 from api.narrate import router as narrate_router
 from api.clips import router as clips_router
 from api.features import router as features_router
+from api.editing import router as editing_router
 from api.jobs import router as jobs_router
 from api.realtime import router as realtime_router
 from api.system import router as system_router
@@ -83,6 +84,7 @@ app.include_router(clips_router, prefix="/api")
 app.include_router(system_router, prefix="/api")
 app.include_router(realtime_router, prefix="/api")
 app.include_router(features_router, prefix="/api")
+app.include_router(editing_router, prefix="/api")
 app.include_router(youtube_router, prefix="/api")
 app.include_router(publish_queue_router, prefix="/api")
 app.include_router(llm_health_router, prefix="/api")
@@ -109,9 +111,12 @@ async def media_proxy(file_path: str):
     if safe_root not in safe_path.parents and safe_path != safe_root:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    # Disallow access to secrets, database files, and sensitive extensions
-    normalized_path = str(safe_path).replace("\\", "/").lower()
-    if "/secrets/" in normalized_path or any(part.startswith(".") for part in safe_path.parts):
+    # Disallow access to secrets, database files, and sensitive extensions. Only the part inside
+    # the storage root is checked: a dot-folder above it (for example a git worktree under
+    # ".claude") must not block every media file.
+    relative = safe_path.relative_to(safe_root)
+    normalized_path = "/" + relative.as_posix().lower() + "/"
+    if "/secrets/" in normalized_path or any(part.startswith(".") for part in relative.parts):
         raise HTTPException(status_code=403, detail="Access to sensitive resources is forbidden")
 
     ext = safe_path.suffix.lower()
