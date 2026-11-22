@@ -40,6 +40,8 @@ class Finding(BaseModel):
     timestamp_clip: Optional[float] = None    # seconds in the cut clip, before any speed change
     timestamp_final: Optional[float] = None   # seconds in the shipped file
     evaluator_version: str = "technical-1"
+    stable: Optional[bool] = None             # editorial only: seen in at least two of the repeat runs
+    runs_seen: int = 0                        # editorial only: how many runs reported it
 
 
 class QualityReport(BaseModel):

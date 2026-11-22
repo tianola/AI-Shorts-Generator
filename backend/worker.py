@@ -1188,6 +1188,22 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         )
         final_title = metadata.get("title") or clip.get("title") or ""
 
+        # ---- Does the clip back up its title? ----
+        # A claim the clip does not make is replaced by the clip's own words before it is burned in.
+        _title_check = None
+        if getattr(settings, "TITLE_CLAIM_CHECK_ENABLED", False) and final_title:
+            try:
+                from services.title_claims import resolve_title
+                final_title, _title_check = await resolve_title(final_title, clip_transcript)
+                if _title_check and _title_check.get("replaced"):
+                    job_warning(job_id, f"Title replaced for Clip #{index + 1}: "
+                                        f"{'; '.join(_title_check['reasons'])} "
+                                        f"('{_title_check['original_title']}' -> '{final_title}')")
+                elif _title_check and not _title_check.get("checked"):
+                    job_info(job_id, f"Title claim check did not run for Clip #{index + 1}; title kept")
+            except Exception as _tc_err:
+                job_warning(job_id, f"Title claim check skipped for Clip #{index + 1}: {_tc_err}")
+
         # ---- Editing timeline: what happens when, and which edits it earns ----
         # Planned and saved (edit_timeline.json) here; the renderers read it. A failure leaves
         # the clip rendering as it always did.
@@ -1480,6 +1496,38 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                 job_info(job_id, f"Quality check for Clip #{index + 1}: {_qstatus}")
         except Exception as _qa_err:
             job_warning(job_id, f"Quality check skipped for Clip #{index + 1}: {_qa_err}")
+
+        # ---- Editorial review (optional, paid, advisory) ----
+        # Frames of the shipped file go to Claude; what it sees is stored beside the technical
+        # report and never changes the clip's status.
+        if getattr(settings, "EDITORIAL_EVALUATOR_ENABLED", False) and isinstance(clip.get("quality_report"), dict):
+            try:
+                from services.claude_client import claude_available
+                if claude_available():
+                    from services.quality.editorial import describe_edits, evaluate_editorial
+                    _ed = await evaluate_editorial(
+                        final_path, str(clip_dir),
+                        duration=max(0.1, (clip_end - clip_start) / (_ANTIFP_PARAMS["speed"] if _antifp_applied else 1.0)),
+                        title=final_title, tone=clip.get("tone_category") or "",
+                        edits=describe_edits(os.path.join(str(clip_dir), "edit_timeline.json")),
+                        transcript=clip_transcript,
+                        runs=settings.EDITORIAL_RUNS, frame_count=settings.EDITORIAL_FRAME_COUNT,
+                    )
+                    if _ed:
+                        clip["quality_report"]["editorial"] = _ed
+                        _stable = [f for f in _ed["findings"] if f.get("stable")]
+                        for _f in _stable:
+                            job_warning(job_id, f"Editorial (advisory) clip {index + 1} "
+                                                f"@{_f.get('timestamp_final')}s: {_f['issue']}")
+                        job_info(job_id, f"Editorial review for Clip #{index + 1}: {len(_ed['findings'])} "
+                                         f"finding(s), {len(_stable)} stable, agreement {_ed['agreement_rate']}")
+                else:
+                    job_info(job_id, "Editorial review skipped: no ANTHROPIC_API_KEY")
+            except Exception as _ed_err:
+                job_warning(job_id, f"Editorial review skipped for Clip #{index + 1}: {_ed_err}")
+
+        if _title_check and isinstance(clip.get("quality_report"), dict):
+            clip["quality_report"]["title_check"] = _title_check
 
         # =====================
         # 5h. SAVE CLIP TO DB

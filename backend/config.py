@@ -224,6 +224,28 @@ class Settings(BaseSettings):
     )
 
     # ====================
+    # TITLE HONESTY AND EDITORIAL REVIEW
+    # ====================
+    TITLE_CLAIM_CHECK_ENABLED: bool = Field(
+        default=True,
+        description="Before a title is burned in, ask the model whether each claim in it is backed "
+                    "by what the clip says (one short call on the free chain). A title with an "
+                    "unsupported claim is replaced by the clip's own words. A failed call keeps the title."
+    )
+    EDITORIAL_EVALUATOR_ENABLED: bool = Field(
+        default=False,
+        description="After the technical check, send fixed frames of the finished clip to Claude and "
+                    "record what it observes (advisory only, never blocks a clip). Needs "
+                    "ANTHROPIC_API_KEY and costs one paid call per run, EDITORIAL_RUNS runs per clip."
+    )
+    EDITORIAL_RUNS: int = Field(default=3, ge=1, le=5, description="Repeat runs on the same frames; a finding is stable when seen in at least two.")
+    EDITORIAL_FRAME_COUNT: int = Field(default=5, ge=3, le=8, description="Frames sent to the editorial evaluator.")
+    CLAUDE_EDITORIAL_MODEL: str = Field(
+        default="claude-sonnet-5-5",
+        description="Claude model id for the editorial evaluator"
+    )
+
+    # ====================
     # EDITING EFFECTS
     # ====================
     EFFECTS_ENABLED: bool = Field(

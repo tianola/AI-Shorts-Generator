@@ -25,6 +25,56 @@ def claude_available() -> bool:
     return bool((settings.ANTHROPIC_API_KEY or "").strip())
 
 
+async def call_claude_vision_json(
+    prompt: str,
+    system: str,
+    schema: dict,
+    image_paths: list,
+    model: Optional[str] = None,
+    max_tokens: int = 4000,
+) -> str:
+    """Like call_claude_json, with JPEG frames attached to the prompt, each preceded by its label.
+
+    `image_paths` is a list of (label, path). Used by the editorial evaluator, which sends fixed
+    frames of a finished clip. Raises on transport errors, a refusal or a reply cut at max_tokens.
+    """
+    import base64
+
+    import anthropic
+
+    content = []
+    for label, path in image_paths:
+        with open(path, "rb") as handle:
+            data = base64.standard_b64encode(handle.read()).decode("ascii")
+        content.append({"type": "text", "text": label})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}})
+    content.append({"type": "text", "text": prompt})
+
+    client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    target_model = model or settings.CLAUDE_EDITORIAL_MODEL
+    async with client.beta.messages.stream(
+        model=target_model,
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": content}],
+        output_config={"effort": "medium", "format": {"type": "json_schema", "schema": schema}},
+        betas=[_FALLBACK_BETA],
+        fallbacks="default",
+    ) as stream:
+        message = await stream.get_final_message()
+
+    if message.stop_reason == "refusal":
+        raise RuntimeError(f"Claude declined the request (model '{target_model}')")
+    if message.stop_reason == "max_tokens":
+        raise RuntimeError(f"Claude reply was cut at max_tokens={max_tokens}")
+    text = next((b.text for b in message.content if b.type == "text"), "")
+    if not text.strip():
+        raise RuntimeError("Claude returned no text block")
+    logger.info(f"Successfully called Claude vision model '{message.model}' "
+                f"(in={message.usage.input_tokens}, out={message.usage.output_tokens})")
+    return text
+
+
 async def call_claude_json(
     prompt: str,
     system: str,
