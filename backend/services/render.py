@@ -405,7 +405,7 @@ def build_single_pass_filter(
     popups: list = None,
     loudnorm_chain: str = "",
     emoji_stickers: list = None,
-    title_center_frac: float = 0.58,
+    title_center_frac: float = 0.3333,
     effects_frag: str = None,
     sfx_events: list = None,
     sidechain: dict = None,
@@ -711,12 +711,13 @@ def _title_center_frac(mode: str) -> float:
     """Where the title card is centred, as a share of the frame height from the top.
 
     Gaming layout: the seam between the webcam panel (top) and the gameplay, so the title
-    covers neither the face nor the captions near the bottom. Other layouts: above the captions.
+    covers neither the face nor the captions near the bottom. Other layouts: two-thirds of the
+    way up from the bottom of the frame (one third from the top), clear of the captions.
     """
     if mode == "gaming":
         from services.gaming_layout import PANEL_SPLIT
         return 1.0 - PANEL_SPLIT
-    return 0.58
+    return 0.3333
 
 
 def render_single_pass(

@@ -858,6 +858,7 @@ input:focus, select:focus {
 .studio-manual summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; padding: 6px 0; }
 .file-btn { cursor: pointer; display: inline-block; }
 .pq-list { display: flex; flex-direction: column; gap: 8px; }
+.pq-toggle { width: 100%; margin-top: 2px; }
 .pq-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 12px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid var(--line); }
 .pq-pos { min-width: 28px; height: 28px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.08); font-size: 0.8rem; }
 .pq-info { flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }

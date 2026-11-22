@@ -207,7 +207,7 @@ def test_title_center_frac_per_mode():
 
     assert _title_center_frac("gaming") == pytest.approx(1.0 - gaming_layout.PANEL_SPLIT)
     assert _title_center_frac("gaming") == pytest.approx(0.35)
-    assert _title_center_frac("single_speaker") == 0.58
+    assert _title_center_frac("single_speaker") == 0.3333
 
 
 def test_title_overlay_y_follows_center_frac():
@@ -222,7 +222,7 @@ def test_title_overlay_y_follows_center_frac():
     _assert_valid(fc, "title overlay at gaming centre")
 
     _, fc_default, _, _ = build_single_pass_filter(STATIC_VERTICAL, title_png="x.png")
-    assert "H*0.5800-h/2" in fc_default
+    assert "H*0.3333-h/2" in fc_default
 
 
 # ---------------------------------------------------------------------------
