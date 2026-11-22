@@ -372,7 +372,8 @@ def _prune_render_intermediates(clip_dir) -> None:
     for entry in os.listdir(str(clip_dir)):
         if entry in RENDER_KEEP_NAMES:
             continue
-        if entry.endswith(".mp4") or entry.endswith(".ass") or entry.endswith(".wav"):
+        if (entry.endswith(".mp4") or entry.endswith(".ass") or entry.endswith(".wav")
+                or entry.endswith(".emoji.json")):
             try:
                 os.remove(os.path.join(str(clip_dir), entry))
             except OSError:
@@ -1169,6 +1170,23 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         )
         final_title = metadata.get("title") or clip.get("title") or ""
 
+        # ---- Editing timeline: what happens when, and which edits it earns ----
+        # Planned and saved (edit_timeline.json) here; the renderers read it. A failure leaves
+        # the clip rendering as it always did.
+        from services.editing.bridge import plan_clip_edits
+        _timeline = plan_clip_edits(
+            str(clip_dir), clip_words_file, max(0.1, clip_end - clip_start),
+            tone=clip.get("tone_category") or "",
+            clip_media=short_path,
+            popup_starts=[popup_start],
+            temporal_events_file=os.path.join(str(job_dir), "temporal_events.json") if job_dir else None,
+            clip_start=clip_start,
+            emotional_intensity=clip.get("emotional_intensity"),
+            log=lambda line: job_info(job_id, f"Edit plan: {line}"),
+        )
+        if _timeline is not None:
+            clip["edit_profile"] = _timeline.profile
+
         # ---- Render: single-pass unified OR sequential fallback ----
         _used_single_pass = False
         if getattr(settings, "SINGLE_PASS_RENDER", False):
@@ -1428,6 +1446,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             "caption_style": caption_style,
             "layout_mode": resolved_layout,
             "tone_category": clip.get("tone_category"),
+            "edit_profile": clip.get("edit_profile"),
         })
         clip_id = clip_db.id
 
