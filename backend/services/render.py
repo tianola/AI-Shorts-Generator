@@ -407,6 +407,8 @@ def build_single_pass_filter(
     emoji_stickers: list = None,
     title_center_frac: float = 0.58,
     effects_frag: str = None,
+    sfx_events: list = None,
+    sidechain: dict = None,
 ) -> tuple:
     """
     Construct an all-in-one FFmpeg filter_complex that combines all visual
@@ -574,7 +576,43 @@ def build_single_pass_filter(
     if has_audio:
         # `tail` is where the audio graph currently ends; stage 5 reads from it.
         tail = "[0:a]"
-        if sfx_files:
+        sfx_events = [e for e in (sfx_events or []) if os.path.exists(e.get("path", ""))]
+        if sfx_events:
+            # Sound design from the edit timeline: each effect has its own level and start. The
+            # voice branch is untouched (unity gain). With the sidechain on, the voice also keys a
+            # compressor on the SFX bus only, so effects dip while someone speaks and return in the
+            # gaps; the voice is never compressed or ducked itself.
+            fc_parts.append("[0:a]aformat=sample_rates=48000:channel_layouts=stereo,volume=1.0[orig]")
+            labels = []
+            for i, event in enumerate(sfx_events):
+                sfx_idx = next_idx
+                next_idx += 1
+                extra_inputs.append({"path": event["path"], "kind": "sfx"})
+                delay_ms = max(0, int(round(float(event["start"]) * 1000)))
+                label = "sfx" + str(i)
+                fc_parts.append(
+                    "[" + str(sfx_idx) + ":a]aformat=sample_rates=48000:channel_layouts=stereo,adelay="
+                    + str(delay_ms) + "|" + str(delay_ms) + ",volume=" + f"{float(event['gain_db']):.1f}" + "dB[" + label + "]"
+                )
+                labels.append("[" + label + "]")
+            if len(labels) > 1:
+                fc_parts.append("".join(labels) + "amix=inputs=" + str(len(labels))
+                                + ":duration=longest:dropout_transition=0:normalize=0[sfxbus]")
+            else:
+                fc_parts.append(labels[0] + "anull[sfxbus]")
+            if sidechain:
+                fc_parts.append("[orig]asplit=2[vmix][vkey]")
+                fc_parts.append(
+                    "[sfxbus][vkey]sidechaincompress=threshold=" + str(sidechain["threshold"])
+                    + ":ratio=" + str(sidechain["ratio"]) + ":attack=" + str(sidechain["attack_ms"])
+                    + ":release=" + str(sidechain["release_ms"]) + ":makeup=1:knee=2.8[sfxduck]"
+                )
+                mix_in = "[vmix][sfxduck]"
+            else:
+                mix_in = "[orig][sfxbus]"
+            tail = "[apre]" if loudnorm_chain else "[aout]"
+            fc_parts.append(mix_in + "amix=inputs=2:duration=first:dropout_transition=0:normalize=0" + tail)
+        elif sfx_files:
             sfx_files = list(sfx_files)
             sfx_timestamps = list(sfx_timestamps or [])
             fc_parts.append("[0:a]volume=1.0[orig]")
@@ -649,6 +687,18 @@ def _run_ffmpeg_and_verify(
     return output_path
 
 
+def _sidechain_settings() -> dict:
+    """The compressor settings for ducking effects under the voice, or None when it is switched off."""
+    if not settings.SFX_SIDECHAIN_ENABLED:
+        return None
+    return {
+        "threshold": settings.SFX_DUCK_THRESHOLD,
+        "ratio": settings.SFX_DUCK_RATIO,
+        "attack_ms": settings.SFX_DUCK_ATTACK_MS,
+        "release_ms": settings.SFX_DUCK_RELEASE_MS,
+    }
+
+
 def _title_center_frac(mode: str) -> float:
     """Where the title card is centred, as a share of the frame height from the top.
 
@@ -682,6 +732,7 @@ def render_single_pass(
     source_channel: str = None,
     emoji_stickers: list = None,
     effects: list = None,
+    sfx_events: list = None,
 ) -> str:
     """
     Render a clip in a SINGLE ffmpeg pass (Task D).
@@ -775,6 +826,8 @@ def render_single_pass(
             emoji_stickers=emoji_stickers,
             title_center_frac=_title_center_frac(mode),
             effects_frag=effects_frag,
+            sfx_events=sfx_events,
+            sidechain=_sidechain_settings() if sfx_events else None,
         )
 
     # Build ffmpeg command: 0 = main video, then extra inputs

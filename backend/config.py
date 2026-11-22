@@ -231,6 +231,24 @@ class Settings(BaseSettings):
         description="Apply the visual effects planned in each clip's edit timeline (zoom punch, "
                     "camera shake, flash, red tint). Off renders clips plain."
     )
+    SOUND_DESIGN_ENABLED: bool = Field(
+        default=True,
+        description="Place sound effects from the clip's edit timeline (hook whoosh, impacts on "
+                    "peaks, pops on popups). Off keeps the older keyword-and-fixed-time picks."
+    )
+    SFX_SIDECHAIN_ENABLED: bool = Field(
+        default=True,
+        description="Duck the sound effects under the voice with a sidechain compressor on the SFX "
+                    "bus only. The voice itself is never compressed or lowered."
+    )
+    SFX_DUCK_THRESHOLD: float = Field(default=0.02, ge=0.001, le=1.0,
+        description="Voice level (linear, 1.0 = full scale) above which the effects are ducked.")
+    SFX_DUCK_RATIO: float = Field(default=6.0, ge=1.0, le=20.0,
+        description="How hard the effects are ducked once the voice passes the threshold.")
+    SFX_DUCK_ATTACK_MS: float = Field(default=8.0, ge=0.01, le=2000.0,
+        description="How fast the effects duck when speech starts.")
+    SFX_DUCK_RELEASE_MS: float = Field(default=250.0, ge=0.01, le=9000.0,
+        description="How slowly the effects come back after speech stops.")
     EFFECTS_DISABLED_KINDS: str = Field(
         default="",
         description="Comma list of effect kinds to leave out even when planned, e.g. 'flash,tint_red'."

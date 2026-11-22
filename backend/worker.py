@@ -1205,6 +1205,17 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                     if p:
                         sfx_files.append(p)
                         sfx_ts.append(0.3 if len(sfx_files) == 1 else max(1.5, (clip_end - clip_start) / 2.0))
+                # Sound design from the edit timeline replaces the keyword picks above: which sound,
+                # when, and how loud come from the plan, moved into gaps between words. A timeline
+                # that earns no sound (documentary, somber) therefore means no sound, not a default.
+                _sfx_events = None
+                if settings.SOUND_DESIGN_ENABLED and _timeline is not None:
+                    from services.editing.bridge import _load_words
+                    from services.editing.sound import plan_sound_events
+                    _sfx_events = plan_sound_events(_timeline, _load_words(clip_words_file), _find_sfx_file)
+                    for _ev in _sfx_events:
+                        job_info(job_id, f"Sound plan: {_ev['start']:.2f}s {_ev['kind']} "
+                                         f"{_ev['gain_db']:+.1f} dB {_ev['note']}".rstrip())
                 _title = final_title or derive_title_from_text(clip_transcript)
                 # short_path is already cut from clip_start to clip_end, so relative duration is 0..duration
                 clip_dur = max(0.1, clip_end - clip_start)
@@ -1213,8 +1224,9 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                     vertical_frag=vertical_frag,
                     captions_path=captions_path,
                     title_text=_title,
-                    sfx_files=sfx_files or None,
-                    sfx_timestamps=sfx_ts or None,
+                    sfx_files=None if _sfx_events is not None else (sfx_files or None),
+                    sfx_timestamps=None if _sfx_events is not None else (sfx_ts or None),
+                    sfx_events=_sfx_events,
                     mode=resolved_layout,
                     smart_blur_frag=smart_blur_frag,
                     popup_png=popup_png,
@@ -1317,7 +1329,13 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # 5g. ADD AUTOMATIC SFX (skip in single-pass mode; already mixed)
         # =====================
         sfx_path = os.path.join(str(clip_dir), "final_with_sfx.mp4")
-        if not _skip_title_sfx:
+        # The edit plan said this clip earns no sound (documentary, somber): honour it on the
+        # fallback path too, instead of laying the old keyword-picked effects over it.
+        _plan_says_silent = (settings.SOUND_DESIGN_ENABLED and _timeline is not None
+                             and not _timeline.audio_tracks)
+        if not _skip_title_sfx and _plan_says_silent:
+            job_info(job_id, "Skipping automatic SFX: the edit plan earns no sound for this clip")
+        elif not _skip_title_sfx:
             try:
                 clip_transcript = get_clip_transcript(words_file, clip_start, clip_end)
                 add_automatic_sfx(
