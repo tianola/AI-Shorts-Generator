@@ -8,6 +8,7 @@ import instructor
 from openai import AsyncOpenAI
 
 from config import settings
+from services import llm_health
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -213,6 +214,7 @@ async def call_llm_json(
 				}
 
 				for attempt in range(1, TRANSPORT_ATTEMPTS + 1):
+					call = llm_health.begin(f"omniroute:{target_model}")
 					try:
 						async with httpx.AsyncClient(timeout=OMNIROUTE_TIMEOUT_SECONDS) as client:
 							response = await client.post(
@@ -233,11 +235,13 @@ async def call_llm_json(
 						json_text = _json_object_in(content)
 						if json_text:
 							logger.info(f"Successfully called OmniRoute model '{target_model}'")
+							llm_health.end(call, "ok")
 							return json_text
 						# A 200 with no JSON object is not a transport error, and re-asking the
 						# model that just refused costs 120 s to hear the same words again. The
 						# next model in the chain is tried instead, without burning this leg's
 						# retry - which belongs to the transport, not to the content.
+						llm_health.end(call, "no_json", repr(content)[:200])
 						if unusable_reply is None and isinstance(content, str) and content.strip():
 							unusable_reply = content
 						logger.warning(
@@ -246,6 +250,7 @@ async def call_llm_json(
 						)
 						break
 					except Exception as e:
+						llm_health.end(call, llm_health.classify(e), f"{type(e).__name__}: {e}")
 						# Some httpx failures stringify to "" and left the log reading
 						# "OmniRoute request failed ()", which names no cause at all.
 						if attempt < TRANSPORT_ATTEMPTS:
@@ -280,6 +285,7 @@ async def call_llm_json(
 		},
 	}
 
+	call = llm_health.begin(f"ollama:{ollama_model}")
 	try:
 		async with httpx.AsyncClient(timeout=120.0) as client:
 			response = await client.post(f"{settings.OLLAMA_URL.rstrip('/')}/api/generate", json=payload)
@@ -289,7 +295,9 @@ async def call_llm_json(
 		response_text = result.get("response", "")
 		if not isinstance(response_text, str) or not response_text.strip():
 			raise ValueError("Ollama response did not produce a valid text answer")
+		llm_health.end(call, "ok")
 		return _extract_json_text(response_text)
 	except Exception as e:
+		llm_health.end(call, llm_health.classify(e), f"{type(e).__name__}: {e}")
 		logger.warning(f"Ollama request failed: {e}")
 		raise RuntimeError(f"All LLM backends failed (OmniRoute and Ollama: {e})")

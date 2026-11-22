@@ -2498,9 +2498,18 @@ async def process_job_async(job_id: int):
                                           lease_stop=lease_stop)
 
     except Exception as e:
-        # Mark job as failed
+        # Mark job as failed. Keep the exception type and the stage it died in: str(e) is
+        # often empty, and then the dashboard could only say "Failed".
+        try:
+            stage_row = db.query(JobProgress).filter(JobProgress.job_id == job_id).first()
+        except Exception:
+            # A failed transaction must not stop the failure from being recorded.
+            db.rollback()
+            stage_row = None
+        where = f" during '{stage_row.current_stage}'" if stage_row and stage_row.current_stage else ""
+        detail = str(e).strip() or "no message"
         job.status = "failed"
-        job.error_message = str(e)
+        job.error_message = f"{type(e).__name__}{where}: {detail}"[:2000]
         job.updated_at = datetime.utcnow()
         db.commit()
 

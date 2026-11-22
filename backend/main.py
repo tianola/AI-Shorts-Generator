@@ -27,6 +27,7 @@ from api.system import router as system_router
 from api.tiktok import router as tiktok_router
 from api.youtube import router as youtube_router
 from api.publish_queue import router as publish_queue_router
+from api.llm_health import router as llm_health_router
 from config import settings
 import os
 
@@ -84,6 +85,7 @@ app.include_router(realtime_router, prefix="/api")
 app.include_router(features_router, prefix="/api")
 app.include_router(youtube_router, prefix="/api")
 app.include_router(publish_queue_router, prefix="/api")
+app.include_router(llm_health_router, prefix="/api")
 app.include_router(tiktok_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(branding_router, prefix="/api")
