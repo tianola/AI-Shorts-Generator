@@ -1222,6 +1222,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                     popup_duration=popup_duration,
                     popup_position=popup_position,
                     source_channel=source_channel,
+                    effects=[t.model_dump() for t in _timeline.visual_tracks] if _timeline else None,
                 )
                 _used_single_pass = True
                 job_info(job_id, f"Single-pass render complete: {final_path}")
@@ -1230,6 +1231,9 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
 
         # ---- Sequential fallback ----
         if not _used_single_pass:
+            if _timeline is not None and _timeline.visual_tracks:
+                job_warning(job_id, "Sequential fallback render: the planned visual effects "
+                                    f"({len(_timeline.visual_tracks)}) are skipped for this clip")
             vertical_path = os.path.join(str(clip_dir), "vertical.mp4")
             try:
                 if ensure_derived(job_id, vertical_path, "vertical",

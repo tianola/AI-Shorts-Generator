@@ -224,6 +224,19 @@ class Settings(BaseSettings):
     )
 
     # ====================
+    # EDITING EFFECTS
+    # ====================
+    EFFECTS_ENABLED: bool = Field(
+        default=True,
+        description="Apply the visual effects planned in each clip's edit timeline (zoom punch, "
+                    "camera shake, flash, red tint). Off renders clips plain."
+    )
+    EFFECTS_DISABLED_KINDS: str = Field(
+        default="",
+        description="Comma list of effect kinds to leave out even when planned, e.g. 'flash,tint_red'."
+    )
+
+    # ====================
     # VERTICAL CONVERSION
     # ====================
     VERTICAL_MODE: str = Field(

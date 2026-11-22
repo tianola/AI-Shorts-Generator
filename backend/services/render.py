@@ -406,6 +406,7 @@ def build_single_pass_filter(
     loudnorm_chain: str = "",
     emoji_stickers: list = None,
     title_center_frac: float = 0.58,
+    effects_frag: str = None,
 ) -> tuple:
     """
     Construct an all-in-one FFmpeg filter_complex that combines all visual
@@ -474,6 +475,12 @@ def build_single_pass_filter(
 
     # ---- Stage 1: vertical crop (always required) ----
     _wire(vertical_frag, "[vsingle]")
+
+    # ---- Stage 1b: visual effects from the edit timeline (optional) ----
+    # Zoom punch, shake, flash and tint act on the footage only, before the captions, so the
+    # captions, stickers, popup and title stay still. See services/editing/effect_filters.
+    if effects_frag:
+        _wire(effects_frag, "[vfx]")
 
     # ---- Stage 2: captions (optional) ----
     if captions_path:
@@ -674,6 +681,7 @@ def render_single_pass(
     popups: list = None,
     source_channel: str = None,
     emoji_stickers: list = None,
+    effects: list = None,
 ) -> str:
     """
     Render a clip in a SINGLE ffmpeg pass (Task D).
@@ -710,6 +718,13 @@ def render_single_pass(
             title_png = None
 
     has_audio = _has_audio_stream(input_video)
+
+    # Visual effects: the timeline's visual tracks, minus any kind switched off in config.
+    effects_frag = None
+    if effects and settings.EFFECTS_ENABLED:
+        from services.editing.effect_filters import build_effects_fragment
+        off = {k.strip() for k in (settings.EFFECTS_DISABLED_KINDS or "").split(",") if k.strip()}
+        effects_frag = build_effects_fragment([t for t in effects if t.get("kind") not in off])
 
     # Emoji stickers come from the list next to the captions file unless the caller gave one.
     if emoji_stickers is None and captions_path:
@@ -759,6 +774,7 @@ def render_single_pass(
             loudnorm_chain=loudnorm_chain,
             emoji_stickers=emoji_stickers,
             title_center_frac=_title_center_frac(mode),
+            effects_frag=effects_frag,
         )
 
     # Build ffmpeg command: 0 = main video, then extra inputs
