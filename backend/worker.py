@@ -195,6 +195,7 @@ CLIP_RECORD_FIELDS = (
     "hook_score", "coherence_score", "connection_score", "trend_score",
     "score_breakdown", "file_path", "thumbnail_path", "description",
     "hashtags", "platform_metadata", "caption_style", "layout_mode",
+    "tone_category", "edit_profile",
 )
 
 
@@ -1426,6 +1427,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             "platform_metadata": metadata.get("platform_copy", {}),
             "caption_style": caption_style,
             "layout_mode": resolved_layout,
+            "tone_category": clip.get("tone_category"),
         })
         clip_id = clip_db.id
 

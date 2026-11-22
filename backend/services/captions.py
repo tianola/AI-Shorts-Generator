@@ -6,6 +6,7 @@ import json
 import os
 import re
 import copy
+import unicodedata
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from config import settings
@@ -186,16 +187,48 @@ EMOJI_KEYWORD_MAP = {
 }
 
 
+def _fold(text: str) -> str:
+    """Lower-case and accent-free, so a Greek word matches whether or not it carries tonos.
+
+    The uppercase presets strip the accents before the keyword test ("λεφτά" becomes
+    "ΛΕΦΤΑ"), and a plain .lower() then no longer equals the accented keyword. Folding
+    both sides the same way makes the match independent of case and accents.
+    """
+    decomposed = unicodedata.normalize("NFD", text)
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return re.sub(r"[^\w\s]", "", stripped).casefold().strip()
+
+
+def _is_greek(text: str) -> bool:
+    return any("Ͱ" <= c <= "Ͽ" for c in text)
+
+
+# Built once: folded keyword -> emoji, plus stems for Greek keywords. Greek inflects
+# ("λεφτά", "λεφτών"), so a Greek word that starts with a keyword's stem and has at most
+# three more letters also counts. English keeps exact matching.
+_EMOJI_EXACT = {}
+_EMOJI_GREEK_STEMS = []
+for _emoji, _keywords in EMOJI_KEYWORD_MAP.items():
+    for _kw in _keywords:
+        _folded = _fold(_kw)
+        _EMOJI_EXACT.setdefault(_folded, _emoji)
+        if _is_greek(_kw) and len(_folded) >= 5:
+            _EMOJI_GREEK_STEMS.append((_folded[:-1], _emoji))
+
+
 def inject_emojis(word: str) -> str:
     """Inject contextual emoji if word matches high-impact triggers."""
-    clean_w = re.sub(r"[^\w\s]", "", word).lower().strip()
+    clean_w = _fold(word)
     if not clean_w:
         return word
 
-    for emoji, keywords in EMOJI_KEYWORD_MAP.items():
-        if clean_w in keywords:
-            return f"{word} {emoji}"
-    return word
+    emoji = _EMOJI_EXACT.get(clean_w)
+    if emoji is None and _is_greek(clean_w):
+        for stem, candidate in _EMOJI_GREEK_STEMS:
+            if clean_w.startswith(stem) and len(clean_w) <= len(stem) + 3:
+                emoji = candidate
+                break
+    return f"{word} {emoji}" if emoji else word
 
 
 def ass_color(hex_color: str) -> str:

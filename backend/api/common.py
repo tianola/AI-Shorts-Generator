@@ -53,6 +53,8 @@ def clip_payload(clip: Clip) -> dict:
         "trim_start": clip.trim_start,
         "trim_end": clip.trim_end,
         "render_options": clip.render_options or {},
+        "tone_category": clip.tone_category,
+        "edit_profile": clip.edit_profile,
         "translated_transcript": clip.translated_transcript,
         "file_path": clip.file_path,
         "thumbnail_path": clip.thumbnail_path,

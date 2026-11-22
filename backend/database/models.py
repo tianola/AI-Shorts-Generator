@@ -117,6 +117,11 @@ class Clip(Base):
     trim_end = Column(Float, nullable=True)
     # The render switches the studio keeps: {karaoke, motion_title, thumbnail_template}.
     render_options = Column(JSON, nullable=True)
+    # What the clip is about, from services/tone_detector (somber_tragic, humorous_entertainment...).
+    # Kept out of render_options, which a studio re-render replaces wholesale.
+    tone_category = Column(String, nullable=True)
+    # The editing profile chosen for the clip (services/editing/profiles); null on older clips.
+    edit_profile = Column(String, nullable=True)
     # Translated transcript for this clip (English)
     translated_transcript = Column(Text, nullable=True)
 
