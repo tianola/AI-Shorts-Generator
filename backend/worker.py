@@ -195,7 +195,7 @@ CLIP_RECORD_FIELDS = (
     "hook_score", "coherence_score", "connection_score", "trend_score",
     "score_breakdown", "file_path", "thumbnail_path", "description",
     "hashtags", "platform_metadata", "caption_style", "layout_mode",
-    "tone_category", "edit_profile",
+    "tone_category", "edit_profile", "quality_report", "render_manifest", "render_fingerprint",
 )
 
 
@@ -1112,6 +1112,13 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         else:
             job_info(job_id, f"Captions already exist for '{caption_style}' style")
 
+        # What the render will need to be checked against, read now: the pruning step after
+        # the render deletes the caption file and its emoji list.
+        from services.emoji_stickers import load_stickers as _load_stickers
+        from services.quality.pipeline import caption_events_from_words as _caption_events_of
+        _sticker_files = [s["path"] for s in _load_stickers(captions_path)]
+        _caption_events = _caption_events_of(clip_words_file)
+
         final_path = os.path.join(str(clip_dir), "final_short.mp4")
 
         # ---- Content safety: smart blur (optional) ----
@@ -1200,6 +1207,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
 
         # ---- Render: single-pass unified OR sequential fallback ----
         _used_single_pass = False
+        _sfx_events = None
         if getattr(settings, "SINGLE_PASS_RENDER", False):
             try:
                 from services.vertical import build_vertical_filter
@@ -1219,7 +1227,6 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                 # Sound design from the edit timeline replaces the keyword picks above: which sound,
                 # when, and how loud come from the plan, moved into gaps between words. A timeline
                 # that earns no sound (documentary, somber) therefore means no sound, not a default.
-                _sfx_events = None
                 if settings.SOUND_DESIGN_ENABLED and _timeline is not None:
                     from services.editing.bridge import _load_words
                     from services.editing.sound import plan_sound_events
@@ -1427,13 +1434,52 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # Speed +2%, pitch +1.5 semitones, hue+EQ tweak
         # Defeats Content ID frame/waveform fingerprinting
         # =====================
+        _antifp_applied = False
         try:
             from services.anti_copyright import apply_anti_fingerprint
             job_info(job_id, f"Applying anti-copyright fingerprint transform to Clip #{index + 1}...")
             apply_anti_fingerprint(final_path)  # in-place overwrite
+            _antifp_applied = True
             job_info(job_id, f"Anti-copyright transform done for Clip #{index + 1}")
         except Exception as _ac_err:
             job_warning(job_id, f"Anti-copyright transform failed (using original): {_ac_err}")
+
+        # =====================
+        # 5g''. QUALITY CHECK AND RENDER MANIFEST
+        # Measures the file that ships (after the speed change) and records how it was made.
+        # =====================
+        try:
+            from services.quality.pipeline import assess_clip
+            from services import render as _render_mod
+            from services.anti_copyright import PARAMS as _ANTIFP_PARAMS
+            from services.captions import FONTS_DIR as _FONTS_DIR
+            _qa = assess_clip(
+                final_path, str(clip_dir),
+                job_id=job_id, clip_index=index, clip_start=clip_start, clip_end=clip_end,
+                words_file=clip_words_file, source_path=video_path,
+                layout=resolved_layout, caption_style=caption_style, caption_motion=caption_motion,
+                edit_profile=clip.get("edit_profile"), tone=clip.get("tone_category"),
+                sticker_paths=_sticker_files,
+                sfx_paths=[e["path"] for e in (_sfx_events or [])],
+                font_paths=[os.path.join(_FONTS_DIR, "Montserrat-ExtraBold.ttf")],
+                filtergraph=_render_mod.last_filtergraph() if _used_single_pass else None,
+                expect_audio=True,
+                speed=_ANTIFP_PARAMS["speed"] if _antifp_applied else 1.0,
+                anti_fingerprint=dict(_ANTIFP_PARAMS, applied=_antifp_applied),
+                caption_events=_caption_events,
+            )
+            if _qa:
+                clip["quality_report"] = _qa["report"]
+                clip["render_manifest"] = _qa["manifest"]
+                clip["render_fingerprint"] = _qa["fingerprint"]
+                _qstatus = _qa["report"]["status"]
+                for _f in _qa["report"]["findings"]:
+                    if _f["severity"] != "info":
+                        job_warning(job_id, f"Quality [{_f['severity']}] clip {index + 1} "
+                                            f"@{_f.get('timestamp_final')}s: {_f['issue']}")
+                job_info(job_id, f"Quality check for Clip #{index + 1}: {_qstatus}")
+        except Exception as _qa_err:
+            job_warning(job_id, f"Quality check skipped for Clip #{index + 1}: {_qa_err}")
 
         # =====================
         # 5h. SAVE CLIP TO DB
@@ -1480,6 +1526,9 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
             "layout_mode": resolved_layout,
             "tone_category": clip.get("tone_category"),
             "edit_profile": clip.get("edit_profile"),
+            "quality_report": clip.get("quality_report"),
+            "render_manifest": clip.get("render_manifest"),
+            "render_fingerprint": clip.get("render_fingerprint"),
         })
         clip_id = clip_db.id
 
@@ -1501,9 +1550,10 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # while this PC is off.
         # =========================================================
         if getattr(job, "auto_upload", False) and _needs_review_before_publish(clip_db):
-            job_warning(job_id, f"Clip {index + 1} was not chosen by a model "
-                                f"(selection path: {clip.get('selection_path')}); it is rendered "
-                                f"but not published automatically. Review it and press upload.")
+            _why = ("its quality check failed" if (clip_db.quality_report or {}).get("status") == "failed"
+                    else f"it was not chosen by a model (selection path: {clip.get('selection_path')})")
+            job_warning(job_id, f"Clip {index + 1} is rendered but not published automatically: "
+                                f"{_why}. Review it and press upload.")
         elif getattr(job, "auto_upload", False):
             try:
                 if clip_db.youtube_video_id:
@@ -1711,9 +1761,16 @@ UNREVIEWED_SELECTION_PATHS = ("heuristic", "grid")
 
 
 def _needs_review_before_publish(clip) -> bool:
-    """True for a clip no model chose, which must not publish unattended."""
+    """True for a clip that must not publish unattended: no model chose it, or its quality check failed.
+
+    Only a failed check holds a clip back (a broken file, wrong size, missing audio, clipping);
+    warnings are for a person to look at, but do not stop the queue.
+    """
     breakdown = clip.score_breakdown if isinstance(clip.score_breakdown, dict) else {}
-    return breakdown.get("selection_path") in UNREVIEWED_SELECTION_PATHS
+    if breakdown.get("selection_path") in UNREVIEWED_SELECTION_PATHS:
+        return True
+    quality = getattr(clip, "quality_report", None)
+    return isinstance(quality, dict) and quality.get("status") == "failed"
 
 
 def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None,

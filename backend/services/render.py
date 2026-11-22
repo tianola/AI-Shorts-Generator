@@ -687,6 +687,14 @@ def _run_ffmpeg_and_verify(
     return output_path
 
 
+# The filtergraph of the most recent single-pass render in this process, for the render manifest.
+_LAST_FILTERGRAPH = {"value": None}
+
+
+def last_filtergraph():
+    return _LAST_FILTERGRAPH["value"]
+
+
 def _sidechain_settings() -> dict:
     """The compressor settings for ducking effects under the voice, or None when it is switched off."""
     if not settings.SFX_SIDECHAIN_ENABLED:
@@ -829,6 +837,8 @@ def render_single_pass(
             sfx_events=sfx_events,
             sidechain=_sidechain_settings() if sfx_events else None,
         )
+
+    _LAST_FILTERGRAPH["value"] = fc
 
     # Build ffmpeg command: 0 = main video, then extra inputs
     cmd = ["ffmpeg", "-y", "-ss", str(start), "-t", str(end - start), "-i", input_video]

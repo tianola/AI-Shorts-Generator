@@ -122,6 +122,11 @@ class Clip(Base):
     tone_category = Column(String, nullable=True)
     # The editing profile chosen for the clip (services/editing/profiles); null on older clips.
     edit_profile = Column(String, nullable=True)
+    # Findings from services/quality on the file that ships (status, evidence, timestamps).
+    quality_report = Column(JSON, nullable=True)
+    # How the clip was rendered (services/render_manifest) and the hash of that manifest.
+    render_manifest = Column(JSON, nullable=True)
+    render_fingerprint = Column(String, nullable=True)
     # Translated transcript for this clip (English)
     translated_transcript = Column(Text, nullable=True)
 

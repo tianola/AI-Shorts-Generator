@@ -26,6 +26,17 @@ def resolve_auto_upload(value: Optional[bool]) -> bool:
     return bool(settings.DEFAULT_AUTO_UPLOAD) if value is None else bool(value)
 
 
+def _quality_summary(report) -> dict:
+    """Status and finding counts only; the full report is at GET /clips/{id}/quality."""
+    if not isinstance(report, dict):
+        return {}
+    counts: dict = {}
+    for finding in report.get("findings", []) or []:
+        severity = finding.get("severity", "info") if isinstance(finding, dict) else "info"
+        counts[severity] = counts.get(severity, 0) + 1
+    return {"status": report.get("status"), "findings": counts}
+
+
 def clip_payload(clip: Clip) -> dict:
     """Single wire shape for a clip, used by every endpoint that returns one.
 
@@ -55,6 +66,8 @@ def clip_payload(clip: Clip) -> dict:
         "render_options": clip.render_options or {},
         "tone_category": clip.tone_category,
         "edit_profile": clip.edit_profile,
+        "quality": _quality_summary(clip.quality_report),
+        "render_fingerprint": clip.render_fingerprint,
         "translated_transcript": clip.translated_transcript,
         "file_path": clip.file_path,
         "thumbnail_path": clip.thumbnail_path,
