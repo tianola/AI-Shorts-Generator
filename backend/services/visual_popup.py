@@ -129,6 +129,11 @@ def build_popup_filtergraph_fragment(
     if position == "upper_right":
         x_expr = f"W-w-50+80*(1-clip((t-{t_start})/0.18,0,1))"
         y_expr = "320"
+    elif position == "game_top":
+        # Gaming layout: the webcam fills the top 35% (to y=672). The card goes just below that
+        # seam, over the gameplay, so it never covers the streamer's face.
+        x_expr = "(W-w)/2"
+        y_expr = f"730+25*(1-clip((t-{t_start})/0.18,0,1))"
     else:  # upper_third (center)
         x_expr = "(W-w)/2"
         y_expr = f"290+25*(1-clip((t-{t_start})/0.18,0,1))"

@@ -1091,11 +1091,22 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                     job_info(job_id, f"Caption names corrected: {fixed} word(s) in clip {index + 1}")
             except Exception as e:
                 job_warning(job_id, f"Caption name correction skipped ({e})")
+        # How the caption words move follows the clip's tone (the profile's motion); the preset's
+        # fonts and colours stay the job's choice. The motion is part of the cache key.
+        from services.editing.profiles import caption_motion_for, profile_for_tone
+        caption_motion = caption_motion_for(profile_for_tone(clip.get("tone_category")))
+        # Only an explicit "karaoke off" from the job changes the words' movement; otherwise the
+        # preset and the motion decide (passing True would force the pop onto every preset).
+        _karaoke_off = False if getattr(job, "default_karaoke", None) in (0, False) else None
         if ensure_derived(job_id, captions_path, "captions",
                           lambda: create_captions(clip_words_file, captions_path,
-                                                  style_name=caption_style),
+                                                  style_name=caption_style,
+                                                  karaoke=_karaoke_off,
+                                                  motion=caption_motion),
                           {"window": clip_window,
                            "style": caption_style,
+                           "motion": caption_motion,
+                           "karaoke": _karaoke_off,
                            "words": derived_cache.input_fingerprint(clip_words_file)}):
             job_info(job_id, f"Captions created with '{caption_style}' style: {captions_path}")
         else:
@@ -1232,7 +1243,7 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
                     popup_png=popup_png,
                     popup_start=popup_start,
                     popup_duration=popup_duration,
-                    popup_position=popup_position,
+                    popup_position="game_top" if resolved_layout == "gaming" else popup_position,
                     source_channel=source_channel,
                     effects=[t.model_dump() for t in _timeline.visual_tracks] if _timeline else None,
                 )

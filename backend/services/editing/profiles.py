@@ -74,6 +74,21 @@ PROFILES: Dict[str, EditingProfile] = {
 
 DEFAULT_PROFILE = "dynamic"
 
+# How the caption words move for each profile (services/captions.CAPTION_MOTIONS). Fonts and
+# colours stay the job's preset; this only picks the animation.
+CAPTION_MOTION_BY_PROFILE: Dict[str, str] = {
+    "dynamic": "kinetic",
+    "humorous": "pop",
+    "dramatic": "emphasis",
+    "educational": "kinetic",
+    "cinematic": "cinematic",
+    "documentary": "cinematic",
+}
+
+
+def caption_motion_for(profile: EditingProfile) -> str:
+    return CAPTION_MOTION_BY_PROFILE.get(profile.id, "kinetic")
+
 # Tone (services/tone_detector.TONE_TAXONOMY) to profile.
 TONE_TO_PROFILE: Dict[str, str] = {
     "humorous_entertainment": "humorous",
