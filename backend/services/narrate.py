@@ -6,15 +6,13 @@ word-by-word captions) follows Clipify AI's Narrate Studio
 non-commercial); the implementation is our own and reuses our Whisper, caption and
 LLM stack.
 
-Voices: Windows SAPI (always there), Kokoro when the `kokoro` package is installed,
-ElevenLabs when a key is configured (it is the one that speaks Greek well).
+Voice: ElevenLabs only (ELEVENLABS_API_KEY). No system or local voices.
 """
 
 import json
 import os
 import random
 import re
-import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -33,7 +31,6 @@ SCRIPT_STYLES = {
     "horror": "a short, creepy story that builds dread",
     "explainer": "a clear explainer that answers one question",
 }
-KOKORO_VOICES = ("af_heart", "af_bella", "af_nicole", "am_adam", "am_michael", "bf_emma", "bm_george")
 
 
 class NarrateError(RuntimeError):
@@ -145,105 +142,28 @@ async def generate_script(idea: str, style: str = "story", seconds: int = 40,
 
 # ------------------------------------------------------------------ voices
 
-def _powershell() -> str:
-    return shutil.which("powershell.exe") or "powershell.exe"
-
-
-def _sapi_voices() -> List[dict]:
-    script = (
-        "Add-Type -AssemblyName System.Speech;"
-        "[System.Speech.Synthesis.SpeechSynthesizer]::new().GetInstalledVoices() | "
-        "ForEach-Object { $v=$_.VoiceInfo; [pscustomobject]@{name=$v.Name; lang=$v.Culture.Name} } "
-        "| ConvertTo-Json -Compress"
-    )
-    try:
-        out = subprocess.run([_powershell(), "-NoProfile", "-NonInteractive", "-Command", script],
-                             capture_output=True, text=True, encoding="utf-8", errors="replace",
-                             timeout=30).stdout.strip()
-        data = json.loads(out) if out else []
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return []
-    if isinstance(data, dict):
-        data = [data]
-    return [{"id": f"sapi:{v['name']}", "name": v["name"], "engine": "Windows", "language": v.get("lang", "")}
-            for v in data if isinstance(v, dict) and v.get("name")]
-
-
-def _kokoro_installed() -> bool:
-    try:
-        import importlib.util
-        return importlib.util.find_spec("kokoro") is not None
-    except (ImportError, ValueError):
-        return False
+ELEVENLABS_VOICE = "elevenlabs:default"
 
 
 def list_voices() -> List[dict]:
-    voices: List[dict] = []
+    """The voices offered in the UI: ElevenLabs only, and only when it is configured."""
     if settings.ELEVENLABS_API_KEY and settings.TTS_ENABLED:
-        voices.append({"id": "elevenlabs:default", "name": "ElevenLabs (multilingual)",
-                       "engine": "ElevenLabs", "language": "multi"})
-    if _kokoro_installed():
-        voices += [{"id": f"kokoro:{v}", "name": f"Kokoro {v[3:].title()}", "engine": "Kokoro",
-                    "language": "en"} for v in KOKORO_VOICES]
-    return voices + _sapi_voices()
+        return [{"id": ELEVENLABS_VOICE, "name": "ElevenLabs", "engine": "ElevenLabs", "language": "multi"}]
+    return []
 
 
 def synthesize(text: str, voice: str, out_path: Path, rate: int = 0) -> Path:
-    """Speak `text` into out_path (wav or mp3, by engine). Raises NarrateError."""
-    text = re.sub(r"[\ud800-\udfff]", " ", text).strip()
+    """Speak `text` with ElevenLabs into out_path (mp3). Raises NarrateError."""
+    text = text.encode("utf-8", "replace").decode("utf-8").strip()   # drop lone surrogates
     if not text:
         raise NarrateError("Nothing to say")
-    engine, _, name = str(voice or "").partition(":")
+    if not (settings.ELEVENLABS_API_KEY and settings.TTS_ENABLED):
+        raise NarrateError("ElevenLabs is not configured: set ELEVENLABS_API_KEY in backend/.env")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if engine == "elevenlabs":
-        from services.tts_elevenlabs import synthesize_to_file
-        target = out_path.with_suffix(".mp3")
-        if not synthesize_to_file(text, str(target)):
-            raise NarrateError("ElevenLabs did not return audio")
-        return target
-
-    if engine == "kokoro":
-        try:
-            import numpy as np
-            import soundfile as sf
-            from kokoro import KPipeline
-            pipeline = KPipeline(lang_code="b" if name.startswith("b") else "a")
-            speed = max(0.8, min(1.15, 1.0 + rate * 0.04))
-            chunks = [np.asarray(a.detach().cpu().numpy() if hasattr(a, "detach") else a)
-                      for _, _, a in pipeline(text, voice=name, speed=speed)]
-            if not chunks:
-                raise NarrateError("Kokoro returned no audio")
-            target = out_path.with_suffix(".wav")
-            sf.write(str(target), np.concatenate(chunks), 24000)
-            return target
-        except ImportError as exc:
-            raise NarrateError(f"Kokoro is not installed: {exc}")
-
-    # Windows SAPI. The text goes through a file so quotes and newlines cannot break the script.
-    target = out_path.with_suffix(".wav")
-    text_file = out_path.with_suffix(".txt")
-    text_file.write_text(text, encoding="utf-8")
-    voice_line = f"$s.SelectVoice('{name.replace(chr(39), chr(39) * 2)}');" if name else ""
-    script = (
-        "Add-Type -AssemblyName System.Speech;"
-        "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-        f"{voice_line}$s.Rate={max(-10, min(10, int(rate)))};"
-        f"$s.SetOutputToWaveFile('{str(target)}');"
-        f"$s.Speak([IO.File]::ReadAllText('{str(text_file)}',[Text.Encoding]::UTF8));$s.Dispose()"
-    )
-    try:
-        proc = subprocess.run([_powershell(), "-NoProfile", "-NonInteractive", "-Command", script],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise NarrateError(f"Windows speech could not start: {exc}")
-    finally:
-        try:
-            text_file.unlink()
-        except OSError:
-            pass
-    if proc.returncode or not target.is_file() or target.stat().st_size < 1024:
-        raise NarrateError(f"Windows speech failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
+    from services.tts_elevenlabs import synthesize_to_file
+    target = out_path.with_suffix(".mp3")
+    if not synthesize_to_file(text, str(target)):
+        raise NarrateError("ElevenLabs did not return audio")
     return target
 
 

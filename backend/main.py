@@ -26,7 +26,10 @@ from api.realtime import router as realtime_router
 from api.system import router as system_router
 from api.tiktok import router as tiktok_router
 from api.youtube import router as youtube_router
+from api.publish_queue import router as publish_queue_router
 from config import settings
+import os
+
 import uvicorn
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -43,6 +46,11 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for application startup and shutdown."""
     init_database()
     log_media_tools()
+    # The live watch list checks saved channels in the background. Tests build the app too,
+    # and must not reach the network, so the watcher stays off under pytest.
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        from services import live_watch
+        live_watch.start()
     yield
 
 # Create FastAPI app
@@ -75,6 +83,7 @@ app.include_router(system_router, prefix="/api")
 app.include_router(realtime_router, prefix="/api")
 app.include_router(features_router, prefix="/api")
 app.include_router(youtube_router, prefix="/api")
+app.include_router(publish_queue_router, prefix="/api")
 app.include_router(tiktok_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(branding_router, prefix="/api")

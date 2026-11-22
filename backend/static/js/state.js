@@ -19,8 +19,6 @@ export const els = {
   form: document.getElementById('jobForm'),
   videoUrl: document.getElementById('videoUrl'),
   urlMetaBadge: document.getElementById('urlMetaBadge'),
-  clipCountInput: document.getElementById('clipCount'),
-  provider: document.getElementById('provider'),
   captionStyle: document.getElementById('captionStyle'),
   layoutMode: document.getElementById('layoutMode'),
   clipMode: document.getElementById('clipMode'),

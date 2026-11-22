@@ -176,7 +176,15 @@ class Settings(BaseSettings):
         default=4,
         ge=1,
         le=20,
-        description="Number of clips to generate per video (short-form viral moments)"
+        description="Clips to fall back to when the model gives nothing usable. Normal runs "
+                    "are automatic: the selector keeps every moment that passes its judge, "
+                    "up to MAX_AUTO_CLIPS."
+    )
+    MAX_AUTO_CLIPS: int = Field(
+        default=60,
+        ge=1,
+        le=200,
+        description="Most clips one video can yield when the selector chooses the number itself."
     )
     MIN_CLIP_SECONDS: int = Field(
         default=30,
@@ -539,6 +547,10 @@ class Settings(BaseSettings):
     PEXELS_API_KEY: Optional[str] = Field(
         default=None,
         description="Pexels API key for stock B-Roll video downloads"
+    )
+    PIXABAY_API_KEY: Optional[str] = Field(
+        default=None,
+        description="Pixabay API key: a second stock video source for Narrate Studio"
     )
 
     # ====================

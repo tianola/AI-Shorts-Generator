@@ -115,7 +115,8 @@ async def test_the_ranking_pass_decides_which_candidates_ship(tmp_path, monkeypa
 
     result = await clip_selector.select_clips(_segments_file(tmp_path, _ten_second_segments()), num_clips=2)
 
-    assert [c["title"] for c in result] == ["SECOND PASS FAVOURITE", "MIDDLE"]
+    # Ranking is what these tests check; titles go through the title checker and are asserted in test_title_style.
+    assert [c["start"] for c in result] == [200.0, 100.0]
     assert result[0]["judge_score"] == pytest.approx(0.95)
     assert result[0]["judge_reason"] == "opens on the reveal"
     assert result[0]["llm_score_raw"] == pytest.approx(0.5), "the first-pass rating is kept for the breakdown"
@@ -149,7 +150,7 @@ async def test_an_unusable_ranking_reply_keeps_the_first_pass_order(tmp_path, mo
 
     result = await clip_selector.select_clips(_segments_file(tmp_path, _ten_second_segments()), num_clips=2)
 
-    assert [c["title"] for c in result] == ["STRONG", "WEAK"]
+    assert [c["start"] for c in result] == [100.0, 0.0]
     assert "judge_score" not in result[0]
 
 
@@ -164,7 +165,7 @@ async def test_two_picks_of_the_same_moment_collapse_into_the_stronger_one(tmp_p
 
     result = await clip_selector.select_clips(_segments_file(tmp_path, _ten_second_segments()), num_clips=2)
 
-    assert [c["title"] for c in result] == ["THE MOMENT", "ANOTHER MOMENT"]
+    assert [c["start"] for c in result] == [100.0, 300.0]
 
 
 # ---------------------------------------------------------------- windows
@@ -258,7 +259,7 @@ async def test_claude_is_used_when_a_key_is_configured(tmp_path, monkeypatch):
 
     result = await clip_selector.select_clips(_segments_file(tmp_path, _ten_second_segments()), num_clips=1)
 
-    assert result[0]["title"] == "A"
+    assert result[0]["start"] == 0.0
     assert result[0]["selection_path"] == "claude"
     assert len(seen) == 2, "candidates and ranking both went to Claude"
 
@@ -277,7 +278,7 @@ async def test_a_claude_failure_falls_back_to_the_omniroute_chain(tmp_path, monk
 
     result = await clip_selector.select_clips(_segments_file(tmp_path, _ten_second_segments()), num_clips=1)
 
-    assert result[0]["title"] == "FROM THE FREE CHAIN"
+    assert result[0]["start"] == 0.0
     assert result[0]["selection_path"] == "ai"
 
 
@@ -372,9 +373,11 @@ async def test_a_model_pick_keeps_the_selectors_headline():
     from services.metadata import ClipMetadata, generate_metadata
 
     rewritten = ClipMetadata(title="A Man Discusses His Business", description="d", hashtags=["#Shorts"])
+    # The transcript must say what the model's title says, or the title checker replaces it.
+    said = "A man discusses his business and how the business went wrong"
     with patch("services.metadata.call_llm_structured", new_callable=AsyncMock, return_value=rewritten):
-        kept = await generate_metadata("transcript", "He Lost 40,000 In One Weekend", "hook", keep_title=True)
-        replaced = await generate_metadata("transcript", "He Lost 40,000 In One Weekend", "hook")
+        kept = await generate_metadata(said, "He Lost 40,000 In One Weekend", "hook", keep_title=True)
+        replaced = await generate_metadata(said, "He Lost 40,000 In One Weekend", "hook")
 
     assert kept["title"] == "He Lost 40,000 In One Weekend"
     assert kept["description"] == "d", "description and hashtags are still generated"
@@ -387,6 +390,7 @@ async def test_a_placeholder_headline_is_never_kept():
 
     written = ClipMetadata(title="The Real Title", description="d", hashtags=["#Shorts"])
     with patch("services.metadata.call_llm_structured", new_callable=AsyncMock, return_value=written):
-        result = await generate_metadata("transcript", "VIRAL MOMENT 2", "hook", keep_title=True)
+        result = await generate_metadata("the real title of this story is the business",
+                                         "VIRAL MOMENT 2", "hook", keep_title=True)
 
     assert result["title"] == "The Real Title"

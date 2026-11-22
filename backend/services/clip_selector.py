@@ -16,6 +16,7 @@ from services.clip_judging import (
 )
 from services.llm_router import call_llm_json, pick_model, salvage_incomplete_json
 from services.metadata import derive_title_from_text
+from services.title_style import fix_title
 from services.story_analysis import analyze_story_segments
 from services.tone_detector import is_transcript_somber, classify_content_tone
 
@@ -39,6 +40,12 @@ POWER_WORDS = [
 # (6869 chars / 7 clips at a 2000-token cap). A flat budget therefore truncates
 # any ask above 7 clips; scale it with num_clips and keep a floor for small runs.
 CLIP_OUTPUT_TOKENS = 350
+
+# Automatic count (num_clips <= 0): the transcript is read in parts of about this many seconds,
+# each part asked for a few candidates, so no single reply has to carry 60 clips.
+AUTO_CHUNK_SECONDS = 900
+AUTO_CANDIDATES_PER_CHUNK = 8
+AUTO_JUDGE_BATCH = 20
 
 _CANDIDATE_SCHEMA = {
     "type": "object",
@@ -328,8 +335,8 @@ For each candidate:
 - title: the headline burned onto the video and used as the published title. Its job is
   to make someone need to watch, not to summarise. Take the single most surprising
   concrete thing in the clip (a number, a name, a consequence) and build a curiosity
-  gap around it: say enough to intrigue, hold back the answer. At most 7 words and 45
-  characters. No hashtags, no emojis, no quotation marks. It has to be true to what is
+  gap around it: say enough to intrigue, hold back the answer. 12 to 40 characters, at
+  most one emoji (optional). No hashtags, no quotation marks. It has to be true to what is
   said - tease the real payoff, never invent stakes the clip does not deliver.
     Describes (weak):  He talks about his first business failing
     Teases (strong):   He lost 40,000 in one weekend
@@ -754,6 +761,31 @@ def _composite_score_v2(clip: dict) -> float:
     return round(min(1.0, composite), 4)
 
 
+def _time_chunks(segments: list, seconds: int = AUTO_CHUNK_SECONDS) -> list:
+    """The transcript in consecutive parts of about `seconds` each, in order. Empty parts are left out."""
+    parts, current, start = [], [], None
+    for seg in segments:
+        if start is None:
+            start = float(seg.get("start", 0.0))
+        current.append(seg)
+        if float(seg.get("end", start)) - start >= seconds:
+            parts.append(current)
+            current, start = [], None
+    if current:
+        parts.append(current)
+    return [part for part in parts if sum(len(str(s.get("text") or "").split()) for s in part) >= 30]
+
+
+async def _judge_in_batches(clips: list, segments: list, ceiling: int, mode: str) -> bool:
+    """Judge a long list in batches, so one judge reply never has to carry 60 verdicts."""
+    judged = False
+    for start in range(0, len(clips), AUTO_JUDGE_BATCH):
+        batch = clips[start:start + AUTO_JUDGE_BATCH]
+        if await _judge_candidates(batch, segments, ceiling, mode):
+            judged = True
+    return judged
+
+
 async def select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None,
                        mode: str = "viral") -> list:
     """Select clips (see _select_clips). mode="auto" reads the video and picks the mode;
@@ -796,22 +828,39 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
         segments = json.load(f)
     words = load_words(os.path.join(os.path.dirname(segments_file), "words.json"))
 
+    # num_clips <= 0 means automatic: the selector keeps every moment its judge passes, up to
+    # MAX_AUTO_CLIPS. num_clips is then only the fallback count if the model gives nothing usable.
+    auto = num_clips <= 0
+    ceiling = int(settings.MAX_AUTO_CLIPS) if auto else num_clips
+    if auto:
+        num_clips = max(1, int(settings.NUM_CLIPS))
+
     story_plan = await analyze_story_segments(segments, video_title=video_title)
     topic_breaks = topic_boundaries(segments)
 
-    wanted = _candidates_wanted(num_clips)
-    prompt = _candidate_prompt(segments, story_plan, wanted, num_clips, video_title, temporal_events,
-                               mode=mode, topic_breaks=topic_breaks)
+    if auto:
+        requests = [(part, AUTO_CANDIDATES_PER_CHUNK) for part in _time_chunks(segments)]
+    else:
+        requests = [(segments, _candidates_wanted(num_clips))]
     source = "ai"
 
     try:
-        response_text, source = await _selection_model_json(
-            prompt, _CANDIDATE_SCHEMA, max_tokens=max(2000, wanted * CLIP_OUTPUT_TOKENS)
-        )
-
-        response_text = response_text.replace("```json", "").replace("```", "").strip()
-        data = salvage_incomplete_json(response_text)
-        clips = data.get("clips", [])
+        clips = []
+        for part, wanted in requests:
+            prompt = _candidate_prompt(part, story_plan, wanted, wanted if auto else num_clips,
+                                       video_title, temporal_events, mode=mode, topic_breaks=topic_breaks)
+            try:
+                response_text, source = await _selection_model_json(
+                    prompt, _CANDIDATE_SCHEMA, max_tokens=max(2000, wanted * CLIP_OUTPUT_TOKENS)
+                )
+                response_text = response_text.replace("```json", "").replace("```", "").strip()
+                data = salvage_incomplete_json(response_text)
+                clips.extend(data.get("clips", []))
+            except Exception as exc:
+                if not auto:
+                    raise
+                # One part of a long video failing must not throw away the other parts.
+                logger.warning(f"Auto selection: a part of the video gave no candidates ({type(exc).__name__}: {exc})")
 
         valid_clips = []
         for clip in clips:
@@ -831,6 +880,13 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
                 continue
             clip["start"], clip["end"] = window
             clip["selection_path"] = source
+            # The title is checked in code: hype and extra emoji are removed, the length is cut,
+            # and a title that does not match what the clip says is replaced by the clip's own words.
+            window_text = " ".join(str(seg.get("text") or "") for seg in _segments_in_window(
+                segments, float(clip["start"]), float(clip["end"])))
+            clip["title"], title_fixed = fix_title(clip.get("title"), window_text)
+            if title_fixed:
+                clip["title_fixed"] = True
 
             clip["virality_score"] = _normalise_llm_score(clip.get("virality_score"))
 
@@ -905,7 +961,10 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
             valid_clips.append(clip)
 
         candidate_count = len(valid_clips)
-        judged = candidate_count > 1 and await _judge_candidates(valid_clips, segments, num_clips, mode)
+        if auto:
+            judged = candidate_count > 1 and await _judge_in_batches(valid_clips, segments, ceiling, mode)
+        else:
+            judged = candidate_count > 1 and await _judge_candidates(valid_clips, segments, num_clips, mode)
         if judged:
             # A reject is final: a clip the editor refused is not brought back by its
             # first-pass score. Unrated candidates (no usable row) stay in.
@@ -920,6 +979,10 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
 
         # Strongest first, and two picks of the same moment collapse into the better one.
         valid_clips = _dedupe_overlapping_clips(valid_clips)
+        if auto and judged:
+            # The judge's bar decides how many moments ship; the ceiling only caps it.
+            logger.info(f"Automatic selection: {len(valid_clips)} clips passed the judge (ceiling {ceiling})")
+            return valid_clips[:ceiling]
         if len(valid_clips) >= num_clips:
             logger.info(
                 f"Clip selection path={source}: {num_clips} of {candidate_count} candidate windows "

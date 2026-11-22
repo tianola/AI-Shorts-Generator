@@ -77,9 +77,16 @@ async def add_to_library(file: UploadFile = File(...)):
 @router.post("/narrate/script")
 async def write_script(req: ScriptRequest):
     try:
-        return {"script": await narrate.generate_script(req.idea, req.style, req.seconds, req.language)}
+        script = await narrate.generate_script(req.idea, req.style, req.seconds, req.language)
     except narrate.NarrateError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    # A title for the video, checked by the same rules as the clips. None when nothing passes.
+    from services.title_style import suggest_title
+    try:
+        title = await suggest_title(script)
+    except Exception:
+        title = None
+    return {"script": script, "title": title or ""}
 
 
 @router.post("/narrate/render")

@@ -439,3 +439,69 @@ def _probe_duration(video_path: str) -> float:
         return float(result.stdout.strip()) if result.stdout.strip() else 0.0
     except Exception:
         return 0.0
+
+def _clip_words(clip: Clip) -> list:
+    """The clip's words in render time (0 = the render's first frame), in order.
+
+    The rerender writes ``words.json`` next to the render already shifted to the render's
+    own timeline, which is what the trim route measures in. A clip rendered before that
+    file existed falls back to the job's words, shifted by the clip start.
+    """
+    own = _clip_dir(clip) / "words.json"
+    if own.exists():
+        raw = json.loads(own.read_text(encoding="utf-8"))
+        shifted = False
+    else:
+        job_words = Path(settings.JOBS_DIR) / str(clip.job_id) / "words.json"
+        if not job_words.exists():
+            return []
+        raw = json.loads(job_words.read_text(encoding="utf-8"))
+        raw = [w for w in (raw.get("words", []) if isinstance(raw, dict) else raw)
+               if clip.start <= float(w.get("start", 0)) and float(w.get("end", 0)) <= clip.end + 0.05]
+        shifted = True
+    items = raw.get("words", []) if isinstance(raw, dict) else raw
+    out = []
+    for w in items:
+        text = str(w.get("word") or "").strip()
+        if not text:
+            continue
+        start = float(w.get("start", 0)) - (clip.start if shifted else 0)
+        end = float(w.get("end", 0)) - (clip.start if shifted else 0)
+        out.append({"i": len(out), "word": text, "start": round(max(0.0, start), 3),
+                    "end": round(max(0.0, end), 3)})
+    return out
+
+
+@router.get("/clips/{clip_id}/words")
+async def clip_words(clip_id: int, db: Session = Depends(get_database)):
+    """The clip's words and its render length, for cutting the clip by its words."""
+    from services.trim import _probe_duration_quiet
+
+    clip = db.query(Clip).filter(Clip.id == clip_id).first()
+    if not clip:
+        raise HTTPException(status_code=404, detail=f"Clip {clip_id} not found")
+    media = _clip_media_path(clip)
+    duration = await run_in_threadpool(_probe_duration_quiet, media) if media else 0.0
+    trim = None
+    if clip.trim_start is not None and clip.trim_end is not None:
+        trim = {"start": clip.trim_start, "end": clip.trim_end}
+    return {"words": _clip_words(clip), "duration": round(duration, 3), "trim": trim}
+
+
+@router.post("/clips/{clip_id}/trim/reset")
+async def reset_trim(clip_id: int, db: Session = Depends(get_database)):
+    """Drop the trim: the clip goes back to its full render. The trimmed file is kept on disk."""
+    from utils import clip_trim
+
+    clip = db.query(Clip).filter(Clip.id == clip_id).first()
+    if not clip:
+        raise HTTPException(status_code=404, detail=f"Clip {clip_id} not found")
+    base = clip_trim.base_render_path(_clip_dir(clip))
+    if not os.path.exists(base):
+        raise HTTPException(status_code=400, detail="Rendered clip file not found; re-render the clip first")
+    clip.trim_start = None
+    clip.trim_end = None
+    clip.file_path = os.path.relpath(base, settings.STORAGE_ROOT)
+    db.commit()
+    db.refresh(clip)
+    return {"id": clip.id, "file_path": clip.file_path, "trim": None}

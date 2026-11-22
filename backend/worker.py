@@ -938,7 +938,7 @@ async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_t
     job_info(job_id, f"Step 4b/8: Selecting best clips (source title: {source_title or 'N/A'})...")
     update_progress("Analyzing virality & selecting top clips...", 52)
     
-    num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else settings.NUM_CLIPS
+    num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else 0  # 0: automatic
     clips = await select_clips(segments_file, num_target_clips, video_title=source_title, temporal_events=temporal_events,
                                mode=getattr(job, "clip_mode", None) or "auto")
     job_info(job_id, f"Selected {len(clips)} clips")

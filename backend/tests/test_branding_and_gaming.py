@@ -76,10 +76,11 @@ def test_the_facecam_must_hold_its_corner_on_most_frames():
     assert gl.pick_facecam([], 1920, 1080) is None
 
 
-def test_the_gaming_filter_stacks_gameplay_over_the_facecam():
+def test_the_gaming_filter_puts_the_facecam_on_top_and_zooms_the_gameplay():
     graph = gl.build_gaming_filter(1920, 1080, (1400, 700, 400, 300))
-    assert graph.endswith("[game][camp]vstack=inputs=2[outv]")
-    assert "crop=400:300:1400:700" in graph and "scale=1080:-2[gf]" in graph
+    assert graph.endswith("[camp][game]vstack=inputs=2[outv]")
+    assert "crop=400:300:1400:700" in graph
+    assert f"scale={round(1080 * gl.GAME_ZOOM)}:-2,crop=1080:ih" in graph
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")

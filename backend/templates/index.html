@@ -6,7 +6,9 @@
 	<title>Shorts Studio | OpusClip AI Generator</title>
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
-	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Montserrat:wght@700;800;900&amp;display=swap" rel="stylesheet" />
+	<!-- Fonts load without blocking the first paint: the page shows in the system font, then switches. -->
+	<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Montserrat:wght@700;800;900&amp;display=swap" onload="this.onload=null;this.rel='stylesheet'" />
+	<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Montserrat:wght@700;800;900&amp;display=swap" /></noscript>
 	<link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -79,10 +81,7 @@
 			</div>
 
 			<div class="field-row">
-			  <div>
-				<label class="field-label" for="clipCount">Target clips</label>
-				<input id="clipCount" name="clipCount" type="number" min="1" max="20" value="10" />
-			  </div>
+			  <div><label class="field-label">Clips</label><p class="studio-note" style="margin:0;">Chosen automatically: every moment that passes the quality check, up to 60.</p></div>
 			  <div>
 				<label class="field-label" for="provider">AI provider</label>
 				<select id="provider" name="provider">
@@ -238,6 +237,17 @@
 			  📂 Show All Jobs
 			</button>
 		  </section>
+
+		  <section class="panel jobs-panel" id="publishQueuePanel">
+			<div class="panel-header compact-header">
+			  <span class="kicker">publish queue</span>
+			  <h2>Next releases</h2>
+			</div>
+			<p class="studio-note" id="pqGap"></p>
+			<div id="pqList" class="pq-list"><em>Loading…</em></div>
+			<p class="studio-note" id="pqErr"></p>
+			<button type="button" id="pqRefresh" class="ghost-btn" style="width: 100%; margin-top: 8px;">Refresh</button>
+		  </section>
 		</section>
 	  </main>
 
@@ -279,6 +289,16 @@
 	  <main class="studio-view" id="viewLive" hidden>
 		<section class="panel studio-card">
 		  <div class="panel-header"><span class="kicker">Live Studio</span><h2>Clip the best moments of a live stream</h2></div>
+		  <h3 class="studio-sub">Watch list</h3>
+		  <p class="studio-note">Paste a channel or live link. Live Studio checks each link every 2 minutes, and when it goes live it records the stream and clips the best moments by itself. Clips appear below, with the channel name.</p>
+		  <div class="field-row">
+			<div><label class="field-label" for="lvWatchUrl">Channel or live link</label><input id="lvWatchUrl" placeholder="youtube.com/@channel, twitch.tv/name or tiktok.com/@name" /></div>
+			<div><button class="primary-btn" id="lvWatchAdd" type="button">Add to watch list</button></div>
+		  </div>
+		  <p class="studio-note" id="lvWatchNote"></p>
+		  <div id="lvWatchList"><em>No links yet</em></div>
+		  <details class="studio-manual">
+			<summary>Connect one stream now (manual, without the watch list)</summary>
 		  <div class="field-row">
 			<div><label class="field-label" for="lvSource">Source</label>
 			  <select id="lvSource"><option value="youtube">YouTube live</option><option value="tiktok">TikTok live</option><option value="obs">OBS (my own stream)</option></select></div>
@@ -298,6 +318,7 @@
 			<button class="ghost-btn" id="lvInstantBtn" type="button">Clip the last 30 seconds</button>
 			<span class="studio-badge" id="lvStatus">idle</span>
 		  </div>
+		  </details>
 		  <p class="studio-note" id="lvNote"></p>
 		  <h3 class="studio-sub">Live transcript</h3>
 		  <div class="studio-transcript" id="lvTranscript"><em>Nothing yet</em></div>
@@ -352,249 +373,160 @@
 	  <div class="studio-modal-container">
 		<div class="studio-modal-header">
 		  <div class="studio-title-wrap">
-			<span class="kicker">OpusClip Studio &amp; AI Director</span>
+			<span class="kicker">Clip editor</span>
 			<h2 id="studioModalTitle">Clip Editor</h2>
 		  </div>
-		  <button class="ghost-btn close-studio-btn" id="closeStudioBtn">✕</button>
+		  <button class="ghost-btn close-studio-btn" id="closeStudioBtn" type="button" aria-label="Close">✕</button>
 		</div>
+
 		<div class="studio-modal-body">
-		  <div class="studio-preview-col">
+		  <aside class="studio-preview-col">
 			<div class="studio-video-frame">
-			  <video id="studioVideoPlayer" controls="controls" autoplay="autoplay" loop="loop" playsinline="playsinline"></video>
+			  <video id="studioVideoPlayer" controls playsinline></video>
 			</div>
 			<div class="studio-clip-stats">
-			  <span id="studioTimeBadge" class="badge cyan">0.0s → 0.0s</span>
-			  <span id="studioScoreBadge" class="badge pink">AI Selected</span>
+			  <span id="studioTimeBadge" class="badge cyan">-</span>
+			  <span id="studioScoreBadge" class="badge pink">-</span>
 			</div>
-			<!-- Virality Explanation Box -->
-			<div class="virality-card" id="studioViralityCard" style="margin-top: 14px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 12px;">
-			  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-				<span style="font-size: 0.75rem; text-transform: uppercase; color: var(--muted); letter-spacing: 0.1em;">Virality Rationale</span>
-				<strong id="studioViralityScoreVal" style="color: var(--pink); font-size: 0.95rem;">92/100</strong>
-			  </div>
-			  <p id="studioViralityExplanation" style="font-size: 0.82rem; color: #d0d7e5; line-height: 1.4;"></p>
-			</div>
-		  </div>
-		  <div class="studio-tabs-col">
-			<div class="studio-tabs-nav">
-			  <button class="tab-nav-btn active" data-tab="style">🎨 Opus Style &amp; Layout</button>
-			  <button class="tab-nav-btn" data-tab="youtube">🚀 YouTube Shorts</button>
-			  <button class="tab-nav-btn" data-tab="ai">🤖 AI Director</button>
-			  <button class="tab-nav-btn" data-tab="manual">✂️ Precision Trim</button>
-			  <button class="tab-nav-btn" data-tab="database">💾 Details</button>
-			</div>
+			<p id="studioRenderState" class="studio-note"></p>
+			<p id="studioViralityExplanation" class="studio-note"></p>
+		  </aside>
 
-			<!-- Tab 1: Style & Layout Presets -->
-			<div class="studio-tab-content" id="tabContentStyle" style="display: flex; flex-direction: column; gap: 16px;">
+		  <section class="studio-work-col">
+			<nav class="studio-seg" role="tablist">
+			  <button class="tab-nav-btn active" data-tab="style" type="button">Style</button>
+			  <button class="tab-nav-btn" data-tab="cut" type="button">Cut</button>
+			  <button class="tab-nav-btn" data-tab="ai" type="button">AI</button>
+			</nav>
+
+			<!-- Style: how the clip looks. Applying re-renders the clip. -->
+			<div class="studio-tab-content" id="tabContentStyle">
 			  <div class="manual-form-group">
-				<label>Subtitle Animation Preset</label>
-				<div class="preset-grid" id="presetSelectorGrid" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 8px;">
-				  <button type="button" class="preset-card active" data-style="hormozi">
-					<span class="preset-badge" style="background:#FFE500; color:#000;">YELLOW</span>
-					<span class="preset-title">Hormozi Viral</span>
-				  </button>
-				  <button type="button" class="preset-card" data-style="capcut_aqua">
-					<span class="preset-badge" style="background:#00F0FF; color:#000;">AQUA</span>
-					<span class="preset-title">CapCut Aqua Glow</span>
-				  </button>
-				  <button type="button" class="preset-card" data-style="mrbeast">
-					<span class="preset-badge" style="background:#FF2D55; color:#fff;">BEAST</span>
-					<span class="preset-title">MrBeast Impact</span>
-				  </button>
-				  <button type="button" class="preset-card" data-style="cyber_neon">
-					<span class="preset-badge" style="background:#FF007F; color:#fff;">NEON</span>
-					<span class="preset-title">Cyber Neon</span>
-				  </button>
-				  <button type="button" class="preset-card" data-style="clean_box">
-					<span class="preset-badge" style="background:#FFFFFF; color:#000;">BOX</span>
-					<span class="preset-title">Clean Minimal Box</span>
-				  </button>
-				  <button type="button" class="preset-card" data-style="underline_wave">
-					<span class="preset-badge" style="background:#38BDF8; color:#000;">WAVE</span>
-					<span class="preset-title">Underline Wave</span>
-				  </button>
+				<label>Caption style</label>
+				<div class="preset-grid" id="presetSelectorGrid">
+				  <button type="button" class="preset-card" data-style="hormozi"><span class="preset-badge" style="background:#FFE500; color:#000;">YELLOW</span><span class="preset-title">Hormozi Viral</span></button>
+				  <button type="button" class="preset-card" data-style="capcut_aqua"><span class="preset-badge" style="background:#00F0FF; color:#000;">AQUA</span><span class="preset-title">CapCut Aqua Glow</span></button>
+				  <button type="button" class="preset-card" data-style="mrbeast"><span class="preset-badge" style="background:#FF2D55; color:#fff;">BEAST</span><span class="preset-title">MrBeast Impact</span></button>
+				  <button type="button" class="preset-card" data-style="cyber_neon"><span class="preset-badge" style="background:#FF007F; color:#fff;">NEON</span><span class="preset-title">Cyber Neon</span></button>
+				  <button type="button" class="preset-card" data-style="clean_box"><span class="preset-badge" style="background:#FFFFFF; color:#000;">BOX</span><span class="preset-title">Clean Minimal Box</span></button>
+				  <button type="button" class="preset-card" data-style="underline_wave"><span class="preset-badge" style="background:#38BDF8; color:#000;">WAVE</span><span class="preset-title">Underline Wave</span></button>
 				</div>
 			  </div>
 
 			  <div class="manual-form-group">
-				<label>Camera Reframing Mode</label>
-				<div class="preset-grid" id="layoutSelectorGrid" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px;">
-				  <button type="button" class="layout-card active" data-layout="single_speaker">
-					<span>👤 Solo Speaker</span>
-				  </button>
-				  <button type="button" class="layout-card" data-layout="split_screen">
-					<span>👥 Podcast Split</span>
-				  </button>
-				  <button type="button" class="layout-card" data-layout="fit_blur">
-					<span>🖼️ Blurred Fit</span>
-				  </button>
+				<label>Framing</label>
+				<div class="layout-grid" id="layoutSelectorGrid">
+				  <button type="button" class="layout-card" data-layout="single_speaker">Solo speaker</button>
+				  <button type="button" class="layout-card" data-layout="split_screen">Podcast split</button>
+				  <button type="button" class="layout-card" data-layout="fit_blur">Blurred fit</button>
 				</div>
 			  </div>
 
-			  <div class="manual-form-group" style="display: flex; gap: 24px; flex-wrap: wrap; align-items: center; margin-top: 8px;">
-				<label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.85rem;">
-				  <input type="checkbox" id="studioKaraokeToggle" checked />
-				  <span>🎤 Word-by-Word Karaoke Pop</span>
-				</label>
-				<label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.85rem;">
-				  <input type="checkbox" id="studioMotionTitleToggle" checked />
-				  <span>🎬 Motion Title</span>
-				</label>
+			  <div class="manual-form-group studio-switches">
+				<label class="studio-switch"><input type="checkbox" id="studioKaraokeToggle" checked /> <span>Karaoke word pop</span></label>
+				<label class="studio-switch"><input type="checkbox" id="studioMotionTitleToggle" checked /> <span>Motion title</span></label>
 			  </div>
 
 			  <div class="manual-form-group">
-				<label>Thumbnail Visual Template</label>
-				<div class="preset-grid" id="thumbnailTemplateSelectorGrid" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px;">
-				  <button type="button" class="template-card active" data-template="0" style="padding: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: #fff; cursor: pointer; text-align: center;">
-					<span style="display: block; font-size: 0.72rem; font-weight: 700; color: #FF2D78;">NEON GLOW</span>
-					<span style="font-size: 0.68rem; color: #94a3b8;">Style #0</span>
-				  </button>
-				  <button type="button" class="template-card" data-template="1" style="padding: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: #fff; cursor: pointer; text-align: center;">
-					<span style="display: block; font-size: 0.72rem; font-weight: 700; color: #38bdf8;">BOLD SPLIT</span>
-					<span style="font-size: 0.68rem; color: #94a3b8;">Style #1</span>
-				  </button>
-				  <button type="button" class="template-card" data-template="2" style="padding: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: #fff; cursor: pointer; text-align: center;">
-					<span style="display: block; font-size: 0.72rem; font-weight: 700; color: #f8fafc;">MINIMAL CLEAN</span>
-					<span style="font-size: 0.68rem; color: #94a3b8;">Style #2</span>
-				  </button>
+				<label>Thumbnail template</label>
+				<div class="template-grid" id="thumbnailTemplateSelectorGrid">
+				  <button type="button" class="template-card" data-template="0">Neon glow</button>
+				  <button type="button" class="template-card" data-template="1">Bold split</button>
+				  <button type="button" class="template-card" data-template="2">Minimal clean</button>
 				</div>
 			  </div>
 
 			  <div class="manual-form-group">
-				<label>Clip Title / Headline</label>
-				<input type="text" id="studioStyleTitle" class="studio-input" placeholder="Viral Headline" />
+				<label for="studioStyleTitle">Title on the clip</label>
+				<input type="text" id="studioStyleTitle" class="studio-input" placeholder="Headline shown on the clip" />
 			  </div>
 
-			  <button class="primary-btn wide-btn" id="studioApplyStyleBtn" style="margin-top: 8px;">
-				<span>⚡ Apply Style &amp; Fast Re-Render</span>
-			  </button>
-			  <div id="studioRerenderStatus" style="font-size: 0.85rem; color: var(--muted); text-align: center;"></div>
+			  <button class="primary-btn wide-btn" id="studioApplyStyleBtn" type="button">Apply style and re-render</button>
+			  <p id="studioRerenderStatus" class="studio-note"></p>
 			</div>
 
-			<!-- Tab 2: AI Director -->
-			<div class="studio-tab-content" id="tabContentAi" style="display: none;">
+			<!-- Cut: pick the words to keep. Cuts land on word edges, so captions stay in sync. -->
+			<div class="studio-tab-content" id="tabContentCut" hidden>
+			  <p class="studio-note">Click a word to start the cut, then click the last word to keep. Click once more to start over.</p>
+			  <div class="studio-words" id="studioCutWords"><em>Loading words...</em></div>
+			  <p class="studio-note" id="studioCutSummary"></p>
+			  <div class="studio-actions">
+				<button class="ghost-btn" id="studioPlaySelBtn" type="button">Play selection</button>
+				<button class="ghost-btn" id="studioClearCutBtn" type="button">Clear selection</button>
+				<button class="primary-btn" id="studioApplyCutBtn" type="button">Apply cut</button>
+				<button class="ghost-btn" id="studioResetCutBtn" type="button">Use full clip</button>
+			  </div>
+			  <p id="studioCutStatus" class="studio-note"></p>
+			</div>
+
+			<!-- AI: ask the director to change the clip in plain words. -->
+			<div class="studio-tab-content" id="tabContentAi" hidden>
 			  <div class="ai-chat-box" id="studioAiChatBox">
-				<div class="ai-chat-msg system">👋 Hello! I'm your OmniRoute AI Director. Ask me to rewrite the hook, make it punchier, summarize, or adjust the edit in natural language!</div>
+				<div class="ai-chat-msg system">Ask for a change in plain words, for example "make the hook punchier" or "shorten the middle".</div>
 			  </div>
 			  <div class="ai-quick-prompts">
-				<button class="quick-prompt-btn" data-prompt="Make the hook much punchier and exciting">🔥 Punchy Hook</button>
-				<button class="quick-prompt-btn" data-prompt="Shorten the clip by removing dead air">⚡ Trim Dead Air</button>
-				<button class="quick-prompt-btn" data-prompt="Generate viral catchy caption and hashtags">✨ Viral Caption</button>
+				<button class="quick-prompt-btn" type="button" data-prompt="Make the hook much punchier and exciting">Punchier hook</button>
+				<button class="quick-prompt-btn" type="button" data-prompt="Shorten the clip by removing dead air">Trim dead air</button>
+				<button class="quick-prompt-btn" type="button" data-prompt="Generate viral catchy caption and hashtags">New caption and hashtags</button>
 			  </div>
 			  <div class="ai-chat-input-row">
-				<input type="text" id="studioAiInput" placeholder="Ask AI to re-edit or refine clip..." />
-				<button class="primary-btn" id="studioAiSendBtn">Send</button>
+				<input type="text" id="studioAiInput" placeholder="Ask for a change..." />
+				<button class="primary-btn" id="studioAiSendBtn" type="button">Send</button>
 			  </div>
 			</div>
 
-			<!-- Tab 3: Precision Edit -->
-			<div class="studio-tab-content" id="tabContentManual" style="display: none; flex-direction: column; gap: 16px;">
-			  <div class="manual-form-group">
-				<label>Clip Title</label>
-				<input type="text" id="studioEditTitle" class="studio-input" />
+			<!-- Publish: its own step. Upload always asks for confirmation first. -->
+			<details class="studio-disclosure" id="studioPublish">
+			  <summary>Publish to YouTube</summary>
+			  <div id="ytAuthBanner" class="studio-auth-banner">
+				<div id="ytAuthStatusText"><span class="studio-note">Checking YouTube status...</span></div>
+				<button type="button" class="ghost-btn" id="ytConnectBtn">Channel settings</button>
 			  </div>
-
 			  <div class="manual-form-group">
-				<label>Interactive Timeline Trim &amp; Scrub</label>
-				<div class="studio-timeline-editor-box" id="studioTimelineEditorBox">
-				  <div class="timeline-track-bar" id="studioTimelineTrackBar">
-					<div class="timeline-selection-range" id="studioTimelineSelectionRange"></div>
-					<div class="timeline-playhead" id="studioTimelinePlayhead"></div>
-				  </div>
-				  <div class="timeline-time-labels">
-					<span id="studioTimeStartLabel">0.0s</span>
-					<span id="studioTimeDurationLabel">Duration: 0.0s</span>
-					<span id="studioTimeEndLabel">60.0s</span>
-				  </div>
-				</div>
+				<label for="ytUploadTitle">Shorts title (max 100 characters)</label>
+				<input type="text" id="ytUploadTitle" class="studio-input" maxlength="100" />
 			  </div>
-
+			  <div class="manual-form-group">
+				<label for="ytUploadDesc">Description</label>
+				<textarea id="ytUploadDesc" class="studio-input" rows="4"></textarea>
+			  </div>
 			  <div class="manual-form-row">
 				<div class="manual-form-group">
-				  <label>Start Time (s)</label>
-				  <input type="number" step="0.1" id="studioEditStart" class="studio-input" />
+				  <label for="ytUploadHashtags">Hashtags</label>
+				  <input type="text" id="ytUploadHashtags" class="studio-input" />
 				</div>
 				<div class="manual-form-group">
-				  <label>End Time (s)</label>
-				  <input type="number" step="0.1" id="studioEditEnd" class="studio-input" />
-				</div>
-			  </div>
-			  <button class="primary-btn wide-btn" id="studioSaveManualBtn">Save &amp; Apply Edits</button>
-			</div>
-
-			<!-- Tab 4: YouTube Shorts Upload -->
-			<div class="studio-tab-content" id="tabContentYoutube" style="display: none; flex-direction: column; gap: 14px;">
-			  <div id="ytAuthBanner" style="padding: 12px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between; align-items: center;">
-				<div id="ytAuthStatusText">
-				  <span style="font-size: 0.85rem; color: var(--muted);">Checking YouTube status...</span>
-				</div>
-				<button type="button" class="ghost-btn" id="ytConnectBtn" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;">🔗 Channel Settings</button>
-			  </div>
-
-			  <div class="manual-form-group">
-				<label>Shorts Title (Max 100 chars)</label>
-				<input type="text" id="ytUploadTitle" class="studio-input" placeholder="Viral Hook Title #Shorts" maxlength="100" />
-			  </div>
-
-			  <div class="manual-form-group">
-				<label>SEO Description &amp; Hashtags</label>
-				<textarea id="ytUploadDesc" class="studio-input" rows="4" style="resize: vertical; font-family: inherit; font-size: 0.85rem;" placeholder="Engaging description + hashtags..."></textarea>
-			  </div>
-
-			  <div class="manual-form-row">
-				<div class="manual-form-group">
-				  <label>Hashtags</label>
-				  <input type="text" id="ytUploadHashtags" class="studio-input" placeholder="#Shorts #Viral #Trending" />
-				</div>
-				<div class="manual-form-group">
-				  <label>Privacy Setting</label>
+				  <label for="ytUploadPrivacy">Privacy</label>
 				  <select id="ytUploadPrivacy" class="studio-input">
-					<option value="public">Public (Instant Live)</option>
+					<option value="public">Public</option>
 					<option value="unlisted" selected>Unlisted</option>
 					<option value="private">Private</option>
 				  </select>
 				</div>
 			  </div>
+			  <button class="primary-btn wide-btn" id="ytDoUploadBtn" type="button">Upload to YouTube Shorts</button>
+			  <p id="ytUploadStatus" class="studio-note"></p>
+			</details>
 
-			  <button type="button" class="primary-btn wide-btn" id="ytDoUploadBtn" style="background: linear-gradient(135deg, #FF0000, #CC0000); margin-top: 4px;">
-				<span>🚀 Upload to YouTube Shorts Now</span>
-			  </button>
-			  <div id="ytUploadStatus" style="font-size: 0.85rem; text-align: center; color: var(--muted);"></div>
-			</div>
-
-			<!-- Tab 5: Database / Info -->
-			<div class="studio-tab-content" id="tabContentDatabase" style="display: none;">
-			  <div class="manual-form-group">
-				<label>SQLite Database Storage</label>
-				<p style="color: var(--muted); font-size: 0.9rem; margin-bottom: 1rem;">Active database: <code>storage/app.db</code></p>
-				<div class="manual-form-row">
-				  <div class="manual-form-group">
-					<label>Clip Record ID</label>
-					<input type="text" id="dbClipId" class="studio-input" readonly="readonly" />
-				  </div>
-				  <div class="manual-form-group">
-					<label>Parent Job ID</label>
-					<input type="text" id="dbJobId" class="studio-input" readonly="readonly" />
-				  </div>
-				</div>
-				<div class="manual-form-group" style="margin-top: 1rem;">
-				  <label>Virality Score &amp; Status</label>
-				  <input type="text" id="dbStateInfo" class="studio-input" readonly="readonly" />
-				</div>
-				<div class="manual-actions-row" style="margin-top: 16px;">
-				  <button class="ghost-btn" id="studioUploadBtn">Upload to YouTube</button>
-				  <a id="studioOpenRawBtn" class="ghost-btn link-btn" target="_blank" rel="noreferrer">Open Raw MP4</a>
-				  <button class="ghost-btn" id="studioOpenFolderBtn">📁 Open Folder</button>
-				</div>
+			<!-- Info: what this clip is. Storage paths and record ids stay out of sight. -->
+			<details class="studio-disclosure" id="studioInfo">
+			  <summary>Clip info</summary>
+			  <dl class="studio-info-list">
+				<dt>Job</dt><dd id="studioInfoJob">-</dd>
+				<dt>Clip</dt><dd id="studioInfoClip">-</dd>
+				<dt>Length</dt><dd id="studioInfoLength">-</dd>
+				<dt>Caption and framing</dt><dd id="studioInfoStyle">-</dd>
+			  </dl>
+			  <div class="studio-actions">
+				<a id="studioOpenRawBtn" class="ghost-btn link-btn" target="_blank" rel="noreferrer">Open the MP4</a>
+				<button class="ghost-btn" id="studioOpenFolderBtn" type="button">Open folder</button>
 			  </div>
-			</div>
-
-		  </div>
+			</details>
+		  </section>
 		</div>
 	  </div>
 	</div>
 
-	<!-- YouTube Channel Auth & Setup Modal -->
 	<div class="studio-modal-backdrop" id="ytAuthModal" style="display: none;">
 	  <div class="studio-modal-card" style="max-width: 480px;">
 		<div class="studio-modal-header">
