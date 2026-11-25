@@ -218,7 +218,7 @@ async def suggest_clips_for_job(
 async def create_job(
     youtube_url: str,
     style_prompt: Optional[str] = None,
-    whisper_model: Optional[str] = "tiny",
+    whisper_model: Optional[str] = None,
     caption_style: Optional[str] = "mrbeast",
     layout_mode: Optional[str] = "auto",
     target_clips: Optional[int] = 10,
@@ -261,7 +261,7 @@ async def create_job(
 async def zero_view_diagnostic_endpoint(
     youtube_url: Optional[str] = Form(None),
     style_prompt: Optional[str] = Form(None),
-    whisper_model: Optional[str] = Form("tiny"),
+    whisper_model: Optional[str] = Form(None),
     caption_style: Optional[str] = Form("mrbeast"),
     layout_mode: Optional[str] = Form("auto"),
     target_clips: Optional[int] = Form(10),
@@ -320,7 +320,7 @@ async def zero_view_diagnostic_endpoint(
 async def create_job_from_upload(
     file: UploadFile = File(...),
     style_prompt: Optional[str] = Form(None),
-    whisper_model: Optional[str] = Form("tiny"),
+    whisper_model: Optional[str] = Form(None),
     caption_style: Optional[str] = Form("mrbeast"),
     layout_mode: Optional[str] = Form("auto"),
     target_clips: Optional[int] = Form(10),

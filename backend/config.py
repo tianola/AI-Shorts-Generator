@@ -85,9 +85,12 @@ class Settings(BaseSettings):
         description="Groq transcription model"
     )
     # faster-whisper transcription model size (local fallback)
+    # `small` is the smallest size that keeps names and Greek words mostly intact;
+    # `tiny` garbled them, and its captions are what the viewer reads. On a GPU,
+    # large-v3-turbo is near large-v3 quality at a fraction of its time.
     WHISPER_MODEL_SIZE: str = Field(
-        default="tiny",
-        description="Transcription model size (faster-whisper): tiny, base, small, medium, large"
+        default="small",
+        description="Local faster-whisper model: tiny, base, small, medium, large-v3, large-v3-turbo"
     )
     WHISPER_PT_MODELS_DIR: str = Field(
         default=r"E:\01-AI-PROJECTS\whisper-models",

@@ -229,3 +229,28 @@ def test_story_and_selection_send_the_same_cached_prefix(tmp_path, monkeypatch):
     assert story["context"] and story["context"] == candidates["context"]
     assert story["system"] == candidates["system"]
     assert candidates["effort"] == "high" and story["effort"] == "medium"
+
+
+# --------------------------------------------------------------------------
+# transcription defaults
+# --------------------------------------------------------------------------
+
+def test_jobs_created_without_a_model_use_the_configured_provider():
+    import inspect
+    from api import jobs as jobs_api
+    assert inspect.signature(jobs_api.create_job).parameters["whisper_model"].default is None
+    assert Job.__table__.c.whisper_model.default is None
+
+
+def test_local_whisper_default_is_not_tiny():
+    from config import Settings
+    assert Settings.model_fields["WHISPER_MODEL_SIZE"].default == "small"
+
+
+def test_whisper_uses_the_gpu_when_ctranslate2_sees_one(monkeypatch):
+    import sys
+    from services import whisper as whisper_service
+    monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(get_cuda_device_count=lambda: 1))
+    assert whisper_service._whisper_device() == ("cuda", "float16")
+    monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(get_cuda_device_count=lambda: 0))
+    assert whisper_service._whisper_device() == ("cpu", "int8")
