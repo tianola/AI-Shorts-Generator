@@ -3,10 +3,10 @@ import asyncio
 import sys
 from pathlib import Path
 
-backend_dir = Path(__file__).parent / "backend"
+backend_dir = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(backend_dir))
 
-async def test_vlm_fallback():
+async def check_vlm_fallback():
     """Test VLM scene attention on clip_0 from job 93"""
     from services import reframe_plan
     from services.vlm_scene_attention import build_vlm_attention
@@ -50,6 +50,6 @@ async def test_vlm_fallback():
     return attention
 
 if __name__ == "__main__":
-    attention = asyncio.run(test_vlm_fallback())
+    attention = asyncio.run(check_vlm_fallback())
     print(f"\n{'='*60}")
     print(f"Total scenes found: {len(attention.get('scenes', []))}")
