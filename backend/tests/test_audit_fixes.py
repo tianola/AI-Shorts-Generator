@@ -209,7 +209,7 @@ def test_story_and_selection_send_the_same_cached_prefix(tmp_path, monkeypatch):
     calls = []
 
     async def fake_claude(prompt, system, schema, model=None, max_tokens=16000,
-                          effort="medium", context=""):
+                          effort="medium", context="", visual=None):
         calls.append({"system": system, "context": context, "effort": effort,
                       "kind": next(iter(schema["properties"]))})
         if "story_summary" in schema["properties"]:
@@ -254,3 +254,70 @@ def test_whisper_uses_the_gpu_when_ctranslate2_sees_one(monkeypatch):
     assert whisper_service._whisper_device() == ("cuda", "float16")
     monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(get_cuda_device_count=lambda: 0))
     assert whisper_service._whisper_device() == ("cpu", "int8")
+
+
+# --------------------------------------------------------------------------
+# judge keyframes
+# --------------------------------------------------------------------------
+
+def test_sample_times_open_on_the_first_second():
+    from services.judge_frames import sample_times
+    assert sample_times(10.0, 40.0, 4) == [10.5, 17.88, 25.25, 32.62]
+    assert sample_times(10.0, 40.0, 0) == []
+    assert sample_times(10.0, 10.0, 4) == []
+
+
+def test_images_sit_between_the_cached_context_and_the_task():
+    from services.claude_client import _user_content
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "x"}}
+    blocks = _user_content("task", "ctx", [image])
+    assert [b["type"] for b in blocks] == ["text", "image", "text"]
+    assert _user_content("task", "", [image])[-1]["text"] == "task"
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="needs ffmpeg")
+def test_judge_frames_come_from_the_source_video():
+    from services.judge_frames import judge_frame_blocks
+    video = Path(__file__).parent / "fixtures" / "test_720p.mp4"
+    blocks = asyncio.run(judge_frame_blocks(str(video), [{"start": 0.0, "end": 2.0}], 2))
+    images = [b for b in blocks if b["type"] == "image"]
+    assert len(images) == 2
+    assert "c0" in blocks[1]["text"]
+    assert asyncio.run(judge_frame_blocks(None, [{"start": 0.0, "end": 2.0}], 2)) == []
+
+
+def test_the_judge_gets_frames_only_on_claude(tmp_path, monkeypatch):
+    import json as _json
+    from services import claude_client, clip_selector
+
+    segments = [{"start": float(i * 10), "end": float(i * 10 + 10), "text": f"sentence number {i}."}
+                for i in range(12)]
+    seg_file = tmp_path / "segments.json"
+    seg_file.write_text(_json.dumps(segments), encoding="utf-8")
+    seen = {}
+
+    async def fake_frames(video_path, clips, per_clip):
+        seen["frames_for"] = video_path
+        return [{"type": "text", "text": "frames"}]
+
+    async def fake_claude(prompt, system, schema, model=None, max_tokens=16000,
+                          effort="medium", context="", visual=None):
+        if "ranked" in schema["properties"]:
+            seen["visual"] = visual
+            return _json.dumps({"ranked": []})
+        if "clips" in schema["properties"]:
+            return _json.dumps({"clips": [
+                {"start": 0.0, "end": 30.0, "title": "A", "hook": "h", "why": "w", "virality_score": 0.5},
+                {"start": 60.0, "end": 90.0, "title": "B", "hook": "h", "why": "w", "virality_score": 0.5},
+            ]})
+        return _json.dumps({"story_summary": "s", "hook": "h", "story_type": "reveal",
+                            "recommended_layout": "centered_face", "cta": "c", "key_moments": []})
+
+    import services.judge_frames as judge_frames
+    monkeypatch.setattr(judge_frames, "judge_frame_blocks", fake_frames)
+    monkeypatch.setattr(claude_client, "claude_available", lambda: True)
+    monkeypatch.setattr(claude_client, "call_claude_json", fake_claude)
+    asyncio.run(clip_selector.select_clips(str(seg_file), num_clips=1, mode="viral",
+                                           video_path="/v/source.mp4"))
+    assert seen["frames_for"] == "/v/source.mp4"
+    assert seen["visual"] == [{"type": "text", "text": "frames"}]

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import string
+from typing import Optional
 from loguru import logger
 from config import settings
 from services.claude_client import SHORTS_SYSTEM as _SELECTION_SYSTEM
@@ -108,13 +109,15 @@ _OMNIROUTE_MIN_TOKENS = 12000
 
 
 async def _selection_model_json(prompt: str, schema: dict, max_tokens: int, *,
-                                context: str = "", effort: str = "high") -> tuple:
+                                context: str = "", effort: str = "high",
+                                visual: Optional[list] = None) -> tuple:
     """Ask Claude when a key is configured, else (or on failure) the OmniRoute chain.
 
     `context` (the transcript) is sent to Claude as a separate cached block so the
     story pass and the candidate pass share it; the OmniRoute chain has no cache
     and gets it inline ahead of the task. `effort` is Claude's thinking depth:
     high for picking candidates, medium for the judge, which reads far less.
+    `visual` (keyframe image blocks) goes to Claude only; the free chain is text.
 
     Returns the reply text and the path it came from ("claude" or "ai").
     """
@@ -129,6 +132,7 @@ async def _selection_model_json(prompt: str, schema: dict, max_tokens: int, *,
                 max_tokens=max_tokens + _CLAUDE_THINKING_HEADROOM,
                 effort=effort,
                 context=context,
+                visual=visual,
             ), "claude"
         except Exception as exc:
             logger.warning(f"Claude clip-selection call failed ({type(exc).__name__}: {exc}); trying OmniRoute")
@@ -366,7 +370,8 @@ Return ONLY valid JSON in this shape:
 """
 
 
-async def _judge_candidates(clips: list, segments: list, num_clips: int, mode: str = "viral") -> bool:
+async def _judge_candidates(clips: list, segments: list, num_clips: int, mode: str = "viral",
+                            video_path: Optional[str] = None) -> bool:
     """Second pass: an editor's verdict on what the viewer will actually hear.
 
     The first pass rates its own picks while reading the whole transcript. Here the
@@ -403,8 +408,14 @@ Return ONLY valid JSON:
 """
 
     try:
+        visual = None
+        from services.claude_client import claude_available
+        if claude_available():
+            from services.judge_frames import judge_frame_blocks
+            visual = await judge_frame_blocks(video_path, clips, int(settings.JUDGE_FRAMES_PER_CLIP)) or None
         text, _ = await _selection_model_json(
-            prompt, JUDGE_SCHEMA, max_tokens=max(3000, len(clips) * 260), effort="medium"
+            prompt, JUDGE_SCHEMA, max_tokens=max(3000, len(clips) * 260), effort="medium",
+            visual=visual,
         )
         data = salvage_incomplete_json(text.replace("```json", "").replace("```", "").strip())
         ranked = data.get("ranked")
@@ -753,7 +764,7 @@ def _composite_score_v2(clip: dict) -> float:
 
 
 async def select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None,
-                       mode: str = "viral") -> list:
+                       mode: str = "viral", video_path: Optional[str] = None) -> list:
     """Select clips (see _select_clips). mode="auto" reads the video and picks the mode;
     every clip carries the mode that was used as "edit_mode"."""
     mode = normalise_mode(mode)
@@ -764,14 +775,15 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
         except (OSError, ValueError):
             mode = "viral"
         logger.info(f"Editing mode picked for this video: {mode}")
-    clips = await _select_clips(segments_file, num_clips, video_title, temporal_events, mode)
+    clips = await _select_clips(segments_file, num_clips, video_title, temporal_events, mode,
+                                video_path=video_path)
     for clip in clips:
         clip["edit_mode"] = mode
     return clips
 
 
 async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None,
-                        mode: str = "viral") -> list:
+                        mode: str = "viral", video_path: Optional[str] = None) -> list:
     """
     Select the best clips from a video using AI, in two passes.
 
@@ -904,7 +916,8 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
             valid_clips.append(clip)
 
         candidate_count = len(valid_clips)
-        judged = candidate_count > 1 and await _judge_candidates(valid_clips, segments, num_clips, mode)
+        judged = candidate_count > 1 and await _judge_candidates(valid_clips, segments, num_clips, mode,
+                                                                    video_path=video_path)
         if judged:
             # A reject is final: a clip the editor refused is not brought back by its
             # first-pass score. Unrated candidates (no usable row) stay in.

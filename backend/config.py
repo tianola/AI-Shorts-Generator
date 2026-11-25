@@ -175,6 +175,14 @@ class Settings(BaseSettings):
     # ====================
     # CLIP SELECTION
     # ====================
+    # Frames per candidate shown to the judge pass when it runs on Claude
+    # (ANTHROPIC_API_KEY set). 0 judges on the words only, as the free chain does.
+    JUDGE_FRAMES_PER_CLIP: int = Field(
+        default=4,
+        ge=0,
+        le=8,
+        description="Keyframes per candidate the Claude judge sees (0 = words only)"
+    )
     NUM_CLIPS: int = Field(
         default=4,
         ge=1,

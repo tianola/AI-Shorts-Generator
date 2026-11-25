@@ -167,7 +167,7 @@ async def test_auto_picks_a_mode_and_tags_every_clip(monkeypatch, tmp_path):
     async def fake_infer(title, segments):
         return "gaming"
 
-    async def fake_inner(path, num, title, events, mode):
+    async def fake_inner(path, num, title, events, mode, **kwargs):
         seen["mode"] = mode
         return [{"start": 0.0, "end": 30.0}]
     monkeypatch.setattr(clip_selector, "infer_mode", fake_infer)
