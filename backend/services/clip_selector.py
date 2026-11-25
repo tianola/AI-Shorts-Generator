@@ -9,6 +9,7 @@ import re
 import string
 from loguru import logger
 from config import settings
+from services.claude_client import SHORTS_SYSTEM as _SELECTION_SYSTEM
 from services.clip_bounds import load_words, snap_to_sentences
 from services.clip_judging import (
     AUTO, JUDGE_SCHEMA, apply_penalties, dimension_score, fit_to_topic, infer_mode, judge_instructions,
@@ -16,7 +17,7 @@ from services.clip_judging import (
 )
 from services.llm_router import call_llm_json, pick_model, salvage_incomplete_json
 from services.metadata import derive_title_from_text
-from services.story_analysis import analyze_story_segments
+from services.story_analysis import analyze_story_segments, transcript_block
 from services.tone_detector import is_transcript_somber, classify_content_tone
 
 # Power words for engagement keyword detection (case-insensitive).
@@ -95,11 +96,6 @@ _CANDIDATE_SCHEMA = {
 # renders something to review, not so it reaches the channel unattended.
 MODEL_SELECTION_PATHS = ("claude", "ai")
 
-_SELECTION_SYSTEM = (
-    "You pick and judge moments from long videos for standalone vertical shorts. "
-    "You are honest about quality and you answer with JSON only."
-)
-
 # Adaptive thinking is billed inside max_tokens on Claude, so the reply budget the
 # OmniRoute chain needs is not enough headroom there.
 _CLAUDE_THINKING_HEADROOM = 16000
@@ -111,8 +107,14 @@ _CLAUDE_THINKING_HEADROOM = 16000
 _OMNIROUTE_MIN_TOKENS = 12000
 
 
-async def _selection_model_json(prompt: str, schema: dict, max_tokens: int) -> tuple:
+async def _selection_model_json(prompt: str, schema: dict, max_tokens: int, *,
+                                context: str = "", effort: str = "high") -> tuple:
     """Ask Claude when a key is configured, else (or on failure) the OmniRoute chain.
+
+    `context` (the transcript) is sent to Claude as a separate cached block so the
+    story pass and the candidate pass share it; the OmniRoute chain has no cache
+    and gets it inline ahead of the task. `effort` is Claude's thinking depth:
+    high for picking candidates, medium for the judge, which reads far less.
 
     Returns the reply text and the path it came from ("claude" or "ai").
     """
@@ -125,13 +127,14 @@ async def _selection_model_json(prompt: str, schema: dict, max_tokens: int) -> t
                 system=_SELECTION_SYSTEM,
                 schema=schema,
                 max_tokens=max_tokens + _CLAUDE_THINKING_HEADROOM,
-                effort="high",
+                effort=effort,
+                context=context,
             ), "claude"
         except Exception as exc:
             logger.warning(f"Claude clip-selection call failed ({type(exc).__name__}: {exc}); trying OmniRoute")
 
     text = await call_llm_json(
-        prompt=prompt,
+        prompt=f"{context}\n{prompt}" if context else prompt,
         system=_SELECTION_SYSTEM,
         model=pick_model(),
         temperature=0.35,
@@ -253,10 +256,6 @@ def _spoken_language_hint(segments: list) -> str:
 def _candidate_prompt(segments: list, story_plan: dict, wanted: int, num_clips: int,
                       video_title: str, temporal_events, mode: str = "viral",
                       topic_breaks=None) -> str:
-    transcript_text = "".join(
-        f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}\n" for seg in segments
-    )
-
     key_moments = ""
     for moment in (story_plan.get("key_moments") or [])[:8]:
         if isinstance(moment, dict) and moment.get("start") is not None:
@@ -290,7 +289,8 @@ def _candidate_prompt(segments: list, story_plan: dict, wanted: int, num_clips: 
         )
 
     return f"""
-You are choosing moments from a long video to publish as standalone vertical shorts
+The transcript above is the whole video, with timestamps.
+You are choosing moments from that video to publish as standalone vertical shorts
 (YouTube Shorts / TikTok). A viewer decides in the first 1-3 seconds whether to swipe
 away, and most of them never saw the full video, so every pick has to work for a
 stranger with zero context.
@@ -347,9 +347,7 @@ For each candidate:
 
 Language: write title and why in the language spoken in the transcript{language_note}.
 Never switch to another language or script.
-
-Transcript:
-{transcript_text}{visual_events_block}
+{visual_events_block}
 Return ONLY valid JSON in this shape:
 {{
   "clips": [
@@ -406,7 +404,7 @@ Return ONLY valid JSON:
 
     try:
         text, _ = await _selection_model_json(
-            prompt, JUDGE_SCHEMA, max_tokens=max(3000, len(clips) * 260)
+            prompt, JUDGE_SCHEMA, max_tokens=max(3000, len(clips) * 260), effort="medium"
         )
         data = salvage_incomplete_json(text.replace("```json", "").replace("```", "").strip())
         ranked = data.get("ranked")
@@ -806,7 +804,8 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
 
     try:
         response_text, source = await _selection_model_json(
-            prompt, _CANDIDATE_SCHEMA, max_tokens=max(2000, wanted * CLIP_OUTPUT_TOKENS)
+            prompt, _CANDIDATE_SCHEMA, max_tokens=max(2000, wanted * CLIP_OUTPUT_TOKENS),
+            context=transcript_block(segments),
         )
 
         response_text = response_text.replace("```json", "").replace("```", "").strip()

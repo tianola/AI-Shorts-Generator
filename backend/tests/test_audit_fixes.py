@@ -183,3 +183,49 @@ def test_service_and_compose_do_not_hard_code_every_interface():
     assert 'host="0.0.0.0"' not in service
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     assert '"127.0.0.1:${SHORTS_API_HOST_PORT:-5002}:5001"' in compose
+
+
+# --------------------------------------------------------------------------
+# Claude passes share one cached transcript
+# --------------------------------------------------------------------------
+
+def test_context_is_sent_as_a_cached_block_before_the_task():
+    from services.claude_client import _user_content
+    assert _user_content("task", "") == "task"
+    blocks = _user_content("task", "Transcript:\n[0.0s - 1.0s] hi\n")
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert blocks[1] == {"type": "text", "text": "task"}
+
+
+def test_story_and_selection_send_the_same_cached_prefix(tmp_path, monkeypatch):
+    import json as _json
+    from services import claude_client, clip_selector
+
+    segments = [{"start": float(i * 10), "end": float(i * 10 + 10), "text": f"sentence number {i}."}
+                for i in range(12)]
+    seg_file = tmp_path / "segments.json"
+    seg_file.write_text(_json.dumps(segments), encoding="utf-8")
+
+    calls = []
+
+    async def fake_claude(prompt, system, schema, model=None, max_tokens=16000,
+                          effort="medium", context=""):
+        calls.append({"system": system, "context": context, "effort": effort,
+                      "kind": next(iter(schema["properties"]))})
+        if "story_summary" in schema["properties"]:
+            return _json.dumps({"story_summary": "s", "hook": "h", "story_type": "reveal",
+                                "recommended_layout": "centered_face", "cta": "c",
+                                "key_moments": []})
+        if "ranked" in schema["properties"]:
+            return _json.dumps({"ranked": []})
+        return _json.dumps({"clips": []})
+
+    monkeypatch.setattr(claude_client, "claude_available", lambda: True)
+    monkeypatch.setattr(claude_client, "call_claude_json", fake_claude)
+    asyncio.run(clip_selector.select_clips(str(seg_file), num_clips=1))
+
+    story, candidates = calls[0], calls[1]
+    assert story["kind"] == "story_summary" and candidates["kind"] == "clips"
+    assert story["context"] and story["context"] == candidates["context"]
+    assert story["system"] == candidates["system"]
+    assert candidates["effort"] == "high" and story["effort"] == "medium"
