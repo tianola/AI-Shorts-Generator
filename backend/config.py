@@ -177,6 +177,18 @@ class Settings(BaseSettings):
     # ====================
     # Frames per candidate shown to the judge pass when it runs on Claude
     # (ANTHROPIC_API_KEY set). 0 judges on the words only, as the free chain does.
+    # Send the Claude passes through the Message Batches API: half the token
+    # price, but each call can take minutes. Meant for unattended runs.
+    CLAUDE_USE_BATCH: bool = Field(
+        default=False,
+        description="Route Claude selection calls through the Batches API (50% cheaper, slower)"
+    )
+    CLAUDE_BATCH_TIMEOUT_MINUTES: int = Field(
+        default=30,
+        ge=1,
+        le=1440,
+        description="How long a batched Claude call may wait before falling back to a direct call"
+    )
     JUDGE_FRAMES_PER_CLIP: int = Field(
         default=4,
         ge=0,
