@@ -39,6 +39,7 @@ from services.youtube import download_youtube
 from services.audio import extract_audio
 from services.whisper import transcribe_audio_file
 from services.clip_selector import select_clips
+from services.channel_examples import channel_examples_safe
 from services.audio_energy_scorer import score_segments as score_audio_energy
 from services.smart_crop import smart_crop_video
 from services.word_cropper import crop_words
@@ -941,9 +942,15 @@ async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_t
     num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else settings.NUM_CLIPS
     # The source sits next to the transcript; the Claude judge samples frames from it.
     source_video = os.path.join(os.path.dirname(segments_file), "source.mp4")
+    # The channel's own best and worst published clips, by real views; "" until
+    # enough stats have been synced back from YouTube.
+    examples = await asyncio.to_thread(channel_examples_safe, job_id)
+    if examples:
+        job_info(job_id, "Clip selection sees this channel's most and least watched shorts")
     clips = await select_clips(segments_file, num_target_clips, video_title=source_title, temporal_events=temporal_events,
                                mode=getattr(job, "clip_mode", None) or "auto",
-                               video_path=source_video if os.path.exists(source_video) else None)
+                               video_path=source_video if os.path.exists(source_video) else None,
+                               channel_examples=examples)
     job_info(job_id, f"Selected {len(clips)} clips")
     update_progress(f"Selected {len(clips)} clips", 56)
     

@@ -259,7 +259,7 @@ def _spoken_language_hint(segments: list) -> str:
 
 def _candidate_prompt(segments: list, story_plan: dict, wanted: int, num_clips: int,
                       video_title: str, temporal_events, mode: str = "viral",
-                      topic_breaks=None) -> str:
+                      topic_breaks=None, channel_examples: str = "") -> str:
     key_moments = ""
     for moment in (story_plan.get("key_moments") or [])[:8]:
         if isinstance(moment, dict) and moment.get("start") is not None:
@@ -279,6 +279,8 @@ def _candidate_prompt(segments: list, story_plan: dict, wanted: int, num_clips: 
                 "Use the visual events to prefer moments where something also HAPPENS on screen "
                 "(a person enters, an object appears, the scene changes), not only where the talk is good.\n"
             )
+
+    examples_block = f"\n{channel_examples}\n" if channel_examples else ""
 
     language = _spoken_language_hint(segments)
     language_note = f" ({language})" if language else ""
@@ -300,7 +302,7 @@ away, and most of them never saw the full video, so every pick has to work for a
 stranger with zero context.
 {title_line}
 What the video is about: {story_plan.get('story_summary', '')}
-{mode_block}{key_moments_block}
+{mode_block}{key_moments_block}{examples_block}
 Find the {wanted} strongest candidate moments. That is more than will be published on
 purpose: a second pass ranks them and keeps the best {num_clips}, so include a real
 range rather than padding with near-duplicates. Candidates must not overlap.
@@ -371,7 +373,7 @@ Return ONLY valid JSON in this shape:
 
 
 async def _judge_candidates(clips: list, segments: list, num_clips: int, mode: str = "viral",
-                            video_path: Optional[str] = None) -> bool:
+                            video_path: Optional[str] = None, channel_examples: str = "") -> bool:
     """Second pass: an editor's verdict on what the viewer will actually hear.
 
     The first pass rates its own picks while reading the whole transcript. Here the
@@ -401,6 +403,7 @@ what the viewer hears, from the first word to the last. Judge each as a stranger
 a feed who has never seen the video. A weak opening caps the overall impression, because
 viewers leave before the rest matters.
 {judge_instructions(num_clips, mode)}
+{channel_examples + chr(10) if channel_examples else ""}
 {candidates_text}
 
 Return ONLY valid JSON:
@@ -764,7 +767,8 @@ def _composite_score_v2(clip: dict) -> float:
 
 
 async def select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None,
-                       mode: str = "viral", video_path: Optional[str] = None) -> list:
+                       mode: str = "viral", video_path: Optional[str] = None,
+                       channel_examples: str = "") -> list:
     """Select clips (see _select_clips). mode="auto" reads the video and picks the mode;
     every clip carries the mode that was used as "edit_mode"."""
     mode = normalise_mode(mode)
@@ -776,14 +780,15 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
             mode = "viral"
         logger.info(f"Editing mode picked for this video: {mode}")
     clips = await _select_clips(segments_file, num_clips, video_title, temporal_events, mode,
-                                video_path=video_path)
+                                video_path=video_path, channel_examples=channel_examples)
     for clip in clips:
         clip["edit_mode"] = mode
     return clips
 
 
 async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None,
-                        mode: str = "viral", video_path: Optional[str] = None) -> list:
+                        mode: str = "viral", video_path: Optional[str] = None,
+                        channel_examples: str = "") -> list:
     """
     Select the best clips from a video using AI, in two passes.
 
@@ -797,6 +802,8 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
         num_clips: Number of clips to select
         video_title: Optional source video title for contextual hook framing
         temporal_events: Optional visual event timeline from temporal_localization
+        channel_examples: Optional text from services.channel_examples, the channel's
+            most and least watched past clips, shown to both passes
 
     Returns:
         List of selected clips; each carries "selection_path" naming where it came
@@ -811,7 +818,8 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
 
     wanted = _candidates_wanted(num_clips)
     prompt = _candidate_prompt(segments, story_plan, wanted, num_clips, video_title, temporal_events,
-                               mode=mode, topic_breaks=topic_breaks)
+                               mode=mode, topic_breaks=topic_breaks,
+                               channel_examples=channel_examples)
     source = "ai"
 
     try:
@@ -917,7 +925,8 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
 
         candidate_count = len(valid_clips)
         judged = candidate_count > 1 and await _judge_candidates(valid_clips, segments, num_clips, mode,
-                                                                    video_path=video_path)
+                                                                    video_path=video_path,
+                                                                    channel_examples=channel_examples)
         if judged:
             # A reject is final: a clip the editor refused is not brought back by its
             # first-pass score. Unrated candidates (no usable row) stay in.

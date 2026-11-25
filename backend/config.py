@@ -183,6 +183,15 @@ class Settings(BaseSettings):
         le=8,
         description="Keyframes per candidate the Claude judge sees (0 = words only)"
     )
+    # Best and worst published clips (by real YouTube views) shown to the
+    # selection prompts as examples of this audience. Needs synced stats
+    # (POST /analytics/sync-views or python -m scripts.hook_style_report --sync).
+    CHANNEL_EXAMPLES: int = Field(
+        default=4,
+        ge=0,
+        le=10,
+        description="Most/least watched past clips per side shown to clip selection (0 = off)"
+    )
     NUM_CLIPS: int = Field(
         default=4,
         ge=1,
