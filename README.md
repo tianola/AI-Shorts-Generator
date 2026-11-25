@@ -61,7 +61,7 @@ From the root project directory, run:
    ```
    *`requirements.txt` lists version ranges. `requirements.lock` pins the exact
    versions CI tests and the Docker images install. After changing
-   `requirements.txt`, regenerate the lock with
+   `requirements.txt`, regenerate the lock (with uv 0.11.32, the version CI checks with) using
    `uv pip compile requirements.txt --universal --python-version 3.11 -o requirements.lock`.
    To move every pin to the newest allowed version, add `--upgrade`.*
 

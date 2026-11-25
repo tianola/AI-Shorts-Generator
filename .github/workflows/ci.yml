@@ -51,10 +51,11 @@ jobs:
         run: ruff check backend --select F,E9
       # requirements.lock must still satisfy requirements.txt. uv keeps the
       # existing pins when it can, so this only changes the file when someone
-      # edited requirements.txt without regenerating the lock.
+      # edited requirements.txt without regenerating the lock. uv is pinned
+      # because different uv releases write the same markers differently.
       - name: Lock file matches requirements.txt
         run: |
-          pip install uv
+          pip install uv==0.11.32
           cd backend
           uv pip compile requirements.txt --universal --python-version 3.11 -o requirements.lock -q
           git diff --exit-code requirements.lock
