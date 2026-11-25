@@ -33,13 +33,13 @@ async def check_vlm_fallback():
         analysis, clip_0_words, transcript, video_path=clip_0_video
     )
 
-    print(f"\nVLM Attention result:")
+    print("\nVLM Attention result:")
     print(f"  Scenes: {len(attention.get('scenes', []))}")
     for note in attention.get("notes", []):
         print(f"  Note: {note}")
 
     for scene in attention.get("scenes", []):
-        print(f"\n  Scene:")
+        print("\n  Scene:")
         print(f"    Time: {scene.get('start'):.1f}-{scene.get('end'):.1f}s")
         print(f"    Target: {scene.get('target')}")
         print(f"    Importance: {scene.get('importance'):.2f}")

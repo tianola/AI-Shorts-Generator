@@ -12,7 +12,6 @@ def check_gemini_vision():
     """Test if Gemini Vision API works"""
     try:
         from google import genai
-        from google.genai import types
         from config import settings
 
         if not settings.GOOGLE_AI_STUDIO_KEY:
@@ -61,7 +60,7 @@ def check_gemini_vision():
                 print(f"[OK] Vision API: {response.text}")
                 return True
         else:
-            print(f"[FAIL] source.mp4 not found")
+            print("[FAIL] source.mp4 not found")
             return False
 
     except Exception as e:
