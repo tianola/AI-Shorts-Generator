@@ -100,6 +100,17 @@ venv at `backend\.venv` (a junction to the root `.venv` works).
 
 ---
 
+## 🔒 Network access
+
+The API has no login, so it listens on `127.0.0.1` (this computer only) by
+default. Anyone who can reach it can start jobs, delete them and publish to the
+connected YouTube channel. To open it to your network, set `API_HOST=0.0.0.0`
+in `backend/.env` (or `SHORTS_API_HOST` for the NSSM service), and only on a
+network you trust. The Docker stack listens on every interface inside the
+container but publishes its port on the host's loopback only.
+
+---
+
 ## 🧠 Scene attention configuration
 
 Scene attention decides *what the clip is about* so the crop can look at it
@@ -309,3 +320,9 @@ its own owner account, created in the browser the first time you open it.
 - **Missing or Blank Video Screen:** Ffmpeg/Yolov8 bounding crop issues? Ensure Python's Path features correctly interpret your local drive letter.
 - **YouTube 403 / Geoblocked:** Depending on network environments, `yt-dlp` might fail. Just feed a direct MP4 file URL.
 - **No Fonts Found:** The pipeline falls back cleanly to OS-defaults (like `arial` or `liberation`), though injecting `Montserrat-ExtraBold` is advised for the best cinematic overlays.
+
+---
+
+## 📄 License
+
+[MIT](LICENSE)

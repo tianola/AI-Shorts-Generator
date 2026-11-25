@@ -54,7 +54,9 @@ if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
 
 $env:PYTHONPATH = $backendDir
 $env:API_PORT = '5001'
-$env:API_HOST = '0.0.0.0'
+# This computer only. The API has no login; set API_HOST=0.0.0.0 yourself
+# before running this script to open it to your network.
+if (-not $env:API_HOST) { $env:API_HOST = '127.0.0.1' }
 
 $apiLog = Join-Path $storageLogs 'api.log'
 $workerLog = Join-Path $storageLogs 'worker.log'

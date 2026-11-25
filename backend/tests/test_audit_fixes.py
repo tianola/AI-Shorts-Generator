@@ -166,3 +166,20 @@ def test_resume_button_is_enabled_for_finished_jobs():
     # The old template disabled Resume and Restart for exactly the statuses the
     # API accepts them from.
     assert "job.status === 'failed' || job.status === 'completed' ? 'disabled'" not in source
+
+
+# --------------------------------------------------------------------------
+# network exposure
+# --------------------------------------------------------------------------
+
+def test_api_listens_on_loopback_by_default():
+    from config import Settings
+    assert Settings.model_fields["API_HOST"].default == "127.0.0.1"
+
+
+def test_service_and_compose_do_not_hard_code_every_interface():
+    root = Path(__file__).resolve().parents[2]
+    service = (root / "backend" / "run_service.py").read_text(encoding="utf-8")
+    assert 'host="0.0.0.0"' not in service
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    assert '"127.0.0.1:${SHORTS_API_HOST_PORT:-5002}:5001"' in compose

@@ -560,9 +560,14 @@ class Settings(BaseSettings):
     # ====================
     # API SERVER
     # ====================
+    # Loopback by default: the API has no login, and on 0.0.0.0 anyone on the
+    # same network could delete jobs, publish to the connected YouTube channel or
+    # open folders on this machine. Set 0.0.0.0 only on a network you trust
+    # (docker-compose does, inside the container, and publishes the port on the
+    # host's loopback only).
     API_HOST: str = Field(
-        default="0.0.0.0",
-        description="Host interface for the FastAPI server"
+        default="127.0.0.1",
+        description="Host interface for the FastAPI server (127.0.0.1 = this computer only)"
     )
     API_PORT: int = Field(
         default=5001,
