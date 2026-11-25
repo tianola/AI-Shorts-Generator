@@ -50,6 +50,22 @@ def _approximate_words_from_text(text: str, start: float, end: float) -> List[di
     return words
 
 
+def _whisper_device() -> Tuple[str, str]:
+    """("cuda", "float16") when CTranslate2 sees a CUDA device, else ("cpu", "int8").
+
+    The model was always loaded on the CPU, so a machine with a GPU - which the
+    model picker in the UI already assumed, recommending medium for it - ran
+    medium at CPU speed.
+    """
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() > 0:
+            return "cuda", "float16"
+    except Exception:
+        pass
+    return "cpu", "int8"
+
+
 def get_whisper_model(model_size: Optional[str] = None) -> WhisperModel:
     global _model, _model_size
 
@@ -57,9 +73,10 @@ def get_whisper_model(model_size: Optional[str] = None) -> WhisperModel:
         model_size = settings.WHISPER_MODEL_SIZE
 
     if _model is None or _model_size != model_size:
-        logger.info(f"Loading faster-whisper model: {model_size}")
+        device, compute_type = _whisper_device()
+        logger.info(f"Loading faster-whisper model: {model_size} on {device} ({compute_type})")
         try:
-            _model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            _model = WhisperModel(model_size, device=device, compute_type=compute_type)
             _model_size = model_size
         except Exception as exc:
             logger.warning(f"Failed to load '{model_size}' ({exc}), falling back to 'tiny'")
@@ -478,8 +495,11 @@ def transcribe_audio_file(
                 logger.info("Using Groq Whisper Turbo for transcription")
                 return _transcribe_with_groq(audio_path, output_dir, language, translate)
             else:
-                logger.warning("Groq selected but no API key found. Falling back to local tiny.")
-                whisper_model = "tiny"
+                logger.warning(
+                    f"Groq selected but no API key found. Falling back to local "
+                    f"{settings.WHISPER_MODEL_SIZE}."
+                )
+                whisper_model = settings.WHISPER_MODEL_SIZE
 
         # If user explicitly selected a local PyTorch model (.pt)
         if whisper_model and whisper_model.startswith("local_pt_"):

@@ -19,6 +19,14 @@ from config import settings
 # nothing to the selector.
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
+# One system prompt for every Claude pass over a video. The cache key is the
+# prefix (system, then the transcript block), so story analysis and candidate
+# selection only share the cached transcript if their system text is identical.
+SHORTS_SYSTEM = (
+    "You pick and judge moments from long videos for standalone vertical shorts. "
+    "You are honest about quality and you answer with JSON only."
+)
+
 
 def claude_available() -> bool:
     """True when a key is configured, i.e. the selector may route to Claude."""
@@ -32,6 +40,8 @@ async def call_claude_json(
     model: Optional[str] = None,
     max_tokens: int = 16000,
     effort: str = "medium",
+    context: str = "",
+    visual: Optional[list] = None,
 ) -> str:
     """Ask Claude for one JSON object matching `schema` and return it as text.
 
@@ -40,6 +50,12 @@ async def call_claude_json(
     the result without salvage. Raises on transport errors, on a refusal and on a
     reply cut at max_tokens - the caller decides whether to fall back to the
     OmniRoute chain.
+
+    `context` is large input that several calls on one video share (the
+    transcript). It goes first, marked for prompt caching, so the second call
+    within five minutes reads it at about a tenth of the input price.
+    `visual` is a list of content blocks (images and their labels) placed
+    after the context and before the task.
     """
     import anthropic
 
@@ -52,7 +68,7 @@ async def call_claude_json(
         model=target_model,
         max_tokens=max_tokens,
         system=system,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": _user_content(prompt, context, visual)}],
         output_config={
             "effort": effort,
             "format": {"type": "json_schema", "schema": schema},
@@ -74,8 +90,21 @@ async def call_claude_json(
         raise RuntimeError("Claude returned no text block")
 
     usage = message.usage
+    cached = getattr(usage, "cache_read_input_tokens", 0) or 0
     logger.info(
         f"Successfully called Claude model '{message.model}' "
-        f"(in={usage.input_tokens}, out={usage.output_tokens})"
+        f"(in={usage.input_tokens}, cached={cached}, out={usage.output_tokens}, effort={effort})"
     )
     return text
+
+
+def _user_content(prompt: str, context: str, visual: Optional[list] = None):
+    """The user turn: the shared context as a cached block, any images, then this call's task."""
+    if not context and not visual:
+        return prompt
+    blocks = []
+    if context:
+        blocks.append({"type": "text", "text": context, "cache_control": {"type": "ephemeral"}})
+    blocks.extend(visual or [])
+    blocks.append({"type": "text", "text": prompt})
+    return blocks

@@ -11,16 +11,21 @@ services:
     ports:
       # The app listens on API_PORT (5001) inside the container; only the host
       # side is configurable, so two stacks can coexist on one machine.
-      - "${SHORTS_API_HOST_PORT:-5002}:5001"
+      # Published on the host's loopback only: the API has no login. n8n and
+      # the worker reach it over ai-shorts-network as shorts-api:5001.
+      - "127.0.0.1:${SHORTS_API_HOST_PORT:-5002}:5001"
     volumes:
       - ./storage:/app/storage
       - ./backend/fonts:/usr/share/fonts/truetype/montserrat:ro
     environment:
+      # Listen on every interface inside the container so the published port
+      # and the compose network can reach it; the host side stays loopback.
+      - API_HOST=0.0.0.0
       # Ollama AI Configuration
       - OLLAMA_URL=http://host.docker.internal:11434
       - OLLAMA_MODEL=qwen2.5-coder:14b
       - METADATA_OLLAMA_MODEL=qwen2.5-coder:14b
-      - WHISPER_MODEL_SIZE=tiny
+      - WHISPER_MODEL_SIZE=small
 
       # Clip selection
       - NUM_CLIPS=10
@@ -71,7 +76,7 @@ services:
       - OLLAMA_URL=http://host.docker.internal:11434
       - OLLAMA_MODEL=qwen2.5-coder:14b
       - METADATA_OLLAMA_MODEL=qwen2.5-coder:14b
-      - WHISPER_MODEL_SIZE=tiny
+      - WHISPER_MODEL_SIZE=small
 
       # Clip selection
       - NUM_CLIPS=10

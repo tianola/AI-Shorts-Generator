@@ -241,7 +241,7 @@ async def test_claude_is_used_when_a_key_is_configured(tmp_path, monkeypatch):
 
     seen = []
 
-    async def fake_claude(prompt, system, schema, model=None, max_tokens=16000, effort="medium"):
+    async def fake_claude(prompt, system, schema, model=None, max_tokens=16000, effort="medium", **kwargs):
         seen.append(schema)
         if "ranked" in schema["properties"]:
             return json.dumps({"ranked": [_row("c0", 8, "r"),

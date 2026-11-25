@@ -249,16 +249,27 @@ def _collect_system_info(duration: Optional[float]) -> dict:
             "vram_req": 8.0,
             "ram_req": 9.0,
         },
+        {
+            "id": "large-v3-turbo",
+            "name": "Large V3 Turbo (Local, Best Speed/Quality on GPU)",
+            "cloud": False,
+            "rtf_gpu": 0.060,
+            "rtf_cpu": 0.45 * cpu_factor,
+            "vram_req": 6.0,
+            "ram_req": 6.0,
+        },
     ]
 
     # Compute accurate duration-based estimates
     effective_duration = float(duration) if duration and float(duration) > 0 else 300.0  # default 5 min reference
-    groq_key = os.getenv("GROQ_API_KEY")
+    # From settings, not os.environ: the key normally lives in backend/.env,
+    # which pydantic reads without exporting, so getenv never saw it.
+    groq_key = settings.GROQ_API_KEY or os.getenv("GROQ_API_KEY")
 
     if groq_key:
         recommended = "groq"
-    elif has_gpu and vram_gb >= 8:
-        recommended = "medium"
+    elif has_gpu and vram_gb >= 6:
+        recommended = "large-v3-turbo"
     elif has_gpu and vram_gb >= 4:
         recommended = "small"
     elif is_high_end_cpu:
