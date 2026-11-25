@@ -1,0 +1,168 @@
+"""Regression tests for the fixes from the November 2026 audit.
+
+* A job whose stage died on a database error must still end up 'failed', not
+  stuck at 'processing' behind a PendingRollbackError.
+* The OmniRoute vision tier must use the configured vision model and ask
+  OmniRoute only, instead of a retired hard-coded model sent to every provider.
+* chat_completion treats an empty reply as a miss and honours HF_TOKEN.
+* The job card's Resume button is enabled for finished jobs, not for running ones.
+"""
+import asyncio
+import os
+from pathlib import Path
+from types import SimpleNamespace
+
+os.environ.setdefault("TEST_DATABASE_URL", "sqlite:///:memory:")
+
+import numpy as np
+import pytest
+from sqlalchemy import text
+from sqlalchemy.orm import object_session
+
+import worker
+from config import settings
+from database.models import Clip, Job, JobProgress
+from database.session import SessionLocal, init_database
+from services import llm_fallback
+from services import vlm_scene_attention as vlm
+
+
+# --------------------------------------------------------------------------
+# worker: failure is recorded after a database error
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def db():
+    init_database()
+    session = SessionLocal()
+    yield session
+    session.rollback()
+    session.query(JobProgress).delete()
+    session.query(Clip).delete()
+    session.query(Job).delete()
+    session.commit()
+    session.close()
+
+
+@pytest.mark.filterwarnings("ignore::sqlalchemy.exc.SAWarning")
+def test_job_is_marked_failed_after_a_database_error(db, monkeypatch):
+    job = Job(youtube_url="https://youtu.be/x", status="created")
+    db.add(job)
+    db.commit()
+    job_id = job.id
+
+    async def download(job_id, job, job_dir, update_progress):
+        session = object_session(job)
+        # A duplicate primary key fails the flush and leaves the session needing
+        # a rollback, which is what a real stage hits on a constraint error.
+        session.add(Job(id=job_id, youtube_url="dup", status="created"))
+        session.flush()
+
+    monkeypatch.setattr(worker, "stage_download_source", download)
+
+    with pytest.raises(Exception):
+        asyncio.run(worker.process_job_async(job_id))
+
+    probe = SessionLocal()
+    try:
+        status, error = probe.execute(
+            text("SELECT status, error_message FROM jobs WHERE id=:j"), {"j": job_id}
+        ).one()
+    finally:
+        probe.close()
+    assert status == "failed"
+    assert error
+
+
+# --------------------------------------------------------------------------
+# vision tier
+# --------------------------------------------------------------------------
+
+def _frame():
+    return np.zeros((32, 32, 3), dtype=np.uint8)
+
+
+def test_omniroute_vision_needs_a_configured_model(monkeypatch):
+    monkeypatch.setattr(settings, "OMNIROUTE_API_KEY", "k")
+    monkeypatch.setattr(settings, "SCENE_ATTENTION_VLM_MODEL", "")
+    called = []
+    monkeypatch.setattr(llm_fallback, "chat_completion", lambda *a, **k: called.append(1))
+    with pytest.raises(ValueError, match="SCENE_ATTENTION_VLM_MODEL"):
+        asyncio.run(vlm._omniroute_vision(_frame(), "ctx"))
+    assert not called
+
+
+def test_omniroute_vision_asks_omniroute_with_the_configured_model(monkeypatch):
+    monkeypatch.setattr(settings, "OMNIROUTE_API_KEY", "k")
+    monkeypatch.setattr(settings, "SCENE_ATTENTION_VLM_MODEL", "vision/model")
+    seen = {}
+
+    def fake(messages, model=None, temperature=0.7, max_tokens=2048, providers=None):
+        seen.update(model=model, providers=providers)
+        return 'Sure:\n```json\n{"subject": "crane", "objects": [], "action": "lifting", "confidence": 0.8}\n```'
+
+    monkeypatch.setattr(llm_fallback, "chat_completion", fake)
+    result = asyncio.run(vlm._omniroute_vision(_frame(), "ctx"))
+    assert result["subject"] == "crane"
+    assert seen == {"model": "vision/model", "providers": ("omniroute",)}
+
+
+# --------------------------------------------------------------------------
+# chat_completion
+# --------------------------------------------------------------------------
+
+class _FakeClient:
+    def __init__(self, reply):
+        self.calls = 0
+        self.reply = reply
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs):
+        self.calls += 1
+        message = SimpleNamespace(content=self.reply)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+def _wire(monkeypatch, clients):
+    monkeypatch.setattr(llm_fallback, "_get_client", lambda name: clients.get(name))
+
+
+def test_empty_reply_falls_through_to_the_next_provider(monkeypatch):
+    monkeypatch.setattr(settings, "OMNIROUTE_API_KEY", "a")
+    monkeypatch.setattr(settings, "TOGETHER_API_KEY", "b")
+    clients = {"omniroute": _FakeClient(None), "together": _FakeClient("answer")}
+    _wire(monkeypatch, clients)
+    assert llm_fallback.chat_completion([{"role": "user", "content": "x"}]) == "answer"
+
+
+def test_providers_limits_the_chain(monkeypatch):
+    monkeypatch.setattr(settings, "OMNIROUTE_API_KEY", "a")
+    monkeypatch.setattr(settings, "TOGETHER_API_KEY", "b")
+    clients = {"omniroute": _FakeClient(None), "together": _FakeClient("answer")}
+    _wire(monkeypatch, clients)
+    out = llm_fallback.chat_completion([{"role": "user", "content": "x"}],
+                                       model="m", providers=("omniroute",))
+    assert out is None
+    assert clients["together"].calls == 0
+
+
+def test_hf_token_alone_enables_the_hf_router(monkeypatch):
+    monkeypatch.setattr(settings, "OMNIROUTE_API_KEY", None)
+    monkeypatch.setattr(settings, "TOGETHER_API_KEY", None)
+    monkeypatch.setattr(settings, "HF_KEY", None)
+    monkeypatch.setenv("HF_TOKEN", "hf_x")
+    clients = {"hf_router": _FakeClient("from hf")}
+    _wire(monkeypatch, clients)
+    assert llm_fallback.chat_completion([{"role": "user", "content": "x"}]) == "from hf"
+
+
+# --------------------------------------------------------------------------
+# job card buttons
+# --------------------------------------------------------------------------
+
+def test_resume_button_is_enabled_for_finished_jobs():
+    source = (Path(__file__).resolve().parents[1] / "static" / "js" / "jobs.js").read_text(encoding="utf-8")
+    assert "resume-btn\" title=\"Resume Job\" ${finished ? '' : 'disabled'}" in source
+    # The old template disabled Resume and Restart for exactly the statuses the
+    # API accepts them from.
+    assert "job.status === 'failed' || job.status === 'completed' ? 'disabled'" not in source

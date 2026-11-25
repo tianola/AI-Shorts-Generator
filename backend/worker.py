@@ -2498,11 +2498,23 @@ async def process_job_async(job_id: int):
                                           lease_stop=lease_stop)
 
     except Exception as e:
-        # Mark job as failed
-        job.status = "failed"
-        job.error_message = str(e)
-        job.updated_at = datetime.utcnow()
-        db.commit()
+        # Mark job as failed. A stage that died on a database error leaves the
+        # session in "rollback required", and committing on top of it raised
+        # PendingRollbackError from inside this handler: the row stayed at
+        # 'processing' with a live heartbeat, so nobody saw the failure until
+        # the lease ran out. Roll back first, then record the failure.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first() or job
+            job.status = "failed"
+            job.error_message = str(e)
+            job.updated_at = datetime.utcnow()
+            db.commit()
+        except Exception as record_err:
+            logger.error(f"Job {job_id}: could not record the failure ({record_err})")
 
         job_error(job_id, f"Job failed: {str(e)}")
         raise
