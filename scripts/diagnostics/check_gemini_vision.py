@@ -4,15 +4,14 @@ import sys
 from pathlib import Path
 
 # Add backend to path
-backend_dir = Path(__file__).parent / "backend"
+backend_dir = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(backend_dir))
 os.chdir(backend_dir)
 
-def test_gemini_vision():
+def check_gemini_vision():
     """Test if Gemini Vision API works"""
     try:
         from google import genai
-        from google.genai import types
         from config import settings
 
         if not settings.GOOGLE_AI_STUDIO_KEY:
@@ -61,7 +60,7 @@ def test_gemini_vision():
                 print(f"[OK] Vision API: {response.text}")
                 return True
         else:
-            print(f"[FAIL] source.mp4 not found")
+            print("[FAIL] source.mp4 not found")
             return False
 
     except Exception as e:
@@ -71,5 +70,5 @@ def test_gemini_vision():
         return False
 
 if __name__ == "__main__":
-    success = test_gemini_vision()
+    success = check_gemini_vision()
     sys.exit(0 if success else 1)
