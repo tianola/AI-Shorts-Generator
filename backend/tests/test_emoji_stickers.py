@@ -207,7 +207,8 @@ def test_title_center_frac_per_mode():
 
     assert _title_center_frac("gaming") == pytest.approx(1.0 - gaming_layout.PANEL_SPLIT)
     assert _title_center_frac("gaming") == pytest.approx(0.35)
-    assert _title_center_frac("single_speaker") == 0.3333
+    from config import settings
+    assert _title_center_frac("single_speaker") == pytest.approx(settings.TITLE_CENTER_FRAC)
 
 
 def test_title_overlay_y_follows_center_frac():

@@ -367,6 +367,21 @@ class Settings(BaseSettings):
         default=True,
         description="Render each clip in one unified ffmpeg pass (vertical + captions + title + SFX) instead of 5-6 sequential re-encodes"
     )
+    TITLE_CENTER_FRAC: float = Field(
+        default=0.17, ge=0.08, le=0.6,
+        description="Where the clip title card is centred, as a share of the frame height from the "
+                    "top (non-gaming layouts). 0.17 keeps it high, clear of faces and the captions."
+    )
+    TITLE_FALLBACK_FRACS: str = Field(
+        default="0.3333,0.45",
+        description="Comma-separated lower spots the title may move to when the default strip is "
+                    "busy (a face or on-screen text) and one of these is clearly emptier."
+    )
+    TITLE_AVOID_BUSY: bool = Field(
+        default=True,
+        description="Sample a few frames before rendering and move the title off a busy strip. "
+                    "Off: the title always sits at TITLE_CENTER_FRAC."
+    )
 
     # ====================
     # SCENE / ATTENTION UNDERSTANDING

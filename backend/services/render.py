@@ -406,6 +406,7 @@ def build_single_pass_filter(
     loudnorm_chain: str = "",
     emoji_stickers: list = None,
     title_center_frac: float = 0.3333,
+    popup_top_y: int = 290,
     effects_frag: str = None,
     sfx_events: list = None,
     sidechain: dict = None,
@@ -530,6 +531,7 @@ def build_single_pass_filter(
                 start_time=p_start,
                 duration=p_dur,
                 position=p_pos,
+                top_y=popup_top_y,
             )
             fc_parts.append(prep)
             out_label = f"[vpop{i}]" if i < len(popup_list) - 1 else "[vpop]"
@@ -711,13 +713,11 @@ def _title_center_frac(mode: str) -> float:
     """Where the title card is centred, as a share of the frame height from the top.
 
     Gaming layout: the seam between the webcam panel (top) and the gameplay, so the title
-    covers neither the face nor the captions near the bottom. Other layouts: two-thirds of the
-    way up from the bottom of the frame (one third from the top), clear of the captions.
+    covers neither the face nor the captions near the bottom. Other layouts: TITLE_CENTER_FRAC,
+    high on the frame; render_single_pass may move it lower when that strip is busy.
     """
-    if mode == "gaming":
-        from services.gaming_layout import PANEL_SPLIT
-        return 1.0 - PANEL_SPLIT
-    return 0.3333
+    from services.title_placement import title_center_for
+    return title_center_for(mode)
 
 
 def render_single_pass(
@@ -777,6 +777,28 @@ def render_single_pass(
             job_warning(0, "Title PNG render failed, skipping: " + str(e))
             title_png = None
 
+    # Title line: high by default, lower only when the high strip is busy. The popup card in the
+    # upper third then moves below the title so the two never stack.
+    title_center = _title_center_frac(mode)
+    popup_top_y = 290
+    if title_png and os.path.exists(title_png):
+        try:
+            from PIL import Image
+            from services import title_placement as tp
+            with Image.open(title_png) as _t:
+                title_h = int(_t.height)
+            if mode != "gaming":
+                title_center = tp.pick_title_center(
+                    input_video, start, end, vertical_frag,
+                    title_height_frac=title_h / 1920.0,
+                    default=title_center,
+                    fallbacks=tp.parse_fracs(settings.TITLE_FALLBACK_FRACS),
+                    enabled=settings.TITLE_AVOID_BUSY,
+                )
+                popup_top_y = tp.popup_top_below_title(title_center, title_h)
+        except Exception as e:
+            job_warning(0, f"Title placement check skipped: {e}")
+
     has_audio = _has_audio_stream(input_video)
 
     # Visual effects: the timeline's visual tracks, minus any kind switched off in config.
@@ -833,7 +855,8 @@ def render_single_pass(
             popups=popups,
             loudnorm_chain=loudnorm_chain,
             emoji_stickers=emoji_stickers,
-            title_center_frac=_title_center_frac(mode),
+            title_center_frac=title_center,
+            popup_top_y=popup_top_y,
             effects_frag=effects_frag,
             sfx_events=sfx_events,
             sidechain=_sidechain_settings() if sfx_events else None,

@@ -89,6 +89,7 @@ def build_popup_filtergraph_fragment(
     start_time: float,
     duration: float = 2.0,
     position: str = "upper_third",
+    top_y: int = 290,
 ) -> Tuple[str, str, str]:
     """
     Constructs FFmpeg filter definitions for a smooth spring scale-pop animation.
@@ -98,6 +99,7 @@ def build_popup_filtergraph_fragment(
         start_time: Start timestamp in seconds.
         duration: Duration of popup visibility in seconds (clamped 1.5-3.0s).
         position: Placement preset ('upper_third' center or 'upper_right').
+        top_y: Top edge of an 'upper_third' card in the 1080x1920 frame.
 
     Returns:
         Tuple of (prep_filter, anim_label, overlay_expr)
@@ -136,7 +138,8 @@ def build_popup_filtergraph_fragment(
         y_expr = f"730+25*(1-clip((t-{t_start})/0.18,0,1))"
     else:  # upper_third (center)
         x_expr = "(W-w)/2"
-        y_expr = f"290+25*(1-clip((t-{t_start})/0.18,0,1))"
+        # top_y moves the card below the title card when the title sits high on the frame.
+        y_expr = f"{int(top_y)}+25*(1-clip((t-{t_start})/0.18,0,1))"
 
     overlay_expr = (
         f"overlay=x='{x_expr}':y='{y_expr}':"
