@@ -27,6 +27,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import worker
+import publish_queue  # noqa: E402
 from config import settings
 from database.models import Clip, Job
 from database.session import SessionLocal, init_database
@@ -157,9 +158,9 @@ TOKEN_REVOKED = ("('invalid_grant: Token has been expired or revoked.', "
 def logged(monkeypatch):
     """What the operator would actually read in the log, level included."""
     records = []
-    monkeypatch.setattr(worker, "job_warning",
+    monkeypatch.setattr(publish_queue, "job_warning",
                         lambda jid, m: records.append(("warning", m)))
-    monkeypatch.setattr(worker, "job_error",
+    monkeypatch.setattr(publish_queue, "job_error",
                         lambda jid, m: records.append(("error", m)))
     return records
 
@@ -419,7 +420,7 @@ def test_the_gate_reports_what_was_blocked_and_how_to_fix_it(db, monkeypatch):
     _blocked_clip(db, title="当他拿出这盘菌子的时候全场都愣住了")
     uploader = _Recorder()
     warnings = []
-    monkeypatch.setattr(worker, "job_warning", lambda jid, msg: warnings.append(msg))
+    monkeypatch.setattr(publish_queue, "job_warning", lambda jid, msg: warnings.append(msg))
 
     worker.publish_queued_clips(db, now=NOW, uploader=uploader)
 

@@ -18,8 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY backend/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# requirements.lock pins every package (see backend/requirements.lock's header
+# for how to regenerate it), so an image built today matches one built later.
+COPY backend/requirements.lock /app/requirements.lock
+RUN pip install --no-cache-dir -r /app/requirements.lock
 
 COPY backend/ /app/
 

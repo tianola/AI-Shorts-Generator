@@ -44,7 +44,7 @@ def fake_model(monkeypatch):
     async def story(segments, video_title=""):
         return {}
 
-    async def keep_all(clips, segments, num_clips, mode="viral", video_path=None):
+    async def keep_all(clips, segments, num_clips, mode="viral", video_path=None, **_kw):
         for clip in clips:
             clip["judge_decision"] = "keep"
             clip["judge_score"] = 0.8
