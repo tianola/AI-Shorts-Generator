@@ -6,6 +6,8 @@ import re
 from typing import List
 from pydantic import BaseModel, Field
 from loguru import logger
+
+from services.title_style import fix_title
 from config import settings
 from services.llm_router import call_llm_structured, pick_model
 
@@ -104,7 +106,7 @@ async def generate_metadata(
     title_requirement = (
         f"""1. Title: it is already decided - return exactly: {fixed_title}"""
         if fixed_title else
-        """1. Title: under 45 characters and at most 7 words, in the language spoken in the
+        """1. Title: 12 to 40 characters, in the language spoken in the
        transcript. Take the most surprising concrete element of the transcript (a
        number, a named thing, a consequence) and open a curiosity gap around it: say
        enough to intrigue, hold back the answer. It must be true to the clip.
@@ -140,6 +142,9 @@ async def generate_metadata(
         )
 
         final_title = fixed_title or _clean_title(data.title) or derive_title_from_text(hook or transcript)
+        if not fixed_title:
+            # Same checker as the selector: a title the clip does not support is replaced by its words.
+            final_title, _ = fix_title(final_title, transcript)
         tags = [tag if tag.startswith('#') else f"#{tag}" for tag in data.hashtags if tag]
         if "#Shorts" not in tags:
             tags.insert(0, "#Shorts")

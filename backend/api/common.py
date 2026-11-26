@@ -52,6 +52,7 @@ def clip_payload(clip: Clip) -> dict:
         "virality_explanation": clip.virality_explanation,
         "trim_start": clip.trim_start,
         "trim_end": clip.trim_end,
+        "render_options": clip.render_options or {},
         "translated_transcript": clip.translated_transcript,
         "file_path": clip.file_path,
         "thumbnail_path": clip.thumbnail_path,

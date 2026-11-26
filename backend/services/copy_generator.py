@@ -139,7 +139,7 @@ async def generate_platform_copies(transcript: str, base_title: str) -> Dict[str
 
     Give tailored copy for each of the three platforms (TikTok, Instagram Reels, YouTube Shorts).
     Each platform object needs:
-    - title: under 60 characters, front-loaded, states the specific claim or moment of this clip.
+    - title: under 40 characters, front-loaded, states the specific claim or moment of this clip.
     - description: 1-2 sentences of real context, then one call to action.
     - hashtags: 3-5 tags, # included, starting with the niche the clip is actually in.
       Do not use #viral, #trending, #foryou, #fyp or #explore.

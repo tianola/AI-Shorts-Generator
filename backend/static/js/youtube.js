@@ -7,7 +7,6 @@
 import { loadJob } from './jobs.js';
 import { state } from './state.js';
 import { setStatus } from './status.js';
-import { currentStudioClip } from './studio.js';
 import { API_PREFIX, escapeHtml, fetchJson, safeUrl } from './util.js';
 
 
@@ -211,54 +210,4 @@ export function setupYouTubeIntegration() {
     }
   });
 
-  // Studio YouTube Upload Action
-  const doUploadBtn = document.getElementById('ytDoUploadBtn');
-  doUploadBtn?.addEventListener('click', async () => {
-    if (!currentStudioClip) return;
-    const title = document.getElementById('ytUploadTitle')?.value.trim() || '';
-    const desc = document.getElementById('ytUploadDesc')?.value.trim() || '';
-    const hashtagsRaw = document.getElementById('ytUploadHashtags')?.value.trim() || '';
-    const privacy = document.getElementById('ytUploadPrivacy')?.value || 'unlisted';
-    const statusEl = document.getElementById('ytUploadStatus');
-
-    // Parse hashtags
-    const hashtags = hashtagsRaw
-      .split(/[\s,]+/)
-      .map(t => t.trim())
-      .filter(t => t.length > 0)
-      .map(t => t.startsWith('#') ? t : `#${t}`);
-
-    if (statusEl) statusEl.innerHTML = '⏳ <strong>Uploading to YouTube Shorts via Data API v3...</strong> (Please do not close this window)';
-    doUploadBtn.disabled = true;
-
-    try {
-      const res = await fetchJson(`${API_PREFIX}/clips/${currentStudioClip.id}/upload-youtube`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: title,
-          description: desc,
-          hashtags: hashtags,
-          privacy_status: privacy
-        })
-      });
-
-      if (res.success && res.video_id) {
-        const shortUrl = res.url || `https://youtube.com/shorts/${res.video_id}`;
-        if (statusEl) {
-          statusEl.innerHTML = `🎉 <strong>Uploaded Successfully!</strong> <a href="${safeUrl(shortUrl)}" target="_blank" style="color: #38bdf8; text-decoration: underline; font-weight: bold;">View YouTube Short ↗</a>`;
-        }
-        currentStudioClip.uploaded = true;
-        currentStudioClip.youtube_video_id = res.video_id;
-        setStatus(`Clip #${currentStudioClip.id} uploaded to YouTube!`, 'success');
-        await loadJob(state.activeJobId);
-      } else {
-        if (statusEl) statusEl.innerHTML = `<span style="color: #ef4444;">❌ Upload failed: ${escapeHtml(res.error || 'Unknown error')}</span>`;
-      }
-    } catch (err) {
-      if (statusEl) statusEl.innerHTML = `<span style="color: #ef4444;">❌ Upload error: ${escapeHtml(err.message)}</span>`;
-    } finally {
-      doUploadBtn.disabled = false;
-    }
-  });
 }

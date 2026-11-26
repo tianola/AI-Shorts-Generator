@@ -195,9 +195,45 @@ def test_the_sharpest_portrait_file_is_chosen():
 async def test_no_key_means_no_footage_and_no_network_call(monkeypatch, tmp_path):
     from services import stock_footage as sf
     monkeypatch.setattr(sf.settings, "PEXELS_API_KEY", None, raising=False)
+    monkeypatch.setattr(sf.settings, "PIXABAY_API_KEY", None, raising=False)
     called = []
     monkeypatch.setattr(sf.httpx, "get", lambda *a, **k: called.append(1))
     assert await sf.footage_for("any script", tmp_path) == [] and not called
+
+
+def test_queries_follow_the_story_parts_in_order():
+    from services import stock_footage as sf
+    story = "The bottle washed up on a Tuesday. I cracked the wax seal. Inside, a single note. It read a warning."
+    assert sf.sentences_of(story)[1] == "I cracked the wax seal."
+    assert sf.spread(["a", "b", "c", "d", "e"], 3) == ["a", "c", "e"]
+    assert sf.spread(["a", "b"], 4) == ["a", "b"]
+
+
+def test_pixabay_takes_the_portrait_variant_and_reuses_the_download(monkeypatch, tmp_path):
+    from services import stock_footage as sf
+    monkeypatch.setattr(sf.settings, "PIXABAY_API_KEY", "k", raising=False)
+
+    class Resp:
+        status_code = 200
+        def json(self):
+            return {"hits": [
+                {"id": 5, "duration": 20, "videos": {"large": {"url": "http://x/wide.mp4", "width": 1920, "height": 1080}}},
+                {"id": 6, "duration": 20, "videos": {
+                    "medium": {"url": "http://x/small.mp4", "width": 540, "height": 960},
+                    "large": {"url": "http://x/tall.mp4", "width": 1080, "height": 1920}}}]}
+
+    class Stream:
+        status_code = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def iter_bytes(self, n): yield b"x" * 20000
+
+    downloads = []
+    monkeypatch.setattr(sf.httpx, "get", lambda *a, **k: Resp())
+    monkeypatch.setattr(sf.httpx, "stream", lambda *a, **k: downloads.append(a[1]) or Stream())
+    first = sf.fetch_pixabay("forest", tmp_path)
+    again = sf.fetch_pixabay("forest", tmp_path)
+    assert first == again and first.name == "pixabay_6.mp4" and downloads == ["http://x/tall.mp4"]
 
 
 def test_a_found_video_is_downloaded_once_and_reused(monkeypatch, tmp_path):
@@ -288,7 +324,8 @@ async def test_the_stream_context_reaches_the_model_and_titles_are_complete(monk
     monkeypatch.setattr(router, "call_llm_json", fake)
     hit = await live.llm_highlight("no way this is real", 0, 20, "GTA 6 releases on November 19")
     assert "GTA 6 releases on November 19" in seen["prompt"]
-    assert hit.title.startswith("IShowSpeed") and hit.description == "He is shocked."
+    # The model title names things the clip never says, so the checker replaces it with the clip words.
+    assert hit.title == "No way this is real" and hit.description == "He is shocked."
 
     async def cut_off(**_kw):
         return '{"is_highlight": true, "score": 9, "title": "Well, Yall"}'

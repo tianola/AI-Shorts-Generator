@@ -166,12 +166,20 @@ export function playErrorSound(jobId) {
   }
 }
 
+// One progress socket per job. The job list asks for one on every refresh; without this a
+// running job opened a new socket every few seconds and none of them were ever closed.
+const progressSockets = new Map();
+
 export function setupWebSocket(jobId) {
   if (!jobId) return;
+  const existing = progressSockets.get(String(jobId));
+  if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
   const apiPath = '/api';
   try {
     const ws = new WebSocket(`${protocol}://${window.location.host}${apiPath}/ws/progress/${jobId}`);
+    progressSockets.set(String(jobId), ws);
+    ws.onclose = () => { if (progressSockets.get(String(jobId)) === ws) progressSockets.delete(String(jobId)); };
 
     ws.onmessage = (event) => {
       try {

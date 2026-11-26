@@ -57,11 +57,33 @@ class YouTubeCodeRequest(BaseModel):
     redirect_uri: Optional[str] = None
 
 
+# The status asks Google for the channel name, which takes a while and used to block the
+# event loop on every page load. It is a plain sync handler now (run in the threadpool), and a
+# healthy answer is kept for a few minutes. The cache is keyed on the two credential files, so
+# reconnecting the channel is seen at once.
+_status_cache = {"key": None, "at": 0.0, "value": None}
+STATUS_TTL_SECONDS = 300
+
+
 @router.get("/youtube/status")
-async def get_youtube_status():
+def get_youtube_status():
     """Check if YouTube API credentials and active channel connection exist."""
-    from services.youtube_upload import get_youtube_auth_status
-    return get_youtube_auth_status()
+    import time
+    from services.youtube_upload import get_client_secrets_path, get_token_path, get_youtube_auth_status
+
+    def stamp(path):
+        return path.stat().st_mtime if path.exists() else 0.0
+
+    key = (stamp(get_client_secrets_path()), stamp(get_token_path()))
+    fresh = time.monotonic() - _status_cache["at"] < STATUS_TTL_SECONDS
+    if _status_cache["key"] == key and fresh and _status_cache["value"]:
+        return _status_cache["value"]
+    value = get_youtube_auth_status()
+    if value.get("authenticated"):
+        _status_cache.update({"key": key, "at": time.monotonic(), "value": value})
+    else:
+        _status_cache.update({"key": None, "at": 0.0, "value": None})
+    return value
 
 
 @router.post("/youtube/auth-url")

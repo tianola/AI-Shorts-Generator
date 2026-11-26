@@ -1,4 +1,4 @@
-"""Gaming layout: the gameplay on top, the streamer's facecam in its own panel below.
+"""Gaming layout: the streamer's facecam in its own panel on top, the gameplay below.
 
 Streamers keep a small webcam in a corner of the capture. A face-follow crop either
 loses the game or loses the face, and frame-by-frame switching jitters. Here the
@@ -21,6 +21,7 @@ EDGE_MAX_WIDTH = 0.12       # a face this narrow on a side edge is an overlay, n
 EDGE_ZONE = 0.22            # ...and its centre is within this share of the frame from that edge
 CAM_FACE_SPAN = 5.0         # the facecam window is about this many face-widths wide
 PANEL_ASPECT = 1080 / 672   # facecam panel shape (width / height) in the output
+GAME_ZOOM = 1.15            # the gameplay is this much bigger than the fitted frame; its sides are cropped
 
 Box = Tuple[int, int, int, int]
 
@@ -153,9 +154,9 @@ def build_gaming_filter(src_w: int, src_h: int, cam: Box,
         f"[0:v]split=3[gbg][gfg][cam];"
         f"[gbg]scale={bg_w}:{bg_h}:force_original_aspect_ratio=increase,crop={bg_w}:{bg_h},"
         f"boxblur=16:2,scale={target_w}:{game_h}[gb];"
-        f"[gfg]scale={target_w}:-2[gf];"
+        f"[gfg]scale={round(target_w * GAME_ZOOM)}:-2,crop={target_w}:ih:(iw-{target_w})/2:0[gf];"
         f"[gb][gf]overlay=(W-w)/2:(H-h)/2[game];"
         f"[cam]crop={cw}:{ch}:{cx}:{cy},scale={target_w}:{cam_h}:force_original_aspect_ratio=increase,"
         f"crop={target_w}:{cam_h}[camp];"
-        f"[game][camp]vstack=inputs=2[outv]"
+        f"[camp][game]vstack=inputs=2[outv]"
     )

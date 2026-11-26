@@ -516,7 +516,9 @@ def build_single_pass_filter(
             "+0.12*sin(clip(t/0.6,0,1)*PI)"
             "+0.015*sin(2*PI*t/2.4)"
         )
-        y_expr = "36*(1-clip(t/0.45,0,1))"
+        # Two-thirds down the frame, so the title sits over the gameplay and never over the
+        # webcam at the top. The small drop-in on entry is kept.
+        y_expr = "H*2/3+36*(1-clip(t/0.45,0,1))"
         # Inside '...' a comma is literal to the graph parser (this is the form
         # ffmpeg's own docs use for scale/select), so the quoted scale factors
         # must NOT be escaped — but the unquoted overlay y= must be.

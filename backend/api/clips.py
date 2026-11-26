@@ -10,7 +10,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, field_validator, model_validator
@@ -98,12 +98,6 @@ class RerenderClipRequest(BaseModel):
     karaoke: Optional[bool] = None
     motion_title: Optional[bool] = None
     thumbnail_template: Optional[int] = None
-
-
-class ClipCaptionUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    hashtags: Optional[List[str]] = None
 
 
 def _rerender_media(clip_dir, source_video: str, words_file: str, *, window,
@@ -259,12 +253,18 @@ async def rerender_clip(
     if request.title:
         clip.title = request.title
 
-    db.commit()
-    db.refresh(clip)
-
     # Resolve karaoke/motion_title: explicit request > job default > True
     karaoke_enabled = request.karaoke if request.karaoke is not None else (job.default_karaoke if job else True)
     motion_title_enabled = request.motion_title if request.motion_title is not None else (job.default_motion_title if job else True)
+    # Stored, so reopening the studio shows the switches the render was made with.
+    clip.render_options = {
+        "karaoke": bool(karaoke_enabled),
+        "motion_title": bool(motion_title_enabled),
+        "thumbnail_template": request.thumbnail_template,
+    }
+
+    db.commit()
+    db.refresh(clip)
 
     # Trigger re-render process
     job_dir = Path(settings.JOBS_DIR) / str(clip.job_id)
@@ -316,13 +316,9 @@ async def rerender_clip(
 
     return {
         "message": message,
-        "clip": {
-            "id": clip.id,
-            "title": clip.title,
-            "caption_style": clip.caption_style,
-            "layout_mode": clip.layout_mode,
-            "file_path": clip.file_path
-        },
+        # The whole record, so the studio can replace what it holds (the title it shows
+        # is then the one that was burned into the render).
+        "clip": clip_payload(clip),
         "trim_reapplied": result["trim_reapplied"],
         "trim_error": result["trim_error"],
     }
@@ -436,6 +432,42 @@ async def get_pending_uploads(
     } for clip in clips]
 
 
+@router.post("/clips/{clip_id}/retitle")
+async def retitle_clip(clip_id: int, db: Session = Depends(get_database)):
+    """Give a clip a new title from what it says, then re-render so the burned title changes.
+
+    The title follows the same brief and checker as new clips (services/title_style.py): it
+    must be true to the clip's words. When no candidate passes, the clip keeps its title.
+    """
+    import json as _json
+    from services.title_style import suggest_title
+
+    clip = db.query(Clip).filter(Clip.id == clip_id).first()
+    if not clip:
+        raise HTTPException(status_code=404, detail=f"Clip {clip_id} not found")
+
+    words_file = Path(settings.JOBS_DIR) / str(clip.job_id) / f"clip_{clip.index}" / "words.json"
+    if not words_file.exists():
+        raise HTTPException(status_code=400, detail="This clip has no transcript to title from")
+    words = _json.loads(words_file.read_text(encoding="utf-8"))
+    transcript = " ".join(str(w.get("word") or "") for w in words)
+
+    new_title = await suggest_title(transcript)
+    if not new_title:
+        raise HTTPException(status_code=422, detail="No title passed the checks for this clip; kept the old one")
+
+    job = db.query(Job).filter(Job.id == clip.job_id).first()
+    request = RerenderClipRequest(
+        caption_style=clip.caption_style,
+        layout_mode=clip.layout_mode,
+        title=new_title,
+        karaoke=(clip.render_options or {}).get("karaoke", job.default_karaoke if job else True),
+        motion_title=(clip.render_options or {}).get("motion_title", job.default_motion_title if job else True),
+        thumbnail_template=(clip.render_options or {}).get("thumbnail_template"),
+    )
+    return await rerender_clip(clip_id, request, db)
+
+
 @router.get("/clips/{clip_id}")
 async def get_clip(
     clip_id: int,
@@ -506,39 +538,6 @@ async def update_clip_bounds(
         "end": clip.end,
         "title": clip.title,
         "duration": clip.end - clip.start
-    }
-
-
-@router.patch("/clips/{clip_id}/update-caption")
-async def update_clip_caption(
-    clip_id: int,
-    payload: ClipCaptionUpdate,
-    db: Session = Depends(get_database)
-):
-    """Update clip title/caption/description/hashtags."""
-    clip = db.query(Clip).filter(Clip.id == clip_id).first()
-    if not clip:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Clip {clip_id} not found"
-        )
-
-    if payload.title is not None:
-        clip.title = payload.title
-    if payload.description is not None:
-        clip.description = payload.description
-    if payload.hashtags is not None:
-        clip.hashtags = payload.hashtags
-    db.commit()
-    db.refresh(clip)
-
-    return {
-        "id": clip.id,
-        "title": clip.title,
-        "description": clip.description,
-        "hashtags": clip.hashtags,
-        "start": clip.start,
-        "end": clip.end
     }
 
 

@@ -8,7 +8,7 @@
 import { activeSourceMode, renderModelOptions, selectedUploadFile } from './source.js';
 import { els, state } from './state.js';
 import { playErrorSound, playSuccessChime, setStatus, setupWebSocket, updateProgressUI, updateTranscriptionEstimateBadge } from './status.js';
-import { openClipStudio } from './studio.js';
+import { openClipStudio, uploadClip } from './studio.js';
 import { API_PREFIX, asMediaUrl, escapeHtml, fetchJson, formatTimeLabel, isYouTubeVideoId, pct } from './util.js';
 
 // Same set as database/models.py TERMINAL_JOB_STATUSES: no worker is on these.
@@ -32,7 +32,11 @@ export async function loadSystemInfo() {
   }
 }
 
+let listing = false;
+
 export async function listJobs() {
+  if (listing) return;            // a slow response must not stack up the next tick
+  listing = true;
   try {
     const data = await fetchJson(`${API_PREFIX}/jobs`);
     const jobs = data.jobs;
@@ -49,6 +53,8 @@ export async function listJobs() {
     updateCounters(jobs);
   } catch (error) {
     setStatus(`Could not load jobs: ${error.message}`, 'error');
+  } finally {
+    listing = false;
   }
 }
 
@@ -65,6 +71,13 @@ state.showAllJobs = false;
 
 export function renderJobs(jobs) {
   if (!els.jobsList) return;
+  // Rebuilding the cards every tick throws away the buttons under the pointer, so only
+  // redraw when something on screen changed.
+  const shown = state.showAllJobs ? jobs : jobs.slice(0, 5);
+  const sig = JSON.stringify([state.showAllJobs, String(state.activeJobId), shown.map(j => [
+    j.id, j.status, j.current_stage, j.progress_percent, j.youtube_url, j.created_at])]);
+  if (els.jobsList.dataset.sig === sig) return;
+  els.jobsList.dataset.sig = sig;
   els.jobsList.innerHTML = '';
 
   const toggleBtn = document.getElementById('toggleJobsListBtn');
@@ -246,6 +259,10 @@ export async function loadJob(jobId, showStatus = true) {
 export function renderClips(clips) {
   const batchActions = document.getElementById('jobBatchActions');
   if (!els.clipsGrid) return;
+  // Every <video> reloads when the grid is rebuilt, so rebuild only when a clip changed.
+  const sig = JSON.stringify(clips);
+  if (els.clipsGrid.dataset.sig === sig) return;
+  els.clipsGrid.dataset.sig = sig;
   els.clipsGrid.innerHTML = '';
 
   if (clips.length === 0) {
@@ -273,7 +290,7 @@ export function renderClips(clips) {
 	  } else if (clip.file_path) {
 		const video = document.createElement('video');
 		video.src = asMediaUrl(clip.file_path);
-		video.preload = 'metadata';
+		video.preload = 'none';
 		preview.appendChild(video);
 	  }
 
@@ -348,8 +365,14 @@ export function renderClips(clips) {
 		ytBtn.style.fontSize = '0.78rem';
 		ytBtn.innerHTML = '🚀 <strong>YouTube</strong>';
 		ytBtn.addEventListener('click', () => {
-		  openClipStudio(clip);
-		  document.querySelector('.tab-nav-btn[data-tab="youtube"]')?.click();
+		  // Same confirm as the editor: a click here publishes to the channel.
+		  const hashtags = (Array.isArray(clip.hashtags) && clip.hashtags.length ? clip.hashtags : ['#Shorts']);
+		  uploadClip(clip, {
+			title: (clip.title || `Viral Short #${clip.id}`).replace(/#shorts/gi, '').trim().slice(0, 100),
+			description: clip.description || '',
+			hashtags: hashtags.map((t) => (t.startsWith('#') ? t : `#${t}`)),
+			privacy: 'unlisted',
+		  });
 		});
 		actions.appendChild(ytBtn);
 	  }
@@ -382,7 +405,8 @@ export async function createJob(event) {
   const captionStyle = els.captionStyle ? els.captionStyle.value : 'mrbeast';
   const layoutMode = els.layoutMode ? els.layoutMode.value : 'auto';
   const clipMode = els.clipMode ? els.clipMode.value : 'auto';
-  const targetClips = els.clipCountInput ? (parseInt(els.clipCountInput.value, 10) || 10) : 10;
+  // null: the selector decides how many clips the video yields (up to the server's ceiling).
+  const targetClips = null;
   const autoUpload = document.getElementById('autoUploadCheck') ? document.getElementById('autoUploadCheck').checked : true;
   const llmTranslate = document.getElementById('llmTranslateCheck')?.checked || false;
 
@@ -400,7 +424,7 @@ export async function createJob(event) {
       formData.append('caption_style', captionStyle);
       formData.append('layout_mode', layoutMode);
       formData.append('clip_mode', clipMode);
-      formData.append('target_clips', targetClips);
+      if (targetClips) formData.append('target_clips', targetClips);
       formData.append('auto_upload', autoUpload);
       formData.append('llm_translate', llmTranslate);
 
@@ -410,7 +434,7 @@ export async function createJob(event) {
         throw new Error(data.detail || 'Failed to create job from upload');
       }
 
-      setStatus(`Job #${data.job_id} created (${targetClips} clips). Waiting for generation...`);
+      setStatus(`Job #${data.job_id} created (automatic clip count). Waiting for generation...`);
       state.activeJobId = data.job_id;
       updateProgressUI(data.job_id, 'Initializing...', 2, 'processing', 0);
       setupWebSocket(data.job_id);
@@ -448,7 +472,7 @@ export async function createJob(event) {
 	  throw new Error(data.detail || 'Failed to create job');
 	}
 
-	setStatus(`Job #${data.job_id} created (${targetClips} target clips). Processing...`);
+	setStatus(`Job #${data.job_id} created (automatic clip count). Processing...`);
 	state.activeJobId = data.job_id;
 	updateProgressUI(data.job_id, 'Starting video download...', 2, 'processing', 0);
 	setupWebSocket(data.job_id);

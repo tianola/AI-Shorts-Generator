@@ -1,3 +1,4 @@
+import functools
 """System introspection: caption presets, health, source metadata, hardware estimates.
 
 main.py mounts this router under /api. None of these endpoints touch the database,
@@ -144,8 +145,12 @@ async def get_video_metadata(url: str):
     return await run_in_threadpool(_extract_video_metadata, target)
 
 
-def _collect_system_info(duration: Optional[float]) -> dict:
-    """Blocking hardware probe (``wmic``, psutil, torch) run in a thread."""
+@functools.lru_cache(maxsize=1)
+def _hardware_probe() -> dict:
+    """What the machine is: CPU name, threads, RAM, GPU. Computed once per process.
+
+    ``wmic`` and the torch import are slow, and none of it changes while the server runs.
+    """
     try:
         import psutil
     except ImportError:
@@ -160,35 +165,38 @@ def _collect_system_info(duration: Optional[float]) -> dict:
 
     cpu_name = None
     try:
-        res = subprocess.run(
-            ["wmic", "cpu", "get", "name"],
-            capture_output=True, text=True, timeout=5
-        )
-        lines = [
-            line.strip() for line in res.stdout.strip().split("\n")
-            if line.strip() and line.strip().lower() != "name"
-        ]
+        res = subprocess.run(["wmic", "cpu", "get", "name"], capture_output=True, text=True, timeout=5)
+        lines = [line.strip() for line in res.stdout.strip().split("\n")
+                 if line.strip() and line.strip().lower() != "name"]
         if lines:
             cpu_name = lines[0]
     except Exception:
         pass
-
     if not cpu_name:
         cpu_name = platform.processor() or "Multi-core CPU"
 
     threads = psutil.cpu_count(logical=True) if psutil else (os.cpu_count() or 8)
     ram_gb = round(psutil.virtual_memory().total / (1024**3), 1) if psutil else 16.0
 
-    cpu_label = f"{cpu_name} ({threads} Threads)"
-    ram_label = f"{ram_gb} GB"
-
-    has_gpu = False
-    gpu_name = "None (CPU Multi-threaded)"
-    vram_gb = 0.0
+    has_gpu, gpu_name, vram_gb = False, "None (CPU Multi-threaded)", 0.0
     if torch is not None and torch.cuda.is_available():
         has_gpu = True
         gpu_name = torch.cuda.get_device_name(0)
         vram_gb = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 1)
+    return {"cpu_name": cpu_name, "threads": threads, "ram_gb": ram_gb,
+            "has_gpu": has_gpu, "gpu_name": gpu_name, "vram_gb": vram_gb}
+
+
+def _collect_system_info(duration: Optional[float]) -> dict:
+    """Blocking hardware probe (``wmic``, psutil, torch) run in a thread."""
+    hw = _hardware_probe()
+    cpu_label = f"{hw['cpu_name']} ({hw['threads']} Threads)"
+    ram_gb = hw["ram_gb"]
+    ram_label = f"{ram_gb} GB"
+    threads = hw["threads"]
+    has_gpu = hw["has_gpu"]
+    gpu_name = hw["gpu_name"]
+    vram_gb = hw["vram_gb"]
 
     # Dynamic speed scaling factors based on real hardware performance
     is_high_end_cpu = threads >= 16 and ram_gb >= 16

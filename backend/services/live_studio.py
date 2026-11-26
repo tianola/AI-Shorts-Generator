@@ -25,6 +25,8 @@ from typing import List, Optional, Tuple
 
 from loguru import logger
 
+from services.title_style import fix_title
+
 from config import settings
 
 SEGMENT_SECONDS = 5
@@ -170,6 +172,9 @@ async def llm_highlight(text: str, start: float, end: float, context: str = "",
     except (TypeError, ValueError):
         score = 7.0
     title = _keep_topic(str(data.get("title") or "").strip().strip('"'), topic)
+    # The shared checker: hype and extra emoji go, the length is cut, the topic is kept, and a
+    # title with nothing the stream actually says is replaced by the stream's own words.
+    title, _fixed = fix_title(title, text, topic)
     if len(title.split()) < 3:        # nothing usable to publish under
         return None
     return Highlight(start, end, str(data.get("category") or "Highlight")[:24], title, score,

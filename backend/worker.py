@@ -957,7 +957,7 @@ async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_t
     job_info(job_id, f"Step 4b/8: Selecting best clips (source title: {source_title or 'N/A'})...")
     update_progress("Analyzing virality & selecting top clips...", 52)
     
-    num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else settings.NUM_CLIPS
+    num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else 0  # 0: automatic
     # The source sits next to the transcript; the Claude judge samples frames from it.
     source_video = os.path.join(os.path.dirname(segments_file), "source.mp4")
     # The channel's own best and worst published clips, by real views; "" until

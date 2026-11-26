@@ -44,7 +44,7 @@ class Job(Base):
     keep_native_transcript = Column(Boolean, nullable=True, default=False)
     # Content safety: smart blur of unsafe objects
     smart_blur_enabled = Column(Boolean, nullable=True, default=False)
-    target_clips = Column(Integer, nullable=True, default=10)
+    target_clips = Column(Integer, nullable=True, default=None)  # None: the selector decides
     # Editing mode steering clip selection: auto (picked per video) or viral|funny|dramatic|educational|story|meme|gaming
     clip_mode = Column(String, nullable=True, default="auto")
     # The API fills this from settings.DEFAULT_AUTO_UPLOAD, so the operator's
@@ -118,6 +118,8 @@ class Clip(Base):
     # Precision trim of rendered clip
     trim_start = Column(Float, nullable=True)
     trim_end = Column(Float, nullable=True)
+    # The render switches the studio keeps: {karaoke, motion_title, thumbnail_template}.
+    render_options = Column(JSON, nullable=True)
     # Translated transcript for this clip (English)
     translated_transcript = Column(Text, nullable=True)
 

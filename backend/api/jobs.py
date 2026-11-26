@@ -210,7 +210,7 @@ async def suggest_clips_for_job(
         except Exception:
             pass
 
-    clips = await select_clips(job_segments, settings.NUM_CLIPS, video_title=source_title)
+    clips = await select_clips(job_segments, 0, video_title=source_title)
     return {"clips": clips}
 
 
@@ -221,7 +221,7 @@ async def create_job(
     whisper_model: Optional[str] = None,
     caption_style: Optional[str] = "mrbeast",
     layout_mode: Optional[str] = "auto",
-    target_clips: Optional[int] = 10,
+    target_clips: Optional[int] = None,
     clip_mode: Optional[str] = "auto",
     auto_upload: Optional[bool] = None,
     llm_translate: Optional[bool] = False,
@@ -238,7 +238,7 @@ async def create_job(
         whisper_model=whisper_model,
         default_caption_style=caption_style,
         default_layout_mode=layout_mode,
-        target_clips=target_clips or 10,
+        target_clips=target_clips or None,
         clip_mode=normalise_mode(clip_mode),
         auto_upload=resolve_auto_upload(auto_upload),
         llm_translate=bool(llm_translate),
@@ -323,7 +323,7 @@ async def create_job_from_upload(
     whisper_model: Optional[str] = Form(None),
     caption_style: Optional[str] = Form("mrbeast"),
     layout_mode: Optional[str] = Form("auto"),
-    target_clips: Optional[int] = Form(10),
+    target_clips: Optional[int] = Form(None),
     clip_mode: Optional[str] = Form("auto"),
     auto_upload: Optional[bool] = Form(None),
     llm_translate: Optional[bool] = Form(False),
@@ -345,7 +345,7 @@ async def create_job_from_upload(
         whisper_model=whisper_model,
         default_caption_style=caption_style,
         default_layout_mode=layout_mode,
-        target_clips=target_clips or 10,
+        target_clips=target_clips or None,
         clip_mode=normalise_mode(clip_mode),
         auto_upload=resolve_auto_upload(auto_upload),
         llm_translate=bool(llm_translate),

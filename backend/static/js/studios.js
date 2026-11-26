@@ -146,9 +146,103 @@ function syncLiveSource() {
   $('lvObs').hidden = !obs;
 }
 
+// The clip list is redrawn every few seconds. Rebuilding it wholesale replaced the element under
+// the pointer before a click could land, so only clips that appeared or went away are touched.
+function renderClips(clips) {
+  const grid = $('lvClips');
+  if (!clips.length) {
+    if (!grid.querySelector('em')) grid.innerHTML = '<em>No clips yet</em>';
+    return;
+  }
+  if (grid.querySelector('em')) grid.innerHTML = '';
+  const cards = new Map([...grid.querySelectorAll('.studio-clip')].map((el) => [el.dataset.id, el]));
+  const wanted = new Set(clips.map((c) => c.id));
+  cards.forEach((el, id) => { if (!wanted.has(id)) el.remove(); });
+  clips.forEach((c, i) => {
+    let card = cards.get(c.id);
+    if (card) {
+      card.querySelector('strong').textContent = c.title;
+      card.querySelector('small').textContent = c.category || '';
+    } else {
+      card = document.createElement('div');
+      card.className = 'studio-clip';
+      card.dataset.id = c.id;
+      card.innerHTML = `<video controls preload="metadata" src="${escapeHtml(asMediaUrl(c.path))}"></video>
+        <strong></strong><small></small>
+        <button class="ghost-btn" type="button">Delete</button>`;
+      card.querySelector('strong').textContent = c.title;
+      card.querySelector('small').textContent = c.category || '';
+      card.querySelector('button').addEventListener('click', async () => {
+        const url = c.watch_id
+          ? `/api/live/watchlist/${encodeURIComponent(c.watch_id)}/clips/${encodeURIComponent(c.id)}`
+          : `/api/live/clips/${encodeURIComponent(c.id)}`;
+        try { await fetchJson(url, { method: 'DELETE' }); refreshLive(); }
+        catch (err) { setNote($('lvNote'), err.message, true); }
+      });
+    }
+    if (grid.children[i] !== card) grid.insertBefore(card, grid.children[i] || null);
+  });
+}
+
+// The watch list: one row per saved link. Rebuilt only when what the row shows changes, so the
+// buttons stay put under the pointer (the same reason the clip list is updated in place).
+function renderWatch(entries) {
+  const box = $('lvWatchList');
+  const sig = JSON.stringify(entries.map((e) => [e.id, e.name, e.enabled, e.state, e.clips.length]));
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.classList.add('studio-watch-list');
+  if (!entries.length) { box.innerHTML = '<em>No links yet</em>'; return; }
+  box.innerHTML = '';
+  entries.forEach((e) => {
+    const row = document.createElement('div');
+    row.className = 'studio-watch-row';
+    const info = document.createElement('div');
+    info.className = 'studio-watch-info';
+    const label = document.createElement('strong');
+    label.textContent = e.name || e.url;
+    const small = document.createElement('small');
+    small.textContent = e.state === 'error' ? e.detail : (e.name ? e.url : '');
+    info.append(label, small);
+    const badge = document.createElement('span');
+    badge.className = `studio-badge ${e.state}`;
+    badge.textContent = e.state;
+    const actions = document.createElement('div');
+    actions.className = 'studio-watch-actions';
+    const toggle = document.createElement('button');
+    toggle.className = 'ghost-btn';
+    toggle.type = 'button';
+    toggle.textContent = e.enabled ? 'Pause' : 'Resume';
+    toggle.addEventListener('click', () => watchAction(() => fetchJson(`/api/live/watchlist/${encodeURIComponent(e.id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !e.enabled }),
+    })));
+    const remove = document.createElement('button');
+    remove.className = 'ghost-btn';
+    remove.type = 'button';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', () => {
+      if (window.confirm(`Remove ${e.name || e.url} from the watch list? Its clips stay on disk.`)) {
+        watchAction(() => fetchJson(`/api/live/watchlist/${encodeURIComponent(e.id)}`, { method: 'DELETE' }));
+      }
+    });
+    actions.append(toggle, remove);
+    row.append(info, badge, actions);
+    box.appendChild(row);
+  });
+}
+
+async function watchAction(fn) {
+  try { await fn(); setNote($('lvWatchNote'), '', false); }
+  catch (err) { setNote($('lvWatchNote'), err.message, true); }
+  refreshLive();
+}
+
 async function refreshLive() {
   try {
-    const st = await fetchJson('/api/live/status');
+    const [st, wl] = await Promise.all([fetchJson('/api/live/status'), fetchJson('/api/live/watchlist')]);
+    renderWatch(wl.entries || []);
+    const watched = (wl.entries || []).flatMap((e) => e.clips || []);
+    const allClips = [...(st.clips || []), ...watched].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
     const badge = $('lvStatus');
     badge.textContent = `${st.status}${st.elapsed ? ' · ' + Math.floor(st.elapsed / 60) + ' min' : ''}`;
     badge.className = `studio-badge ${st.status}`;
@@ -162,20 +256,7 @@ async function refreshLive() {
       ? st.transcript.map((t) => `<div>${escapeHtml(t.text)}</div>`).join('')
       : '<em>Nothing yet</em>';
     tr.scrollTop = tr.scrollHeight;
-    const grid = $('lvClips');
-    grid.innerHTML = (st.clips || []).length ? '' : '<em>No clips yet</em>';
-    (st.clips || []).forEach((c) => {
-      const card = document.createElement('div');
-      card.className = 'studio-clip';
-      card.innerHTML = `<video controls preload="metadata" src="${escapeHtml(asMediaUrl(c.path))}"></video>
-        <strong>${escapeHtml(c.title)}</strong><small>${escapeHtml(c.category || '')}</small>
-        <button class="ghost-btn" type="button">Delete</button>`;
-      card.querySelector('button').addEventListener('click', async () => {
-        try { await fetchJson(`/api/live/clips/${encodeURIComponent(c.id)}`, { method: 'DELETE' }); refreshLive(); }
-        catch (err) { setNote($('lvNote'), err.message, true); }
-      });
-      grid.appendChild(card);
-    });
+    renderClips(allClips);
   } catch (err) {
     setNote($('lvNote'), err.message, true);
   }
@@ -200,6 +281,10 @@ export function setupStudios() {
     buffer_minutes: parseInt($('lvBuffer').value, 10), auto_clip: $('lvAuto').value === '1',
   })));
   $('lvStopBtn').addEventListener('click', () => liveAction(() => post('/api/live/disconnect')));
+  $('lvWatchAdd').addEventListener('click', () => {
+    const input = $('lvWatchUrl');
+    watchAction(async () => { await post('/api/live/watchlist', { url: input.value.trim() }); input.value = ''; });
+  });
   $('lvInstantBtn').addEventListener('click', () => liveAction(() => post('/api/live/instant-clip', { seconds: 30 })));
   syncLiveSource();
 }
