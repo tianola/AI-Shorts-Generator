@@ -7,12 +7,12 @@ from typing import List
 from pydantic import BaseModel, Field
 from loguru import logger
 
-from services.title_style import fix_title
+from services.title_style import brief as title_brief, fix_title
 from config import settings
 from services.llm_router import call_llm_structured, pick_model
 
 class ClipMetadata(BaseModel):
-    title: str = Field(..., description="Under 45 chars; teases the most surprising concrete thing in this clip without giving the answer away; true to the clip; no hashtags, no emojis")
+    title: str = Field(..., description="Under 45 chars, shaped 'Subject: hook': names what the clip is about (brand, product, person, topic), then teases the most surprising concrete thing in it with curiosity, tension or humour, without giving the answer away; true to the clip; no hashtags, no emojis")
     description: str = Field(..., description="2-3 sentences of real context for this clip, then one call to action")
     hashtags: List[str] = Field(default_factory=lambda: ["#Shorts"], description="3-5 niche-specific tags starting with #Shorts; never #Viral/#Trending/#FYP")
     story_type: str = Field(default="reaction", description="question_answer|reveal|challenge|emotion|lesson|reaction")
@@ -97,7 +97,9 @@ async def generate_metadata(
 
     system_prompt = (
         "You are a top-tier YouTube Shorts strategist. A title has one job: make a "
-        "stranger in the feed need to watch. You build it on the specific thing the clip "
+        "stranger in the feed need to watch. It opens with the subject (the brand, product, "
+        "person or topic) so the viewer and the platform know what the video is about. You "
+        "build the hook on the specific thing the clip "
         "actually says or shows - a number, a name, a consequence - and you tease it "
         "instead of summarising it. You never write a title that could sit on any video, "
         "and you never promise a reveal the clip does not deliver."
@@ -106,13 +108,7 @@ async def generate_metadata(
     title_requirement = (
         f"""1. Title: it is already decided - return exactly: {fixed_title}"""
         if fixed_title else
-        """1. Title: 12 to 40 characters, in the language spoken in the
-       transcript. Take the most surprising concrete element of the transcript (a
-       number, a named thing, a consequence) and open a curiosity gap around it: say
-       enough to intrigue, hold back the answer. It must be true to the clip.
-       Describes (bad): 'He Talks About His First Business Failing'.
-       Generic (bad): 'Wait For The Reaction', 'You Will Not Believe This'.
-       Teases (good): 'He Lost 40,000 In One Weekend', 'The One Question That Got Him Fired'."""
+        "1. Title, in the language spoken in the transcript. " + title_brief()
     )
 
     user_prompt = f"""

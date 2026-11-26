@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from services.title_style import derive_from_transcript
+from services.title_style import brief, derive_from_transcript
 
 CHECK_VERSION = "title-claims-1"
 MIN_QUOTE_OVERLAP = 0.7
@@ -187,12 +187,8 @@ def _rewrite_prompt(title: str, transcript: str, reasons: List[str]) -> str:
         f'This short-video title was rejected: "{title}"\n'
         f"Why: {'; '.join(reasons)}\n\n"
         f'What the clip says:\n"{transcript[:2500]}"\n\n'
-        "Write one new title (12 to 45 characters, the clip's language) that makes a viewer need "
-        "to watch: tease the most surprising concrete thing the clip actually says (a number it "
-        "says, a named thing, a consequence) and leave the answer open, as a question or an "
-        "unfinished reveal. Every claim must be stated in the clip; no number the clip does not "
-        "say; no hashtags or emojis; not a sentence fragment. "
-        'Return JSON only: {"title": "..."}'
+        "Write one new title in the clip's language. Every claim in it must be stated in the "
+        "clip.\n" + brief() + '\nReturn JSON only: {"title": "..."}'
     )
 
 

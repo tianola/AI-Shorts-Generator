@@ -230,7 +230,8 @@ def test_a_greek_transcript_is_named_in_the_prompt():
 def test_the_prompt_asks_for_a_teasing_title_not_a_summary():
     prompt = clip_selector._candidate_prompt(_ten_second_segments(3), {}, 5, 1, "", None)
     assert "not to summarise" in prompt
-    assert "never invent stakes" in prompt
+    assert "Never promise a reveal, stakes or a result the" in prompt
+    assert "'Subject: hook'" in prompt, "the title must name what the clip is about"
     assert "STALKER" not in prompt.upper(), "the old examples anchored every title on one story"
 
 

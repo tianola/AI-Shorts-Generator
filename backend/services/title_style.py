@@ -13,7 +13,7 @@ import re
 from typing import List, Optional, Tuple
 
 MIN_CHARS = 12
-MAX_CHARS = 40
+MAX_CHARS = 45     # room for a "Subject: " prefix; the title card wraps 3 lines of 18
 MAX_EMOJIS = 1
 
 # Empty hype: words that say nothing about the clip. Removed from the title when found.
@@ -38,10 +38,22 @@ def brief() -> str:
     """The rules, as text for a prompt. Every pipeline puts this in its title instruction."""
     return (
         f"Title: {MIN_CHARS} to {MAX_CHARS} characters, at most {MAX_EMOJIS} emoji (optional). "
-        "Make someone need to watch: name the most surprising concrete thing in the clip "
-        "(a number, a name, a consequence) and hold back the answer. The clip must pay that off. "
-        "Never promise a reveal, stakes or a result the clip does not show. No empty hype "
-        "(\"you won't believe\", \"this is wild\", \"insane\"), no quotation marks, no hashtags."
+        "Shape it 'Subject: hook'. The subject comes first and names what the clip is about as "
+        "a viewer would search for it: the brand, product, person, place or topic (Apple, "
+        "iPhone 16, the EU, a farmer's tractor). Without it neither the viewer nor the platform "
+        "can tell what the video is about. The hook makes someone need to watch. Pick the feeling "
+        "that fits the clip and its topic: curiosity (a question, an unfinished reveal), tension "
+        "or worry (a risk, a cost, a threat), or humour (an absurd detail). Build it on the most "
+        "surprising concrete thing the clip says (a number, a name, a consequence) and hold back "
+        "the answer. The clip must pay that off. Never promise a reveal, stakes or a result the "
+        "clip does not show, and no number it does not say. Not a sentence fragment. No empty "
+        "hype (\"you won't believe\", \"this is wild\", \"insane\"), no hashtags.\n"
+        "  No subject (weak): Europe Takes Aim at Parts Pairing\n"
+        "  Strong:            Apple: Europe Takes Aim at Parts Pairing\n"
+        "  Describes (weak):  He talks about his first business failing\n"
+        "  Tension (strong):  Apple: The $1,000 Fine Hidden in Its Contract\n"
+        "  Curiosity:         Apple: Your Slow iPhone Was No Accident\n"
+        "  Humour:            iPhone 16: Zap It and the Battery Lets Go"
     )
 
 
