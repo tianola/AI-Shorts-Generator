@@ -13,8 +13,15 @@ Longer notes for agents live in `.memory/` (`PROJECT.md`, `STATE.md`,
 - `backend/worker.py`: job orchestration. It is the hottest file in the repo and
   usually changes together with `services/clip_selector.py`, `config.py` and
   `database/models.py`. Check all four when you touch one.
+- `backend/publish_queue.py`: everything after rendering (upload spacing,
+  review and script gates, attempt records, operator publish). `worker.py`
+  re-exports its names; patch loggers in `publish_queue` when testing it.
 - `backend/api/`: FastAPI routes. `backend/services/`: selection, transcription,
   reframing, captions, render, platform uploads.
+- `backend/requirements.lock`: exact pins that CI and Docker install. After
+  editing `requirements.txt`, regenerate it with uv 0.11.32:
+  `uv pip compile requirements.txt --universal --python-version 3.11 -o requirements.lock`
+  (from `backend/`). CI fails if the two drift apart.
 - `backend/config.py`: every setting. A new setting also goes in
   `backend/.env.example` with a comment.
 - `backend/static/js/`, `backend/templates/index.html`: the dashboard (plain JS).
