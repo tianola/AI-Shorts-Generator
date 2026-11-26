@@ -60,6 +60,11 @@ From the root project directory, run:
    # Or on Mac/Linux: source .venv/bin/activate
    pip install -r requirements.txt
    ```
+   *`requirements.txt` lists version ranges. `requirements.lock` pins the exact
+   versions CI tests and the Docker images install. After changing
+   `requirements.txt`, regenerate the lock (with uv 0.11.32, the version CI checks with) using
+   `uv pip compile requirements.txt --universal --python-version 3.11 -o requirements.lock`.
+   To move every pin to the newest allowed version, add `--upgrade`.*
 
 2. **Configure Environment Variables**
    ```bash
@@ -98,6 +103,17 @@ never starts it, so if the worker dies, jobs sit at `created` and nothing
 renders until it is relaunched. Run the worker as its own service or keep a
 terminal on it. The install script needs an elevated prompt and expects the
 venv at `backend\.venv` (a junction to the root `.venv` works).
+
+---
+
+## 🔒 Network access
+
+The API has no login, so it listens on `127.0.0.1` (this computer only) by
+default. Anyone who can reach it can start jobs, delete them and publish to the
+connected YouTube channel. To open it to your network, set `API_HOST=0.0.0.0`
+in `backend/.env` (or `SHORTS_API_HOST` for the NSSM service), and only on a
+network you trust. The Docker stack listens on every interface inside the
+container but publishes its port on the host's loopback only.
 
 ---
 
@@ -311,3 +327,9 @@ its own owner account, created in the browser the first time you open it.
 - **Missing or Blank Video Screen:** Ffmpeg/Yolov8 bounding crop issues? Ensure Python's Path features correctly interpret your local drive letter.
 - **YouTube 403 / Geoblocked:** Depending on network environments, `yt-dlp` might fail. Just feed a direct MP4 file URL.
 - **No Fonts Found:** The pipeline falls back cleanly to OS-defaults (like `arial` or `liberation`), though injecting `Montserrat-ExtraBold` is advised for the best cinematic overlays.
+
+---
+
+## 📄 License
+
+[MIT](LICENSE)

@@ -12,6 +12,7 @@ Env:
     SHORTS_IDLE_RESTART_SECONDS   idle limit before self-restart (default 600)
     SHORTS_ACTIVITY_FILE          where to touch the last-activity timestamp
     SHORTS_API_PORT               port override (default 5001)
+    SHORTS_API_HOST               bind address override (default API_HOST, 127.0.0.1)
 """
 import os
 import sys
@@ -44,6 +45,9 @@ def main() -> int:
 
     idle_limit = int(os.environ.get("SHORTS_IDLE_RESTART_SECONDS", "600"))
     port = int(os.environ.get("SHORTS_API_PORT", "5001"))
+    # Same default as main.py: this computer only, unless asked otherwise.
+    from config import settings
+    host = os.environ.get("SHORTS_API_HOST") or settings.API_HOST
     storage = Path(os.environ.get("SHORTS_STORAGE_ROOT", BACKEND_DIR.parent / "storage"))
     storage.mkdir(parents=True, exist_ok=True)
     activity_file = Path(os.environ.get("SHORTS_ACTIVITY_FILE", str(storage / "last_activity.txt")))
@@ -58,7 +62,7 @@ def main() -> int:
 
     import uvicorn
 
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info", access_log=True)
+    config = uvicorn.Config(app, host=host, port=port, log_level="info", access_log=True)
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()

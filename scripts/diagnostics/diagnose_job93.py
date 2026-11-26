@@ -3,7 +3,7 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "backend"))
 
 JOB_DIR = "E:/01-AI-PROJECTS/ai-shorts-generator/storage/jobs/93"
 
@@ -20,7 +20,7 @@ def main():
             events = json.load(f)
         print(f"  [OK] {len(events)} events")
     else:
-        print(f"  [FAIL] NO temporal_events.json - worker used OLD code")
+        print("  [FAIL] NO temporal_events.json - worker used OLD code")
 
     # 2. Transcription
     segments_file = os.path.join(JOB_DIR, "segments.json")
@@ -57,7 +57,7 @@ def main():
                 if dets:
                     print(f"    t={ts:.0f}s: {len(dets)} detections")
         else:
-            print(f"  [FAIL] source.mp4 not found")
+            print("  [FAIL] source.mp4 not found")
     except Exception as e:
         print(f"  [FAIL] {e}")
 
@@ -81,9 +81,9 @@ def main():
                     print(f"    First: t={trajectory[0][0]:.1f}s")
                     print(f"    Last: t={trajectory[-1][0]:.1f}s")
             else:
-                print(f"  [FAIL] NO samples")
+                print("  [FAIL] NO samples")
         else:
-            print(f"  [FAIL] clip_0/short.mp4 not found")
+            print("  [FAIL] clip_0/short.mp4 not found")
     except Exception as e:
         print(f"  [FAIL] {e}")
         import traceback

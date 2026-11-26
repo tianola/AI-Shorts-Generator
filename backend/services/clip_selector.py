@@ -7,8 +7,10 @@ import json
 import os
 import re
 import string
+from typing import Optional
 from loguru import logger
 from config import settings
+from services.claude_client import SHORTS_SYSTEM as _SELECTION_SYSTEM
 from services.clip_bounds import load_words, snap_to_sentences
 from services.clip_judging import (
     AUTO, JUDGE_SCHEMA, apply_penalties, dimension_score, fit_to_topic, infer_mode, judge_instructions,
@@ -17,7 +19,7 @@ from services.clip_judging import (
 from services.llm_router import call_llm_json, pick_model, salvage_incomplete_json
 from services.metadata import derive_title_from_text
 from services.title_style import fix_title
-from services.story_analysis import analyze_story_segments
+from services.story_analysis import analyze_story_segments, transcript_block
 from services.tone_detector import is_transcript_somber, classify_content_tone
 
 # Power words for engagement keyword detection (case-insensitive).
@@ -102,11 +104,6 @@ _CANDIDATE_SCHEMA = {
 # renders something to review, not so it reaches the channel unattended.
 MODEL_SELECTION_PATHS = ("claude", "ai")
 
-_SELECTION_SYSTEM = (
-    "You pick and judge moments from long videos for standalone vertical shorts. "
-    "You are honest about quality and you answer with JSON only."
-)
-
 # Adaptive thinking is billed inside max_tokens on Claude, so the reply budget the
 # OmniRoute chain needs is not enough headroom there.
 _CLAUDE_THINKING_HEADROOM = 16000
@@ -118,8 +115,16 @@ _CLAUDE_THINKING_HEADROOM = 16000
 _OMNIROUTE_MIN_TOKENS = 12000
 
 
-async def _selection_model_json(prompt: str, schema: dict, max_tokens: int) -> tuple:
+async def _selection_model_json(prompt: str, schema: dict, max_tokens: int, *,
+                                context: str = "", effort: str = "high",
+                                visual: Optional[list] = None) -> tuple:
     """Ask Claude when a key is configured, else (or on failure) the OmniRoute chain.
+
+    `context` (the transcript) is sent to Claude as a separate cached block so the
+    story pass and the candidate pass share it; the OmniRoute chain has no cache
+    and gets it inline ahead of the task. `effort` is Claude's thinking depth:
+    high for picking candidates, medium for the judge, which reads far less.
+    `visual` (keyframe image blocks) goes to Claude only; the free chain is text.
 
     Returns the reply text and the path it came from ("claude" or "ai").
     """
@@ -132,13 +137,15 @@ async def _selection_model_json(prompt: str, schema: dict, max_tokens: int) -> t
                 system=_SELECTION_SYSTEM,
                 schema=schema,
                 max_tokens=max_tokens + _CLAUDE_THINKING_HEADROOM,
-                effort="high",
+                effort=effort,
+                context=context,
+                visual=visual,
             ), "claude"
         except Exception as exc:
             logger.warning(f"Claude clip-selection call failed ({type(exc).__name__}: {exc}); trying OmniRoute")
 
     text = await call_llm_json(
-        prompt=prompt,
+        prompt=f"{context}\n{prompt}" if context else prompt,
         system=_SELECTION_SYSTEM,
         model=pick_model(),
         temperature=0.35,
@@ -259,11 +266,7 @@ def _spoken_language_hint(segments: list) -> str:
 
 def _candidate_prompt(segments: list, story_plan: dict, wanted: int, num_clips: int,
                       video_title: str, temporal_events, mode: str = "viral",
-                      topic_breaks=None) -> str:
-    transcript_text = "".join(
-        f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}\n" for seg in segments
-    )
-
+                      topic_breaks=None, channel_examples: str = "") -> str:
     key_moments = ""
     for moment in (story_plan.get("key_moments") or [])[:8]:
         if isinstance(moment, dict) and moment.get("start") is not None:
@@ -284,6 +287,8 @@ def _candidate_prompt(segments: list, story_plan: dict, wanted: int, num_clips: 
                 "(a person enters, an object appears, the scene changes), not only where the talk is good.\n"
             )
 
+    examples_block = f"\n{channel_examples}\n" if channel_examples else ""
+
     language = _spoken_language_hint(segments)
     language_note = f" ({language})" if language else ""
     title_line = f'\nSource video title: "{video_title}"' if video_title else ""
@@ -297,13 +302,14 @@ def _candidate_prompt(segments: list, story_plan: dict, wanted: int, num_clips: 
         )
 
     return f"""
-You are choosing moments from a long video to publish as standalone vertical shorts
+The transcript above is the whole video, with timestamps.
+You are choosing moments from that video to publish as standalone vertical shorts
 (YouTube Shorts / TikTok). A viewer decides in the first 1-3 seconds whether to swipe
 away, and most of them never saw the full video, so every pick has to work for a
 stranger with zero context.
 {title_line}
 What the video is about: {story_plan.get('story_summary', '')}
-{mode_block}{key_moments_block}
+{mode_block}{key_moments_block}{examples_block}
 Find the {wanted} strongest candidate moments. That is more than will be published on
 purpose: a second pass ranks them and keeps the best {num_clips}, so include a real
 range rather than padding with near-duplicates. Candidates must not overlap.
@@ -354,9 +360,7 @@ For each candidate:
 
 Language: write title and why in the language spoken in the transcript{language_note}.
 Never switch to another language or script.
-
-Transcript:
-{transcript_text}{visual_events_block}
+{visual_events_block}
 Return ONLY valid JSON in this shape:
 {{
   "clips": [
@@ -375,7 +379,8 @@ Return ONLY valid JSON in this shape:
 """
 
 
-async def _judge_candidates(clips: list, segments: list, num_clips: int, mode: str = "viral") -> bool:
+async def _judge_candidates(clips: list, segments: list, num_clips: int, mode: str = "viral",
+                            video_path: Optional[str] = None, channel_examples: str = "") -> bool:
     """Second pass: an editor's verdict on what the viewer will actually hear.
 
     The first pass rates its own picks while reading the whole transcript. Here the
@@ -405,6 +410,7 @@ what the viewer hears, from the first word to the last. Judge each as a stranger
 a feed who has never seen the video. A weak opening caps the overall impression, because
 viewers leave before the rest matters.
 {judge_instructions(num_clips, mode)}
+{channel_examples + chr(10) if channel_examples else ""}
 {candidates_text}
 
 Return ONLY valid JSON:
@@ -412,8 +418,14 @@ Return ONLY valid JSON:
 """
 
     try:
+        visual = None
+        from services.claude_client import claude_available
+        if claude_available():
+            from services.judge_frames import judge_frame_blocks
+            visual = await judge_frame_blocks(video_path, clips, int(settings.JUDGE_FRAMES_PER_CLIP)) or None
         text, _ = await _selection_model_json(
-            prompt, JUDGE_SCHEMA, max_tokens=max(3000, len(clips) * 260)
+            prompt, JUDGE_SCHEMA, max_tokens=max(3000, len(clips) * 260), effort="medium",
+            visual=visual,
         )
         data = salvage_incomplete_json(text.replace("```json", "").replace("```", "").strip())
         ranked = data.get("ranked")
@@ -776,18 +788,21 @@ def _time_chunks(segments: list, seconds: int = AUTO_CHUNK_SECONDS) -> list:
     return [part for part in parts if sum(len(str(s.get("text") or "").split()) for s in part) >= 30]
 
 
-async def _judge_in_batches(clips: list, segments: list, ceiling: int, mode: str) -> bool:
+async def _judge_in_batches(clips: list, segments: list, ceiling: int, mode: str,
+                            video_path: Optional[str] = None, channel_examples: str = "") -> bool:
     """Judge a long list in batches, so one judge reply never has to carry 60 verdicts."""
     judged = False
     for start in range(0, len(clips), AUTO_JUDGE_BATCH):
         batch = clips[start:start + AUTO_JUDGE_BATCH]
-        if await _judge_candidates(batch, segments, ceiling, mode):
+        if await _judge_candidates(batch, segments, ceiling, mode, video_path=video_path,
+                                   channel_examples=channel_examples):
             judged = True
     return judged
 
 
 async def select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None,
-                       mode: str = "viral") -> list:
+                       mode: str = "viral", video_path: Optional[str] = None,
+                       channel_examples: str = "") -> list:
     """Select clips (see _select_clips). mode="auto" reads the video and picks the mode;
     every clip carries the mode that was used as "edit_mode"."""
     mode = normalise_mode(mode)
@@ -798,14 +813,16 @@ async def select_clips(segments_file: str, num_clips: int = 3, video_title: str 
         except (OSError, ValueError):
             mode = "viral"
         logger.info(f"Editing mode picked for this video: {mode}")
-    clips = await _select_clips(segments_file, num_clips, video_title, temporal_events, mode)
+    clips = await _select_clips(segments_file, num_clips, video_title, temporal_events, mode,
+                                video_path=video_path, channel_examples=channel_examples)
     for clip in clips:
         clip["edit_mode"] = mode
     return clips
 
 
 async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str = "", temporal_events: list = None,
-                        mode: str = "viral") -> list:
+                        mode: str = "viral", video_path: Optional[str] = None,
+                        channel_examples: str = "") -> list:
     """
     Select the best clips from a video using AI, in two passes.
 
@@ -819,6 +836,8 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
         num_clips: Number of clips to select
         video_title: Optional source video title for contextual hook framing
         temporal_events: Optional visual event timeline from temporal_localization
+        channel_examples: Optional text from services.channel_examples, the channel's
+            most and least watched past clips, shown to both passes
 
     Returns:
         List of selected clips; each carries "selection_path" naming where it came
@@ -848,10 +867,12 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
         clips = []
         for part, wanted in requests:
             prompt = _candidate_prompt(part, story_plan, wanted, wanted if auto else num_clips,
-                                       video_title, temporal_events, mode=mode, topic_breaks=topic_breaks)
+                                       video_title, temporal_events, mode=mode, topic_breaks=topic_breaks,
+                                       channel_examples=channel_examples)
             try:
                 response_text, source = await _selection_model_json(
-                    prompt, _CANDIDATE_SCHEMA, max_tokens=max(2000, wanted * CLIP_OUTPUT_TOKENS)
+                    prompt, _CANDIDATE_SCHEMA, max_tokens=max(2000, wanted * CLIP_OUTPUT_TOKENS),
+                    context=transcript_block(part),
                 )
                 response_text = response_text.replace("```json", "").replace("```", "").strip()
                 data = salvage_incomplete_json(response_text)
@@ -962,9 +983,13 @@ async def _select_clips(segments_file: str, num_clips: int = 3, video_title: str
 
         candidate_count = len(valid_clips)
         if auto:
-            judged = candidate_count > 1 and await _judge_in_batches(valid_clips, segments, ceiling, mode)
+            judged = candidate_count > 1 and await _judge_in_batches(valid_clips, segments, ceiling, mode,
+                                                                       video_path=video_path,
+                                                                       channel_examples=channel_examples)
         else:
-            judged = candidate_count > 1 and await _judge_candidates(valid_clips, segments, num_clips, mode)
+            judged = candidate_count > 1 and await _judge_candidates(valid_clips, segments, num_clips, mode,
+                                                                        video_path=video_path,
+                                                                        channel_examples=channel_examples)
         if judged:
             # A reject is final: a clip the editor refused is not brought back by its
             # first-pass score. Unrated candidates (no usable row) stay in.

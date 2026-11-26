@@ -114,7 +114,7 @@ async def test_rejected_candidates_never_ship_and_all_rejected_means_no_short(mo
 
     verdict = {"decision": "reject"}
 
-    async def fake_model(prompt, schema, max_tokens):
+    async def fake_model(prompt, schema, max_tokens, **kwargs):
         if '"ranked"' in prompt:
             return json.dumps({"ranked": [_row(candidate_id="c0", **verdict), _row(candidate_id="c1", **verdict)]}), "ai"
         return json.dumps(candidates), "ai"
@@ -167,7 +167,7 @@ async def test_auto_picks_a_mode_and_tags_every_clip(monkeypatch, tmp_path):
     async def fake_infer(title, segments):
         return "gaming"
 
-    async def fake_inner(path, num, title, events, mode):
+    async def fake_inner(path, num, title, events, mode, **kwargs):
         seen["mode"] = mode
         return [{"start": 0.0, "end": 30.0}]
     monkeypatch.setattr(clip_selector, "infer_mode", fake_infer)

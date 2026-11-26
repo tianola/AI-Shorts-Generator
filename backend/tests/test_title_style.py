@@ -5,7 +5,6 @@ No test calls a real model: suggest_title is run against a fake call_llm_json.
 import asyncio
 import json
 
-import pytest
 
 from services import llm_router
 from services import title_style as ts

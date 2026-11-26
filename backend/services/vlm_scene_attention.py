@@ -104,9 +104,13 @@ Transcript context: {transcript_context[:500]}
 
 Return JSON: {{"subject": "...", "objects": [...], "action": "...", "confidence": 0.0-1.0}}"""
 
-    response = client.models.generate_content(
+    # The google-genai client is synchronous; called inline it froze the event
+    # loop (progress websocket included) for the whole round-trip on every frame.
+    import asyncio
+    response = await asyncio.to_thread(
+        client.models.generate_content,
         model=settings.GOOGLE_AI_STUDIO_MODEL,
-        contents=[prompt, img]
+        contents=[prompt, img],
     )
 
     # Parse JSON from response
@@ -122,37 +126,51 @@ Return JSON: {{"subject": "...", "objects": [...], "action": "...", "confidence"
 
 
 async def _omniroute_vision(frame: np.ndarray, transcript_context: str) -> Dict[str, Any]:
-    """OmniRoute vision (if it supports vision models)"""
+    """OmniRoute vision, on the image-capable model named in SCENE_ATTENTION_VLM_MODEL.
+
+    This tier used to ask for a hard-coded "gpt-4-vision-preview", a model OpenAI
+    retired and OmniRoute does not serve, and it sent that id to Together and the
+    HF router too. It failed on every frame, after a blocking round-trip per
+    provider made on the event loop. It now runs only when a vision model is
+    configured, asks OmniRoute alone, and does the blocking call off the loop.
+    """
+    import asyncio
     from services.llm_fallback import chat_completion
     from config import settings
 
-    # Check if OmniRoute supports vision
     if not settings.OMNIROUTE_API_KEY:
         raise ValueError("No OMNIROUTE_API_KEY")
+    vision_model = (settings.SCENE_ATTENTION_VLM_MODEL or "").strip()
+    if not vision_model:
+        raise ValueError("No SCENE_ATTENTION_VLM_MODEL configured for the OmniRoute vision tier")
 
-    # Convert frame to base64
-    _, buffer = cv2.imencode('.jpg', frame)
-    import base64
+    ok, buffer = cv2.imencode('.jpg', frame)
+    if not ok:
+        raise ValueError("could not encode frame for OmniRoute")
     img_base64 = base64.b64encode(buffer).decode()
 
-    # Try vision model (this may not work if OmniRoute doesn't support vision)
     messages = [
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": f"Analyze this video frame. Transcript: {transcript_context[:300]}. Return JSON: {{'subject': '...', 'objects': [...], 'action': '...', 'confidence': 0.0-1.0}}"},
+                {"type": "text", "text": (
+                    f"Analyze this video frame. Transcript: {transcript_context[:300]}. "
+                    'Return JSON: {"subject": "...", "objects": [...], "action": "...", '
+                    '"confidence": 0.0-1.0}'
+                )},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}}
             ]
         }
     ]
 
-    # This will likely fail if OmniRoute doesn't support vision
-    result_text = chat_completion(messages, model="gpt-4-vision-preview", temperature=0.2)
+    result_text = await asyncio.to_thread(
+        chat_completion, messages, model=vision_model, temperature=0.2,
+        providers=("omniroute",),
+    )
     if not result_text:
         raise ValueError("OmniRoute vision not available")
 
-    result = json.loads(result_text)
-    return result
+    return _extract_json_obj(result_text)
 
 
 async def _local_vlm(frame: np.ndarray, transcript_context: str) -> Dict[str, Any]:
@@ -244,7 +262,7 @@ def _extract_json_obj(text: str) -> Dict[str, Any]:
     """Parse a JSON object out of a model reply that may wrap it in prose/fences."""
     text = (text or "").strip()
     if not text:
-        raise ValueError("Ollama returned an empty answer")
+        raise ValueError("model returned an empty answer")
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -252,7 +270,7 @@ def _extract_json_obj(text: str) -> Dict[str, Any]:
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end > start:
         return json.loads(text[start:end + 1])
-    raise ValueError(f"Ollama answer was not JSON: {text[:120]}")
+    raise ValueError(f"model answer was not JSON: {text[:120]}")
 
 
 def _hybrid_understanding(video_path: str, timestamp: float, transcript_context: str) -> Dict[str, Any]:

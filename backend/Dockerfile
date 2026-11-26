@@ -22,10 +22,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy requirements first for better caching
-COPY backend/requirements.txt .
+# requirements.lock pins every package to the versions CI tested, so a rebuild
+# next month installs the same thing. requirements.txt holds the loose ranges.
+COPY backend/requirements.lock .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.lock
 
 # Copy application code
 COPY backend/ .
