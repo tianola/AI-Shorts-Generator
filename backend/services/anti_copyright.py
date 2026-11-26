@@ -21,6 +21,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# The transform's numbers, in one place: the render manifest records them, and the quality check
+# needs `speed` to turn times in the shipped file back into times in the cut clip.
+PARAMS = {"speed": 1.02, "semitones": 1.5, "hue": 6, "saturation": 1.05}
+
 
 def apply_anti_fingerprint(input_path: str, output_path: str | None = None) -> str:
     """
@@ -47,8 +51,8 @@ def _run_transform(src: str, dst: str) -> None:
     Speed-up is done via pts manipulation (setpts) + atempo for audio.
     Pitch is adjusted with asetrate + aresample (no rubberband dependency).
     """
-    speed = 1.02          # 2% faster — invisible, breaks frame fingerprint
-    semitones = 1.5       # +1.5 semitones pitch shift
+    speed = PARAMS["speed"]            # 2% faster
+    semitones = PARAMS["semitones"]    # +1.5 semitones pitch shift
     pitch_factor = 2 ** (semitones / 12.0)  # ≈ 1.0905
     work_rate = 48000     # the rate the pitch trick is calculated against
 
@@ -111,7 +115,12 @@ def _run_transform(src: str, dst: str) -> None:
     ]
 
     logger.info(f"[anti_copyright] Applying anti-fingerprint: {src} → {dst}")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    from services.audio_polish import ENCODE_TIMEOUT_S
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=ENCODE_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        # A wedged ffmpeg must not hold the job open; the caller keeps the untransformed file.
+        raise RuntimeError(f"anti_copyright ffmpeg timed out after {ENCODE_TIMEOUT_S}s") from exc
 
     if proc.returncode != 0:
         logger.error(f"[anti_copyright] ffmpeg failed:\n{proc.stderr}")

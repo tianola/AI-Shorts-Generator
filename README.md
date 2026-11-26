@@ -19,6 +19,7 @@
 - 🎙️ **Audio & Caption Sync:** Auto-transcribes using local **Whisper**, generating accurate word-level dynamic captions (ASS).
 - 🧹 **Clean Pipeline output:** Instead of littering your folder with 10 intermediate copies, it intelligently cleans up after itself and spits out one perfect `final_video.mp4` for you to use.
 - 🔊 **Auto SFX & Enhancements:** Adds transitions, sound effects, metadata generation, and custom YouTube/TikTok descriptions.
+- 🎬 **Editing intelligence:** a per-clip edit timeline drives colour emoji stickers, zoom/shake/flash/tint effects, sound design with a sidechain, caption motions, a quality check of the finished file and a render manifest. See [docs/EDITING_INTELLIGENCE.md](docs/EDITING_INTELLIGENCE.md).
 
 ---
 
@@ -200,6 +201,7 @@ A successfully processed job keeps the directory clean. You will typically find:
   - `metadata.json` (Social-ready descriptions)
   - `thumbnail.jpg` (Custom title thumbnail)
   - `storyboard.jpg`
+  - `edit_timeline.json`, `quality.json`, `render_manifest.json` (what was edited and why, how the file measured, how it was rendered)
   - **`final_video.mp4` (The processed, ready-to-upload Short)**
 - `pipeline.log` (Internal event logs)
 

@@ -7,7 +7,7 @@
 
 import { activeSourceMode, renderModelOptions, selectedUploadFile } from './source.js';
 import { els, state } from './state.js';
-import { playErrorSound, playSuccessChime, setStatus, setupWebSocket, updateProgressUI, updateTranscriptionEstimateBadge } from './status.js';
+import { playErrorSound, playSuccessChime, setStatus, setupWebSocket, showJobError, updateProgressUI, updateTranscriptionEstimateBadge } from './status.js';
 import { openClipStudio, uploadClip } from './studio.js';
 import { API_PREFIX, asMediaUrl, escapeHtml, fetchJson, formatTimeLabel, isYouTubeVideoId, pct } from './util.js';
 
@@ -249,7 +249,8 @@ export async function loadJob(jobId, showStatus = true) {
 	} else if (job.status === 'completed') {
 	  updateProgressUI(job.id, 'All clips completed!', 100, job.status, (job.clips || []).length);
 	} else if (job.status === 'failed') {
-	  updateProgressUI(job.id, job.error_message || 'Job Failed', 100, job.status, (job.clips || []).length);
+	  updateProgressUI(job.id, 'Failed', 100, job.status, (job.clips || []).length);
+	  showJobError(job.id, job.error_message || 'The job failed but the server stored no error message.');
 	}
   } catch (error) {
 	if (showStatus) setStatus(`Could not load job details: ${error.message}`, 'error');
@@ -398,6 +399,20 @@ export function renderClips(clips) {
   els.clipsGrid.appendChild(fragment);
 }
 
+// FastAPI returns validation errors as a list of {loc, msg}; show them as text.
+function formatApiError(detail) {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        const field = Array.isArray(item.loc) ? item.loc.slice(1).join('.') : '';
+        return field ? `${field}: ${item.msg}` : (item.msg || JSON.stringify(item));
+      })
+      .join('; ');
+  }
+  return detail ? JSON.stringify(detail) : '';
+}
+
 export async function createJob(event) {
   event.preventDefault();
   const stylePrompt = document.getElementById('stylePrompt')?.value.trim() || '';
@@ -460,16 +475,17 @@ export async function createJob(event) {
       caption_style: captionStyle,
       layout_mode: layoutMode,
       clip_mode: clipMode,
-      target_clips: targetClips,
       auto_upload: autoUpload,
       llm_translate: llmTranslate
     });
+	// Automatic clip count sends no target_clips at all: "null" is not an integer.
+	if (targetClips) params.append('target_clips', targetClips);
 	if (stylePrompt) params.append('style_prompt', stylePrompt);
 	const response = await fetch(`${API_PREFIX}/jobs?${params.toString()}`, { method: 'POST' });
-	const data = await response.json();
+	const data = await response.json().catch(() => ({}));
 
 	if (!response.ok) {
-	  throw new Error(data.detail || 'Failed to create job');
+	  throw new Error(formatApiError(data.detail) || 'Failed to create job');
 	}
 
 	setStatus(`Job #${data.job_id} created (automatic clip count). Processing...`);
@@ -501,7 +517,8 @@ export async function pollJob(jobId) {
 	  if (job.status === 'completed' || job.status === 'failed') {
 		clearInterval(state.jobTimers[jobId]);
 		delete state.jobTimers[jobId];
-		updateProgressUI(jobId, job.status === 'completed' ? 'All clips rendered!' : (job.error_message || 'Failed'), 100, job.status, (job.clips || []).length);
+		updateProgressUI(jobId, job.status === 'completed' ? 'All clips rendered!' : 'Failed', 100, job.status, (job.clips || []).length);
+		showJobError(jobId, job.status === 'failed' ? (job.error_message || 'The job failed but the server stored no error message.') : '');
 		
 		if (job.status === 'completed') {
 		  playSuccessChime(jobId);

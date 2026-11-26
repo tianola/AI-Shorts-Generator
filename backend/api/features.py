@@ -488,6 +488,19 @@ async def clip_words(clip_id: int, db: Session = Depends(get_database)):
     return {"words": _clip_words(clip), "duration": round(duration, 3), "trim": trim}
 
 
+@router.get("/clips/{clip_id}/quality")
+def clip_quality(clip_id: int, db: Session = Depends(get_database)):
+    """The clip's quality report (findings with evidence) and the manifest of how it was rendered."""
+    clip = db.query(Clip).filter(Clip.id == clip_id).first()
+    if not clip:
+        raise HTTPException(status_code=404, detail=f"Clip {clip_id} not found")
+    return {
+        "report": clip.quality_report,
+        "manifest": clip.render_manifest,
+        "fingerprint": clip.render_fingerprint,
+    }
+
+
 @router.post("/clips/{clip_id}/trim/reset")
 async def reset_trim(clip_id: int, db: Session = Depends(get_database)):
     """Drop the trim: the clip goes back to its full render. The trimmed file is kept on disk."""

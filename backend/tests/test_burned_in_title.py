@@ -29,7 +29,10 @@ def test_metadata_is_generated_before_the_single_pass_render():
 
 def test_the_burned_in_title_comes_from_the_generated_metadata():
     src = _clip_processing_source()
-    render_call = src[src.index("_rsp("):src.index("source_channel=source_channel,") + 40]
+    # The render kwargs are built once in `_rsp_args` and passed to both the main render and
+    # the plain preview, so the title is checked in that block.
+    start = src.index("_rsp_args = dict(") if "_rsp_args = dict(" in src else src.index("_rsp(")
+    render_call = src[start:src.index("source_channel=source_channel,") + 40]
     assert re.search(r"title_text=(_title|final_title)\b", render_call), render_call
     assert '"Viral Moment"' not in src, (
         "no publish or render path may substitute a placeholder headline"

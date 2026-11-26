@@ -24,7 +24,58 @@ export function setStatus(message, tone = 'default') {
   els.status.style.color = tone === 'error' ? '#ffd9e7' : '#dfeaff';
 }
 
+/**
+ * Show the exact error a job failed with, in full, inside the progress panel.
+ * message is the job's error_message as the server stored it (exception type,
+ * stage, and text). Passing an empty message removes the box.
+ */
+export function showJobError(jobId, message) {
+  const panel = els.activeJobProgressPanel;
+  if (!panel) return;
+  let box = document.getElementById('activeJobErrorBox');
+  if (!message) {
+    if (box) box.remove();
+    return;
+  }
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'activeJobErrorBox';
+    Object.assign(box.style, {
+      marginTop: '0.8rem', padding: '0.7rem 0.8rem', borderRadius: '10px',
+      border: '1px solid rgba(255,77,141,0.45)', background: 'rgba(255,77,141,0.08)',
+    });
+    const head = document.createElement('div');
+    head.style.display = 'flex';
+    head.style.justifyContent = 'space-between';
+    head.style.alignItems = 'center';
+    head.style.gap = '0.5rem';
+    const title = document.createElement('strong');
+    title.textContent = 'Job failed';
+    title.style.color = '#ff8fb3';
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'ghost-btn';
+    copy.textContent = 'Copy error';
+    copy.addEventListener('click', () => {
+      const text = document.getElementById('activeJobErrorText')?.textContent || '';
+      navigator.clipboard?.writeText(text);
+      copy.textContent = 'Copied';
+    });
+    head.append(title, copy);
+    const pre = document.createElement('pre');
+    pre.id = 'activeJobErrorText';
+    Object.assign(pre.style, {
+      margin: '0.5rem 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+      fontFamily: 'monospace', fontSize: '0.8rem', color: '#ffd9e7',
+    });
+    box.append(head, pre);
+    panel.appendChild(box);
+  }
+  document.getElementById('activeJobErrorText').textContent = message;
+}
+
 export function updateProgressUI(jobId, stage, percent, status, clipsCount) {
+  if (status !== 'failed') showJobError(jobId, '');
   const p = Math.max(0, Math.min(100, Number(percent) || 0));
   
   if (els.activeJobProgressPanel) {

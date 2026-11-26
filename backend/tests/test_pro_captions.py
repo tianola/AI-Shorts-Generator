@@ -132,4 +132,26 @@ def test_create_captions_generates_valid_ass(tmp_path):
     assert "PlayResX: 1080" in content
     assert "PlayResY: 1920" in content
     assert "Dialogue:" in content
-    assert ("💰" in content) or ("🤯" in content)
+    # Default mode is 'sticker': libass cannot draw colour emoji, so the ASS text has none
+    # and the emoji are listed next to it for the renderer to lay over the video.
+    assert "💰" not in content and "🤯" not in content
+    from services import emoji_stickers
+    if emoji_stickers.available():
+        with open(emoji_stickers.sidecar_path(out_ass), "r", encoding="utf-8") as f:
+            sidecar = f.read()
+        assert ("💰" in sidecar) and ("🤯" in sidecar)
+
+
+def test_text_mode_still_writes_emoji_into_the_ass_text(tmp_path, monkeypatch):
+    from config import settings
+    monkeypatch.setattr(settings, "CAPTION_EMOJI_MODE", "text")
+    words = [{"word": "secret", "start": 0.0, "end": 0.4}, {"word": "money", "start": 0.4, "end": 0.9}]
+    words_file = str(tmp_path / "words.json")
+    with open(words_file, "w", encoding="utf-8") as f:
+        json.dump(words, f)
+    out_ass = str(tmp_path / "text.ass")
+    create_captions(words_file, out_ass, style_name="capcut_aqua")
+    with open(out_ass, "r", encoding="utf-8") as f:
+        content = f.read()
+    assert "💰" in content and "🤯" in content
+    assert not os.path.exists(out_ass + ".emoji.json")

@@ -31,6 +31,10 @@
 			<span id="topbarTikTokDot" style="width: 8px; height: 8px; border-radius: 50%; background: #64748b; display: inline-block;"></span>
 			<span id="topbarTikTokLabel">TikTok Auth</span>
 		  </button>
+		  <button class="ghost-btn" id="topbarLlmBtn" title="LLM status" style="display: flex; align-items: center; gap: 6px;">
+			<span id="topbarLlmDot" style="width: 8px; height: 8px; border-radius: 50%; background: #64748b; display: inline-block;"></span>
+			<span id="topbarLlmLabel">LLM</span>
+		  </button>
 		  <button class="ghost-btn" id="refreshJobsBtn">Refresh</button>
 		  <button class="primary-btn" id="focusComposerBtn">New job</button>
 		</div>
@@ -474,6 +478,12 @@
 				<button class="primary-btn" id="studioAiSendBtn" type="button">Send</button>
 			  </div>
 			</div>
+
+			<!-- How this clip was edited: timeline, reasons, quality and the before/after check. Loads when first opened. -->
+			<details class="studio-disclosure" id="studioEditDetails">
+			  <summary>How this clip was edited</summary>
+			  <div id="studioEditPanel" class="edit-panel"></div>
+			</details>
 
 			<!-- Publish: its own step. Upload always asks for confirmation first. -->
 			<details class="studio-disclosure" id="studioPublish">

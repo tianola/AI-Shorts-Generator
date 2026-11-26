@@ -858,6 +858,7 @@ input:focus, select:focus {
 .studio-manual summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; padding: 6px 0; }
 .file-btn { cursor: pointer; display: inline-block; }
 .pq-list { display: flex; flex-direction: column; gap: 8px; }
+.pq-toggle { width: 100%; margin-top: 2px; }
 .pq-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 12px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid var(--line); }
 .pq-pos { min-width: 28px; height: 28px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.08); font-size: 0.8rem; }
 .pq-info { flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -904,3 +905,49 @@ input:focus, select:focus {
 .studio-disclosure { display: flex; flex-direction: column; gap: 12px; }
 .studio-disclosure > summary { margin-bottom: 0; }
 .studio-preview-col { justify-content: flex-start; }
+
+/* "How this clip was edited" (static/js/timeline_view.js) */
+.edit-panel { display: flex; flex-direction: column; gap: 12px; font-size: 0.85rem; }
+.edit-panel .edit-note.error { color: #ff7a90; }
+.edit-header { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; color: var(--muted); }
+.edit-header-item { white-space: nowrap; }
+.edit-chip { padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; border: 1px solid rgba(255,255,255,0.15); }
+.edit-chip-passed { color: #7ee787; border-color: rgba(126,231,135,0.4); }
+.edit-chip-review { color: #f9c74f; border-color: rgba(249,199,79,0.4); }
+.edit-chip-failed { color: #ff7a90; border-color: rgba(255,122,144,0.4); }
+.edit-chip-none { color: var(--muted); }
+.edit-fingerprint { font-family: ui-monospace, Consolas, monospace; font-size: 0.75rem; color: var(--muted); }
+.edit-section { display: flex; flex-direction: column; gap: 6px; }
+.edit-subhead { margin: 4px 0 0; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.edit-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
+.edit-details > summary { cursor: pointer; color: var(--muted); }
+.edit-notice { padding: 6px 10px; border-radius: 8px; background: rgba(249,199,79,0.12); }
+.edit-finding-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.edit-finding-text { color: var(--muted); }
+.edit-finding-meta { color: var(--muted); font-size: 0.78rem; }
+.edit-sev { font-size: 0.7rem; padding: 1px 6px; border-radius: 4px; text-transform: uppercase; }
+.edit-sev-high { background: rgba(255,122,144,0.2); color: #ff7a90; }
+.edit-sev-mid { background: rgba(249,199,79,0.2); color: #f9c74f; }
+.edit-sev-low { background: rgba(148,163,184,0.2); color: var(--muted); }
+.edit-badge-stable { font-size: 0.7rem; padding: 1px 6px; border-radius: 4px; background: rgba(126,231,135,0.2); color: #7ee787; }
+.edit-timeline { display: flex; flex-direction: column; gap: 4px; }
+.edit-legend { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 0.75rem; }
+.edit-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.edit-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.edit-strip { position: relative; height: 56px; border-radius: 8px; background: rgba(255,255,255,0.05); overflow: hidden; }
+.edit-block { position: absolute; top: 6px; bottom: 22px; border-radius: 4px; }
+.edit-marker { position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,0.7); }
+.edit-tick { position: absolute; bottom: 0; height: 12px; width: 2px; background: #9aa9bf; }
+.edit-axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.7rem; }
+.edit-ab { display: flex; flex-direction: column; gap: 8px; }
+.edit-ab-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.edit-ab-fig { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.edit-ab-fig figcaption { color: var(--muted); font-size: 0.75rem; }
+.edit-ab-fig video { width: 100%; border-radius: 8px; background: #000; }
+.edit-ab-controls { display: flex; align-items: center; gap: 8px; }
+.edit-ab-controls input[type=range] { flex: 1; }
+.edit-ab-time { color: var(--muted); font-size: 0.75rem; white-space: nowrap; }
+.edit-ab-result { display: flex; flex-direction: column; gap: 6px; }
+.edit-table-wrap { overflow-x: auto; }
+.edit-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.edit-table th, .edit-table td { text-align: left; padding: 4px 6px; border-bottom: 1px solid rgba(255,255,255,0.08); }

@@ -177,9 +177,16 @@ UNREVIEWED_SELECTION_PATHS = ("heuristic", "grid")
 
 
 def _needs_review_before_publish(clip) -> bool:
-    """True for a clip no model chose, which must not publish unattended."""
+    """True for a clip that must not publish unattended: no model chose it, or its quality check failed.
+
+    Only a failed check holds a clip back (a broken file, wrong size, missing audio, clipping);
+    warnings are for a person to look at, but do not stop the queue.
+    """
     breakdown = clip.score_breakdown if isinstance(clip.score_breakdown, dict) else {}
-    return breakdown.get("selection_path") in UNREVIEWED_SELECTION_PATHS
+    if breakdown.get("selection_path") in UNREVIEWED_SELECTION_PATHS:
+        return True
+    quality = getattr(clip, "quality_report", None)
+    return isinstance(quality, dict) and quality.get("status") == "failed"
 
 
 def enqueue_clips_for_publish(db, job_id: int, now: Optional[datetime] = None,

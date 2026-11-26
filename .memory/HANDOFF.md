@@ -1,8 +1,8 @@
-# Handoff — 2026-11-21
+# Handoff — 2026-11-22 (Phase 9 finished, uncommitted)
 
-- Read `.memory/STATE.md` first. Latest commits on `master`: 7fea202 (live webcam layout, 1080p) and 4f4dfb4 (Narrate/Live). Nothing pushed.
-- NSSM services still run the code from before 7fea202. Restart needs admin PowerShell: `Restart-Service ShortsBackend, ShortsWorker`.
-- Live clipping: single-stream `auto_live.py` and multi-stream `multi_live.py` live in scratchpad (not in repo). Use `backend/.venv/Scripts/python.exe`, never the system Python.
-- Open: live capture auto-reconnect, Twitch ad-break filter, yt3 webcam lock, audio-delay verification, relaunch of the lives.
-- Tests must never call the real Anthropic API. Run with `backend/.venv/Scripts/python.exe -m pytest -q` (868 passed, 1 skipped on 7fea202).
-- Obsidian notes: `E:\Documents\Obsidian Vault\AI-SECOND-BRAIN\PROJECTS\ai-shorts-generator\` (STATUS note has a 2026-11-21 entry).
+- Work location: recovery worktree `E:\01-AI-PROJECTS\ai-shorts-generator\.claude\worktrees\editing-intelligence-recovery-925a80` (branch `claude/editing-intelligence-recovery-925a80`, at `1fb03ee` plus uncommitted Phase 9). The main checkout `E:\01-AI-PROJECTS\ai-shorts-generator` (branch `editing-intelligence`) still holds its older uncommitted copy of Phase 9. Do not commit from there without reconciling.
+- Read `docs/EDITING_INTELLIGENCE.md` first, then `.memory/STATE.md` (bottom section).
+- Commit Phase 9 only after the user approves. Full backend suite at this state: 1226 passed, 3 skipped, exit 0.
+- Interpreter: the worktree has no `.venv` (gitignored). Use `E:\01-AI-PROJECTS\ai-shorts-generator\backend\.venv\Scripts\python.exe` with `PYTHONIOENCODING=utf-8`, run from the worktree's `backend` folder.
+- Not done: production validation (restart `ShortsBackend` and `ShortsWorker`, then one real job with `RENDER_PLAIN_PREVIEW` on), playback-sync check of the Before/After transport, Phase 8, re-render parity (`_rerender_media`), -0.04 dBTP, `reproduce_render.py`, editorial calibration.
+- Rules: tests never call a real LLM; every ffmpeg call has `timeout=`; voice stays at unity; titles must be true to the clip; editorial findings stay advisory; no changes tuned for Content ID evasion.

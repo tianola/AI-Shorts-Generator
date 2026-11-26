@@ -292,6 +292,7 @@ def _candidate_prompt(segments: list, story_plan: dict, wanted: int, num_clips: 
     language = _spoken_language_hint(segments)
     language_note = f" ({language})" if language else ""
     title_line = f'\nSource video title: "{video_title}"' if video_title else ""
+    from services.title_style import brief as _title_brief
     mode_block = f"\n{mode_guidance(mode)}\n"
     if topic_breaks:
         stamps = ", ".join(f"{t:.0f}s" for t in topic_breaks[:80])
@@ -339,15 +340,8 @@ Use the transcript's own timestamps.
 
 For each candidate:
 - title: the headline burned onto the video and used as the published title. Its job is
-  to make someone need to watch, not to summarise. Take the single most surprising
-  concrete thing in the clip (a number, a name, a consequence) and build a curiosity
-  gap around it: say enough to intrigue, hold back the answer. 12 to 40 characters, at
-  most one emoji (optional). No hashtags, no quotation marks. It has to be true to what is
-  said - tease the real payoff, never invent stakes the clip does not deliver.
-    Describes (weak):  He talks about his first business failing
-    Teases (strong):   He lost 40,000 in one weekend
-    Generic (weak):    You won't believe what happened
-    Teases (strong):   The one question that got him fired
+  to make someone need to watch, not to summarise.
+{_title_brief()}
 - hook: the first sentence spoken in the clip, copied word for word from the transcript.
 - why: one sentence on why a stranger keeps watching to the end.
 - virality_score: 0.0 to 1.0. Be honest and spread the scores out; most moments in any

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import copy
+import unicodedata
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from config import settings
@@ -36,6 +37,8 @@ class CaptionPreset:
     pop_scale: int = 120               # Percentage scale for pop animation (120%)
     add_emojis: bool = True
     uppercase: bool = False            # Set the words in capitals (Greek without tonos)
+    fade_ms: int = 0                   # Fade-in of each word's first appearance (0 = none)
+    emphasis_scale: int = 0            # Peak scale for emphasis words, percent (0 = no emphasis)
 
 
 # 6 Curated High-Engagement Presets
@@ -144,6 +147,50 @@ PRESETS: Dict[str, CaptionPreset] = {
 CaptionStyle = CaptionPreset
 DEFAULT_STYLE = PRESETS["mrbeast"]
 
+# How the words move, independent of a preset's fonts and colours. The editing profile picks one
+# from the clip's tone (services/editing/profiles.caption_motion); apply_motion layers it on a
+# preset. None of them changes the layout: the pop gaps reserve the largest scale a word reaches.
+CAPTION_MOTIONS = {
+    # Word-by-word colour highlight with a restrained pop: the preset as designed.
+    # jump None keeps whatever the preset does, so a preset designed without a pop stays still.
+    "kinetic": {"jump": None, "min_pop": 0, "fade_ms": 0, "emphasis_scale": 0},
+    # Bigger, bouncier pop on every word, with a short fade-in.
+    "pop": {"jump": True, "min_pop": 135, "fade_ms": 60, "emphasis_scale": 0},
+    # Documentary calm: colour change only, no movement, a soft fade-in.
+    "cinematic": {"jump": False, "min_pop": 100, "fade_ms": 180, "emphasis_scale": 0},
+    # The kinetic highlight, plus a harder pop on the words that carry the point.
+    "emphasis": {"jump": True, "min_pop": 125, "fade_ms": 0, "emphasis_scale": 145},
+}
+
+
+def is_emphasis_word(word: str) -> bool:
+    """A word that carries the point: a number, or a word that calls for an emoji (money, secret...)."""
+    text = str(word or "")
+    return any(ch.isdigit() for ch in text) or emoji_for(text) is not None
+
+
+def apply_motion(style: "CaptionPreset", motion: Optional[str], karaoke: Optional[bool] = None) -> "CaptionPreset":
+    """A copy of the preset with a motion profile applied. An explicit karaoke=False wins and
+    keeps the words still, whatever the profile says. Unknown or empty motion returns the preset."""
+    spec = CAPTION_MOTIONS.get(motion or "")
+    if not spec:
+        return style
+    styled = copy.deepcopy(style)
+    styled.fade_ms = spec["fade_ms"]
+    if karaoke is False or spec["jump"] is False:
+        styled.jump = False
+        styled.pop_scale = 100
+        styled.emphasis_scale = 0
+        return styled
+    if spec["jump"] is True:
+        styled.jump = True
+    if styled.jump:
+        # pop_scale is the peak of every word; emphasis_scale is the higher peak of emphasis words
+        # only. The word gaps reserve room for the larger of the two (see _caption_gaps).
+        styled.pop_scale = max(int(styled.pop_scale), spec["min_pop"])
+        styled.emphasis_scale = spec["emphasis_scale"]
+    return styled
+
 
 # Context Emoji Keyword Map (English + Greek keywords)
 EMOJI_KEYWORD_MAP = {
@@ -186,16 +233,53 @@ EMOJI_KEYWORD_MAP = {
 }
 
 
+def _fold(text: str) -> str:
+    """Lower-case and accent-free, so a Greek word matches whether or not it carries tonos.
+
+    The uppercase presets strip the accents before the keyword test ("λεφτά" becomes
+    "ΛΕΦΤΑ"), and a plain .lower() then no longer equals the accented keyword. Folding
+    both sides the same way makes the match independent of case and accents.
+    """
+    decomposed = unicodedata.normalize("NFD", text)
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return re.sub(r"[^\w\s]", "", stripped).casefold().strip()
+
+
+def _is_greek(text: str) -> bool:
+    return any("Ͱ" <= c <= "Ͽ" for c in text)
+
+
+# Built once: folded keyword -> emoji, plus stems for Greek keywords. Greek inflects
+# ("λεφτά", "λεφτών"), so a Greek word that starts with a keyword's stem and has at most
+# three more letters also counts. English keeps exact matching.
+_EMOJI_EXACT = {}
+_EMOJI_GREEK_STEMS = []
+for _emoji, _keywords in EMOJI_KEYWORD_MAP.items():
+    for _kw in _keywords:
+        _folded = _fold(_kw)
+        _EMOJI_EXACT.setdefault(_folded, _emoji)
+        if _is_greek(_kw) and len(_folded) >= 5:
+            _EMOJI_GREEK_STEMS.append((_folded[:-1], _emoji))
+
+
+def emoji_for(word: str) -> Optional[str]:
+    """The emoji a word calls for, or None. Matching ignores case and accents."""
+    clean_w = _fold(word)
+    if not clean_w:
+        return None
+    emoji = _EMOJI_EXACT.get(clean_w)
+    if emoji is None and _is_greek(clean_w):
+        for stem, candidate in _EMOJI_GREEK_STEMS:
+            if clean_w.startswith(stem) and len(clean_w) <= len(stem) + 3:
+                emoji = candidate
+                break
+    return emoji
+
+
 def inject_emojis(word: str) -> str:
     """Inject contextual emoji if word matches high-impact triggers."""
-    clean_w = re.sub(r"[^\w\s]", "", word).lower().strip()
-    if not clean_w:
-        return word
-
-    for emoji, keywords in EMOJI_KEYWORD_MAP.items():
-        if clean_w in keywords:
-            return f"{word} {emoji}"
-    return word
+    emoji = emoji_for(word)
+    return f"{word} {emoji}" if emoji else word
 
 
 def ass_color(hex_color: str) -> str:
@@ -346,7 +430,7 @@ def _caption_gaps(widths: List[float], space_w: float, style: CaptionPreset) -> 
     neighbours on job 112 ("WASVENTURE", "ANDTHEREFORE"). Only one word pops at
     a time, so each gap needs room for the wider of its two neighbours.
     """
-    growth = max(0.0, (float(style.pop_scale) / 100.0) - 1.0) if style.jump else 0.0
+    growth = max(0.0, (float(max(style.pop_scale, style.emphasis_scale)) / 100.0) - 1.0) if style.jump else 0.0
     pad = 2.0 * (float(style.outline) + 1.0)
     gaps = []
     for i in range(len(widths) - 1):
@@ -356,12 +440,17 @@ def _caption_gaps(widths: List[float], space_w: float, style: CaptionPreset) -> 
 
 
 def _display_word(word: Dict, style: CaptionPreset) -> str:
-    """The text a caption word is drawn as (case, emoji), before ASS escaping."""
+    """The text a caption word is drawn as (case, emoji), before ASS escaping.
+
+    Emoji are written into the text only in 'text' mode. By default they are laid over the
+    video as colour PNG stickers (services/emoji_stickers), because libass draws an emoji
+    glyph as an empty box or a flat outline.
+    """
     raw_word = str(word.get("word", word.get("text", "")) or "").strip()
     if style.uppercase:
         from services.motion_title import _headline_upper
         raw_word = _headline_upper(raw_word)
-    if style.add_emojis:
+    if style.add_emojis and settings.CAPTION_EMOJI_MODE == "text":
         raw_word = inject_emojis(raw_word)
     return raw_word
 
@@ -382,7 +471,7 @@ def _block_metrics(texts: List[str], style: CaptionPreset):
         space_w = style.font_size * 0.30
     gaps = _caption_gaps(widths, space_w, style)
     # The first and last word pop outward too; keep that inside the margins.
-    growth = max(0.0, (float(style.pop_scale) / 100.0) - 1.0) if style.jump else 0.0
+    growth = max(0.0, (float(max(style.pop_scale, style.emphasis_scale)) / 100.0) - 1.0) if style.jump else 0.0
     lead = growth * widths[0] / 2.0 if widths else 0.0
     tail = growth * widths[-1] / 2.0 if widths else 0.0
     return widths, gaps, lead, tail
@@ -404,7 +493,8 @@ def _block_fits(words: List[Dict], style: CaptionPreset) -> bool:
 
 def create_caption_block(
     words: List[Dict],
-    style: CaptionPreset = DEFAULT_STYLE
+    style: CaptionPreset = DEFAULT_STYLE,
+    stickers: Optional[List[Dict]] = None,
 ) -> str:
     """
     Create ASS caption dialogue lines for a phrase block with isolated word-by-word
@@ -472,12 +562,36 @@ def create_caption_block(
         else:
             w_end = float(w_curr.get("end", w_curr.get("end_time", w_start + 0.2)))
 
+        # An emoji sticker for this word: above its right edge, shown while it is spoken.
+        # The caption text itself carries no emoji, so the layout above is unchanged.
+        if stickers is not None:
+            emoji = emoji_for(str(w_curr.get("word", w_curr.get("text", "")) or ""))
+            if emoji:
+                fs_px = _ass_font_size(style, fit)
+                size = max(60, min(150, round(fs_px * 0.85)))
+                half = size / 2.0 + 16.0
+                sticker_x = min(max(cx + widths[i] / 2.0, half), 1080.0 - half)
+                stickers.append({
+                    "emoji": emoji,
+                    "x": round(sticker_x, 1),
+                    "y": round(y_base - fs_px * 0.95, 1),
+                    "size": size,
+                    "start": round(w_start, 3),
+                    "end": round(min(block_end, w_start + max(w_end - w_start, 0.9)), 3),
+                })
+
+        # Cinematic and pop motions fade each word in the first time it shows.
+        fad_tag = f"\\fad({style.fade_ms},0)" if style.fade_ms else ""
+        emphasised = bool(style.emphasis_scale) and is_emphasis_word(
+            str(w_curr.get("word", w_curr.get("text", "")) or ""))
+
         # 1. Inactive period BEFORE word is spoken (Layer 0, 100% scale, pure white bold)
         if w_start > block_start:
             events.append(
                 f"Dialogue: 0,{ass_time(block_start)},{ass_time(w_start)},Default,,0,0,0,,"
-                f"{{\\an5{fs_tag}\\pos({cx:.1f},{y_base})\\bord{style.outline}\\shad{style.shadow}\\c{base_color}\\3c{outline_color}\\b1\\fscx100\\fscy100}}{word_str}\n"
+                f"{{\\an5{fs_tag}{fad_tag}\\pos({cx:.1f},{y_base})\\bord{style.outline}\\shad{style.shadow}\\c{base_color}\\3c{outline_color}\\b1\\fscx100\\fscy100}}{word_str}\n"
             )
+            fad_tag = ""   # the word has already faded in; the active event must not fade again
 
         # 2. ACTIVE WORD (Layer 1: vibrant highlight color, scale pop & upward jump)
         dur_ms = max(int((w_end - w_start) * 1000), 120)
@@ -492,12 +606,14 @@ def create_caption_block(
             # The preset's pop_scale drives the peak; hardcoding 115/132 made
             # every preset render identically.
             peak = max(100, int(style.pop_scale))
+            if emphasised:
+                peak = max(peak, int(style.emphasis_scale))
             settle_x = 100 + round((peak - 100) * 0.30)
             settle_y = 100 + round((peak - 100) * 0.80)
             settle_t = min(100, max(45, dur_ms // 4))
             return_t = max(dur_ms - 40, settle_t + 1)
             pop_tag = (
-                f"{{\\an5{fs_tag}\\pos({cx:.1f},{y_base})\\bord{style.outline + 1}\\shad{style.shadow + 1}"
+                f"{{\\an5{fs_tag}{fad_tag}\\pos({cx:.1f},{y_base})\\bord{style.outline + 1}\\shad{style.shadow + 1}"
                 f"\\c{active_color}\\3c{outline_color}\\b1"
                 f"\\t(0,{settle_t},\\fscx{peak}\\fscy{peak}\\pos({cx:.1f},{y_base - jump_y}))"
                 f"\\t({settle_t},{return_t},\\fscx{settle_x}\\fscy{settle_y}\\pos({cx:.1f},{y_base - jump_y + 4}))"
@@ -505,7 +621,7 @@ def create_caption_block(
             )
         else:
             pop_tag = (
-                f"{{\\an5{fs_tag}\\pos({cx:.1f},{y_base})\\bord{style.outline + 1}\\shad{style.shadow}"
+                f"{{\\an5{fs_tag}{fad_tag}\\pos({cx:.1f},{y_base})\\bord{style.outline + 1}\\shad{style.shadow}"
                 f"\\c{active_color}\\3c{outline_color}\\b1\\fscx100\\fscy100"
             )
 
@@ -649,6 +765,7 @@ def create_captions(
     style_name: str = "hormozi",
     style: CaptionPreset = None,
     karaoke: Optional[bool] = None,
+    motion: Optional[str] = None,
 ) -> str:
     """
     Create ASS captions from word-level timestamps with chosen TikTok preset.
@@ -678,6 +795,10 @@ def create_captions(
             style.pop_scale = max(style.pop_scale, 120)
         else:
             style.pop_scale = 100
+
+    # Motion profile (kinetic, pop, cinematic, emphasis), chosen from the clip's tone. An
+    # explicit karaoke=False from the studio keeps the words still.
+    style = apply_motion(style, motion, karaoke)
 
     if group_size is None:
         group_size = settings.CAPTION_GROUP_SIZE
@@ -731,10 +852,18 @@ def create_captions(
 
     # Group words cleanly using natural phrasing (3-5 words default)
     word_groups = _group_words_by_natural_phrasing(clean_words, max_group_size=group_size, style=style)
+    from services import emoji_stickers
+
+    # Stickers are collected only when they can be drawn: the preset wants emoji, the mode is
+    # 'sticker' and an emoji font exists. Otherwise no emoji is drawn, never a box.
+    sticker_list = None
+    if style.add_emojis and settings.CAPTION_EMOJI_MODE == "sticker" and emoji_stickers.available():
+        sticker_list = []
+
     events = []
     for block in word_groups:
         if block:
-            events.append(create_caption_block(block, style))
+            events.append(create_caption_block(block, style, stickers=sticker_list))
 
     os.makedirs(os.path.dirname(output_ass) if os.path.dirname(output_ass) else ".", exist_ok=True)
 
@@ -742,6 +871,9 @@ def create_captions(
         f.write(generate_ass_header(style))
         for event in events:
             f.write(event)
+
+    # Always rewritten (or removed), so a rebuilt caption file never keeps an old sticker list.
+    emoji_stickers.write_sidecar(output_ass, sticker_list or [])
 
     job_info(0, f"ASS captions created with preset '{style.name}': {output_ass}")
     return output_ass

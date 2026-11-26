@@ -243,6 +243,77 @@ class Settings(BaseSettings):
         description="Max words per caption burst. Three large words read at a glance; "
                     "five had to be set small to fit the frame."
     )
+    CAPTION_EMOJI_MODE: str = Field(
+        default="sticker",
+        description="How caption emoji are drawn. 'sticker' lays a colour PNG over the video "
+                    "(libass cannot draw colour emoji); 'text' writes the emoji into the "
+                    "subtitle text (shows as a box or flat shape); 'off' draws none."
+    )
+    EMOJI_FONT_PATH: Optional[str] = Field(
+        default=None,
+        description="Colour emoji font used to make the stickers. Empty: look for Segoe UI Emoji "
+                    "(Windows) or Noto Color Emoji (Linux)."
+    )
+
+    # ====================
+    # TITLE HONESTY AND EDITORIAL REVIEW
+    # ====================
+    TITLE_CLAIM_CHECK_ENABLED: bool = Field(
+        default=True,
+        description="Before a title is burned in, ask the model whether each claim in it is backed "
+                    "by what the clip says (one short call on the free chain). A title with an "
+                    "unsupported claim is replaced by the clip's own words. A failed call keeps the title."
+    )
+    EDITORIAL_EVALUATOR_ENABLED: bool = Field(
+        default=False,
+        description="After the technical check, send fixed frames of the finished clip to Claude and "
+                    "record what it observes (advisory only, never blocks a clip). Needs "
+                    "ANTHROPIC_API_KEY and costs one paid call per run, EDITORIAL_RUNS runs per clip."
+    )
+    EDITORIAL_RUNS: int = Field(default=3, ge=1, le=5, description="Repeat runs on the same frames; a finding is stable when seen in at least two.")
+    EDITORIAL_FRAME_COUNT: int = Field(default=5, ge=3, le=8, description="Frames sent to the editorial evaluator.")
+    CLAUDE_EDITORIAL_MODEL: str = Field(
+        default="claude-sonnet-5-5",
+        description="Claude model id for the editorial evaluator"
+    )
+
+    RENDER_PLAIN_PREVIEW: bool = Field(
+        default=False,
+        description="Also render a plain copy of each clip (no effects, sound design or emoji stickers) "
+                    "next to the finished one, for the studio's side-by-side view and the check that "
+                    "every planned effect shows up. Adds one extra single-pass render per clip."
+    )
+
+    # ====================
+    # EDITING EFFECTS
+    # ====================
+    EFFECTS_ENABLED: bool = Field(
+        default=True,
+        description="Apply the visual effects planned in each clip's edit timeline (zoom punch, "
+                    "camera shake, flash, red tint). Off renders clips plain."
+    )
+    SOUND_DESIGN_ENABLED: bool = Field(
+        default=True,
+        description="Place sound effects from the clip's edit timeline (hook whoosh, impacts on "
+                    "peaks, pops on popups). Off keeps the older keyword-and-fixed-time picks."
+    )
+    SFX_SIDECHAIN_ENABLED: bool = Field(
+        default=True,
+        description="Duck the sound effects under the voice with a sidechain compressor on the SFX "
+                    "bus only. The voice itself is never compressed or lowered."
+    )
+    SFX_DUCK_THRESHOLD: float = Field(default=0.02, ge=0.001, le=1.0,
+        description="Voice level (linear, 1.0 = full scale) above which the effects are ducked.")
+    SFX_DUCK_RATIO: float = Field(default=6.0, ge=1.0, le=20.0,
+        description="How hard the effects are ducked once the voice passes the threshold.")
+    SFX_DUCK_ATTACK_MS: float = Field(default=8.0, ge=0.01, le=2000.0,
+        description="How fast the effects duck when speech starts.")
+    SFX_DUCK_RELEASE_MS: float = Field(default=250.0, ge=0.01, le=9000.0,
+        description="How slowly the effects come back after speech stops.")
+    EFFECTS_DISABLED_KINDS: str = Field(
+        default="",
+        description="Comma list of effect kinds to leave out even when planned, e.g. 'flash,tint_red'."
+    )
 
     # ====================
     # VERTICAL CONVERSION
@@ -295,6 +366,21 @@ class Settings(BaseSettings):
     SINGLE_PASS_RENDER: bool = Field(
         default=True,
         description="Render each clip in one unified ffmpeg pass (vertical + captions + title + SFX) instead of 5-6 sequential re-encodes"
+    )
+    TITLE_CENTER_FRAC: float = Field(
+        default=0.17, ge=0.08, le=0.6,
+        description="Where the clip title card is centred, as a share of the frame height from the "
+                    "top (non-gaming layouts). 0.17 keeps it high, clear of faces and the captions."
+    )
+    TITLE_FALLBACK_FRACS: str = Field(
+        default="0.3333,0.45",
+        description="Comma-separated lower spots the title may move to when the default strip is "
+                    "busy (a face or on-screen text) and one of these is clearly emptier."
+    )
+    TITLE_AVOID_BUSY: bool = Field(
+        default=True,
+        description="Sample a few frames before rendering and move the title off a busy strip. "
+                    "Off: the title always sits at TITLE_CENTER_FRAC."
     )
 
     # ====================

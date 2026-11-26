@@ -15,6 +15,7 @@ import { loadJob } from './jobs.js';
 import { state } from './state.js';
 import { setStatus } from './status.js';
 import { API_PREFIX, asMediaUrl, escapeHtml, fetchJson, isYouTubeVideoId } from './util.js';
+import { clearEditPanel, renderEditPanel } from './timeline_view.js';
 
 export let currentStudioClip = null;
 
@@ -394,6 +395,14 @@ function closeModal() {
   $('clipStudioModal').style.display = 'none';
   $('studioVideoPlayer').pause();
   stopAt = null;
+  resetEditPanel();
+}
+
+/** Forget the edit record shown for the previous clip (stops its videos). */
+function resetEditPanel() {
+  const details = $('studioEditDetails');
+  if (details) details.open = false;
+  clearEditPanel($('studioEditPanel'));
 }
 
 function showTab(name) {
@@ -446,6 +455,16 @@ export function setupStudioModal() {
     }
   });
 
+  // The edit record loads the first time its disclosure opens for a clip.
+  const editDetails = $('studioEditDetails');
+  editDetails?.addEventListener('toggle', () => {
+    if (!editDetails.open || !currentStudioClip) return;
+    const panel = $('studioEditPanel');
+    if (panel && panel.dataset.editFor !== String(currentStudioClip.id)) {
+      renderEditPanel(currentStudioClip.id, panel);
+    }
+  });
+
   const video = $('studioVideoPlayer');
   video.addEventListener('timeupdate', () => {
     if (stopAt !== null && video.currentTime >= stopAt) { video.pause(); stopAt = null; }
@@ -460,6 +479,7 @@ export function openClipStudio(clip) {
   setNote($('studioRerenderStatus'), '');
   setNote($('studioCutStatus'), '');
   setNote($('studioRenderState'), '');
+  resetEditPanel();
   showTab('style');
   showPreview(clip.file_path, { play: true });
   $('clipStudioModal').style.display = 'flex';

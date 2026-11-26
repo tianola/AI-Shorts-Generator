@@ -310,14 +310,28 @@ def burn_captions(
     captions_escaped = captions_path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
     subtitle_filter = f"subtitles='{captions_escaped}'{_fontsdir_option()}"
 
+    # Colour emoji stickers listed next to the captions file are laid over the burned captions,
+    # the same as in the single-pass render, so a re-render does not lose them.
+    from services.emoji_stickers import build_overlay_graph, load_stickers
+    stickers = load_stickers(captions_path)
+    sticker_inputs: list = []
+    if stickers:
+        sticker_inputs, em_parts, last_label, _next = build_overlay_graph(stickers, 1, "[vsub]")
+        filter_complex = (
+            f"[0:v]{subtitle_filter}[vsub];" + ";".join(em_parts) + f";{last_label}format=yuv420p[vout]"
+        )
+        input_args = ["-i", video_path]
+        for item in sticker_inputs:
+            input_args += ["-loop", "1", "-i", item["path"]]
+        video_args = input_args + ["-filter_complex", filter_complex, "-map", "[vout]", "-map", "0:a?"]
+    else:
+        video_args = ["-i", video_path, "-vf", subtitle_filter, "-map", "0:v", "-map", "0:a?"]
+
     # FFmpeg command with settings from config
     cmd = [
         "ffmpeg",
         "-y",
-        "-i", video_path,
-        "-vf", subtitle_filter,
-        "-map", "0:v",
-        "-map", "0:a?",
+        *video_args,
         "-c:v", "libx264",
         "-fps_mode", "cfr",
         "-preset", settings.FFMPEG_PRESET,
@@ -390,6 +404,12 @@ def build_single_pass_filter(
     popup_position: str = "upper_third",
     popups: list = None,
     loudnorm_chain: str = "",
+    emoji_stickers: list = None,
+    title_center_frac: float = 0.3333,
+    popup_top_y: int = 290,
+    effects_frag: str = None,
+    sfx_events: list = None,
+    sidechain: dict = None,
 ) -> tuple:
     """
     Construct an all-in-one FFmpeg filter_complex that combines all visual
@@ -459,11 +479,26 @@ def build_single_pass_filter(
     # ---- Stage 1: vertical crop (always required) ----
     _wire(vertical_frag, "[vsingle]")
 
+    # ---- Stage 1b: visual effects from the edit timeline (optional) ----
+    # Zoom punch, shake, flash and tint act on the footage only, before the captions, so the
+    # captions, stickers, popup and title stay still. See services/editing/effect_filters.
+    if effects_frag:
+        _wire(effects_frag, "[vfx]")
+
     # ---- Stage 2: captions (optional) ----
     if captions_path:
         cap_esc = _esc_filter_path(captions_path)
         fc_parts.append(cur_v + "subtitles='" + cap_esc + "'" + _fontsdir_option() + "[vsub]")
         cur_v = "[vsub]"
+
+    # ---- Stage 2b: colour emoji stickers over the captions (optional) ----
+    # libass cannot draw colour emoji, so the caption code leaves them out of the
+    # text and lists them (services/emoji_stickers) for this stage to lay on top.
+    if emoji_stickers:
+        from services.emoji_stickers import build_overlay_graph
+        em_inputs, em_parts, cur_v, next_idx = build_overlay_graph(emoji_stickers, next_idx, cur_v)
+        extra_inputs.extend(em_inputs)
+        fc_parts.extend(em_parts)
 
     # ---- Stage 3: Contextual visual popup card overlay (optional) ----
     popup_list = []
@@ -496,6 +531,7 @@ def build_single_pass_filter(
                 start_time=p_start,
                 duration=p_dur,
                 position=p_pos,
+                top_y=popup_top_y,
             )
             fc_parts.append(prep)
             out_label = f"[vpop{i}]" if i < len(popup_list) - 1 else "[vpop]"
@@ -516,9 +552,11 @@ def build_single_pass_filter(
             "+0.12*sin(clip(t/0.6,0,1)*PI)"
             "+0.015*sin(2*PI*t/2.4)"
         )
-        # Two-thirds down the frame, so the title sits over the gameplay and never over the
-        # webcam at the top. The small drop-in on entry is kept.
-        y_expr = "H*2/3+36*(1-clip(t/0.45,0,1))"
+        # The card is centred on title_center_frac of the frame height, so it grows and shrinks
+        # around that line. In the gaming layout that line is the seam between the webcam panel
+        # and the gameplay (the title used to sit lower and landed on top of the captions at
+        # y=1480). The small drop-in on entry is kept.
+        y_expr = f"H*{float(title_center_frac):.4f}-h/2+36*(1-clip(t/0.45,0,1))"
         # Inside '...' a comma is literal to the graph parser (this is the form
         # ffmpeg's own docs use for scale/select), so the quoted scale factors
         # must NOT be escaped — but the unquoted overlay y= must be.
@@ -540,7 +578,43 @@ def build_single_pass_filter(
     if has_audio:
         # `tail` is where the audio graph currently ends; stage 5 reads from it.
         tail = "[0:a]"
-        if sfx_files:
+        sfx_events = [e for e in (sfx_events or []) if os.path.exists(e.get("path", ""))]
+        if sfx_events:
+            # Sound design from the edit timeline: each effect has its own level and start. The
+            # voice branch is untouched (unity gain). With the sidechain on, the voice also keys a
+            # compressor on the SFX bus only, so effects dip while someone speaks and return in the
+            # gaps; the voice is never compressed or ducked itself.
+            fc_parts.append("[0:a]aformat=sample_rates=48000:channel_layouts=stereo,volume=1.0[orig]")
+            labels = []
+            for i, event in enumerate(sfx_events):
+                sfx_idx = next_idx
+                next_idx += 1
+                extra_inputs.append({"path": event["path"], "kind": "sfx"})
+                delay_ms = max(0, int(round(float(event["start"]) * 1000)))
+                label = "sfx" + str(i)
+                fc_parts.append(
+                    "[" + str(sfx_idx) + ":a]aformat=sample_rates=48000:channel_layouts=stereo,adelay="
+                    + str(delay_ms) + "|" + str(delay_ms) + ",volume=" + f"{float(event['gain_db']):.1f}" + "dB[" + label + "]"
+                )
+                labels.append("[" + label + "]")
+            if len(labels) > 1:
+                fc_parts.append("".join(labels) + "amix=inputs=" + str(len(labels))
+                                + ":duration=longest:dropout_transition=0:normalize=0[sfxbus]")
+            else:
+                fc_parts.append(labels[0] + "anull[sfxbus]")
+            if sidechain:
+                fc_parts.append("[orig]asplit=2[vmix][vkey]")
+                fc_parts.append(
+                    "[sfxbus][vkey]sidechaincompress=threshold=" + str(sidechain["threshold"])
+                    + ":ratio=" + str(sidechain["ratio"]) + ":attack=" + str(sidechain["attack_ms"])
+                    + ":release=" + str(sidechain["release_ms"]) + ":makeup=1:knee=2.8[sfxduck]"
+                )
+                mix_in = "[vmix][sfxduck]"
+            else:
+                mix_in = "[orig][sfxbus]"
+            tail = "[apre]" if loudnorm_chain else "[aout]"
+            fc_parts.append(mix_in + "amix=inputs=2:duration=first:dropout_transition=0:normalize=0" + tail)
+        elif sfx_files:
             sfx_files = list(sfx_files)
             sfx_timestamps = list(sfx_timestamps or [])
             fc_parts.append("[0:a]volume=1.0[orig]")
@@ -615,6 +689,37 @@ def _run_ffmpeg_and_verify(
     return output_path
 
 
+# The filtergraph of the most recent single-pass render in this process, for the render manifest.
+_LAST_FILTERGRAPH = {"value": None}
+
+
+def last_filtergraph():
+    return _LAST_FILTERGRAPH["value"]
+
+
+def _sidechain_settings() -> dict:
+    """The compressor settings for ducking effects under the voice, or None when it is switched off."""
+    if not settings.SFX_SIDECHAIN_ENABLED:
+        return None
+    return {
+        "threshold": settings.SFX_DUCK_THRESHOLD,
+        "ratio": settings.SFX_DUCK_RATIO,
+        "attack_ms": settings.SFX_DUCK_ATTACK_MS,
+        "release_ms": settings.SFX_DUCK_RELEASE_MS,
+    }
+
+
+def _title_center_frac(mode: str) -> float:
+    """Where the title card is centred, as a share of the frame height from the top.
+
+    Gaming layout: the seam between the webcam panel (top) and the gameplay, so the title
+    covers neither the face nor the captions near the bottom. Other layouts: TITLE_CENTER_FRAC,
+    high on the frame; render_single_pass may move it lower when that strip is busy.
+    """
+    from services.title_placement import title_center_for
+    return title_center_for(mode)
+
+
 def render_single_pass(
     input_video: str,
     start: float,
@@ -634,6 +739,9 @@ def render_single_pass(
     popup_position: str = "upper_third",
     popups: list = None,
     source_channel: str = None,
+    emoji_stickers: list = None,
+    effects: list = None,
+    sfx_events: list = None,
 ) -> str:
     """
     Render a clip in a SINGLE ffmpeg pass (Task D).
@@ -653,13 +761,57 @@ def render_single_pass(
             from PIL import Image
             frame = render_title_frame(title_text, source_channel=source_channel)
             title_png = output_path + ".title.png"
-            Image.fromarray(frame, "RGBA").save(title_png)
+            title_img = Image.fromarray(frame, "RGBA")
+            # render_title_frame draws a card on a full 1080x1920 canvas. Cut it to the card so
+            # the overlay's position and size mean the card's, and it can be centred on a line.
+            box = title_img.getchannel("A").point(lambda v: 255 if v > 8 else 0).getbbox()
+            if box:
+                pad = 24
+                title_img = title_img.crop((
+                    max(0, box[0] - pad), max(0, box[1] - pad),
+                    min(title_img.width, box[2] + pad), min(title_img.height, box[3] + pad),
+                ))
+            title_img.save(title_png)
             job_info(0, "Rendered title PNG: " + title_png)
         except Exception as e:
             job_warning(0, "Title PNG render failed, skipping: " + str(e))
             title_png = None
 
+    # Title line: high by default, lower only when the high strip is busy. The popup card in the
+    # upper third then moves below the title so the two never stack.
+    title_center = _title_center_frac(mode)
+    popup_top_y = 290
+    if title_png and os.path.exists(title_png):
+        try:
+            from PIL import Image
+            from services import title_placement as tp
+            with Image.open(title_png) as _t:
+                title_h = int(_t.height)
+            if mode != "gaming":
+                title_center = tp.pick_title_center(
+                    input_video, start, end, vertical_frag,
+                    title_height_frac=title_h / 1920.0,
+                    default=title_center,
+                    fallbacks=tp.parse_fracs(settings.TITLE_FALLBACK_FRACS),
+                    enabled=settings.TITLE_AVOID_BUSY,
+                )
+                popup_top_y = tp.popup_top_below_title(title_center, title_h)
+        except Exception as e:
+            job_warning(0, f"Title placement check skipped: {e}")
+
     has_audio = _has_audio_stream(input_video)
+
+    # Visual effects: the timeline's visual tracks, minus any kind switched off in config.
+    effects_frag = None
+    if effects and settings.EFFECTS_ENABLED:
+        from services.editing.effect_filters import build_effects_fragment
+        off = {k.strip() for k in (settings.EFFECTS_DISABLED_KINDS or "").split(",") if k.strip()}
+        effects_frag = build_effects_fragment([t for t in effects if t.get("kind") not in off])
+
+    # Emoji stickers come from the list next to the captions file unless the caller gave one.
+    if emoji_stickers is None and captions_path:
+        from services.emoji_stickers import load_stickers
+        emoji_stickers = load_stickers(captions_path)
 
     # Loudness pass 1, on exactly the window about to be rendered. Without it
     # consecutive clips cut from one source land anywhere from -23 to -17 LUFS
@@ -702,13 +854,21 @@ def render_single_pass(
             popup_position=popup_position,
             popups=popups,
             loudnorm_chain=loudnorm_chain,
+            emoji_stickers=emoji_stickers,
+            title_center_frac=title_center,
+            popup_top_y=popup_top_y,
+            effects_frag=effects_frag,
+            sfx_events=sfx_events,
+            sidechain=_sidechain_settings() if sfx_events else None,
         )
+
+    _LAST_FILTERGRAPH["value"] = fc
 
     # Build ffmpeg command: 0 = main video, then extra inputs
     cmd = ["ffmpeg", "-y", "-ss", str(start), "-t", str(end - start), "-i", input_video]
     for ei in extra:
-        # Loop PNG / popup image inputs
-        if ei.get("kind") in ("png", "popup"):
+        # Loop PNG / popup / emoji image inputs
+        if ei.get("kind") in ("png", "popup", "emoji"):
             cmd += ["-loop", "1"]
         cmd += ["-i", ei["path"]]
 

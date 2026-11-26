@@ -6,6 +6,7 @@
  */
 
 import { setupBatchUpload } from './batch.js';
+import { setupLlmStatus } from './llm_status.js';
 import { listJobs, loadSystemInfo } from './jobs.js';
 import { state } from './state.js';
 import { setupStudioModal } from './studio.js';
@@ -20,6 +21,7 @@ setupPublishQueue();
 setupYouTubeIntegration();
 setupTikTokIntegration();
 setupBatchUpload();
+setupLlmStatus();
 checkYouTubeStatus();
 checkTikTokStatus();
 loadSystemInfo();
