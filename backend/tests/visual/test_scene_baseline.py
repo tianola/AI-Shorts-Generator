@@ -4,9 +4,16 @@ way it was approved. Frames are compared with SSIM and PSNR at tolerances (servi
 To approve a deliberate change: look at the new frames, then run `python scripts/visual_baseline.py capture`.
 """
 import os
+import shutil
 import sys
 
 import pytest
+
+# The scene is rendered with ffmpeg; CI runners do not have it.
+pytestmark = pytest.mark.skipif(
+    not (shutil.which("ffmpeg") and shutil.which("ffprobe")),
+    reason="requires ffmpeg and ffprobe on PATH",
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
