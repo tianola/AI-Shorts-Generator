@@ -15,7 +15,7 @@ import json
 import os
 import re
 import subprocess
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 

@@ -139,7 +139,7 @@ def test_bad_speed_is_treated_as_one(fake, speed):
 
 
 def test_at_most_twelve_effects_are_checked_in_time_order(fake):
-    compare = fake()
+    fake()  # installs the fake comparison; the report is what is checked here
     tracks = [_track(float(i), float(i) + 0.5, event_id=f"e{i}") for i in range(20)]
     tracks.reverse()  # out of order on purpose
     report = ab.ab_report("plain.mp4", "final.mp4", tracks, 30.0, 1.0, "work")

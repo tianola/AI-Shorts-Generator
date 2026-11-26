@@ -16,7 +16,6 @@ and records what the model observes. Rules that keep it honest:
 
 import json
 import os
-import re
 import subprocess
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 

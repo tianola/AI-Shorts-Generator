@@ -1512,7 +1512,6 @@ async def process_clip(db: Session, job: Job, job_id: int, job_dir: Path, index:
         # =====================
         try:
             from services.quality.pipeline import assess_clip
-            from services import render as _render_mod
             from services.anti_copyright import PARAMS as _ANTIFP_PARAMS
             from services.captions import FONTS_DIR as _FONTS_DIR
             _qa = assess_clip(
