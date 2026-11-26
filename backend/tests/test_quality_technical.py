@@ -7,7 +7,6 @@ Tests that need ffmpeg are skipped with a reason when it is missing.
 
 Run from backend/:  python -m pytest tests/test_quality_technical.py -q
 """
-import hashlib
 import json
 import os
 import re
@@ -344,7 +343,6 @@ def test_needs_review_before_publish():
     import worker
 
     unreviewed_path = next(iter(worker.UNREVIEWED_SELECTION_PATHS))
-    model = {"selection_path": "llm"}
     assert "llm" not in worker.UNREVIEWED_SELECTION_PATHS
 
     def clip(path_name, quality):

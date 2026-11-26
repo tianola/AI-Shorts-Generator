@@ -16,7 +16,7 @@ import pytest
 from services.editing.bridge import plan_clip_edits, scene_cuts_in_window
 from services.editing.describe import explain
 from services.editing.models import (
-    TIMELINE_VERSION, Timeline, timeline_from_json, timeline_to_json,
+    TIMELINE_VERSION, timeline_from_json, timeline_to_json,
 )
 from services.editing.planner import WANTS, build_timeline
 from services.editing.profiles import PROFILES, TONE_TO_PROFILE, profile_for_tone
