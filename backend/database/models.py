@@ -30,7 +30,10 @@ class Job(Base):
     claimed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
     channel_id = Column(String, nullable=True)  # Future: multi-channel support
-    whisper_model = Column(String, nullable=True, default="tiny")
+    # None = the configured provider (Groq when TRANSCRIPTION_PROVIDER=groq and a
+    # key is set, else WHISPER_MODEL_SIZE). A hard "tiny" here and in the API
+    # made every job created without the UI (n8n) skip Groq for the tiny model.
+    whisper_model = Column(String, nullable=True, default=None)
     default_caption_style = Column(String, nullable=True, default="mrbeast")
     default_layout_mode = Column(String, nullable=True, default="auto")
     default_karaoke = Column(Boolean, nullable=True, default=True)

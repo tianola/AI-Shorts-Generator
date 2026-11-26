@@ -45,8 +45,7 @@ jobs:
           python-version: "3.11"
       - run: pip install ruff
       # F = pyflakes (undefined names, unused imports, dead assignments);
-      # E9 = syntax errors. Non-blocking for now: the codebase still has
-      # legacy unused imports that would turn every run red.
+      # E9 = syntax errors. The backlog of legacy unused imports is gone and
+      # the tree is clean, so a new undefined name now fails the build.
       - name: Ruff
-        continue-on-error: true
         run: ruff check backend --select F,E9

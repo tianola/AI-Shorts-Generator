@@ -33,7 +33,7 @@ def video(tmp_path):
 def fake_model(monkeypatch):
     calls = {"n": 0}
 
-    async def model(prompt, schema, max_tokens=None):
+    async def model(prompt, schema, max_tokens=None, **_kwargs):
         n = calls["n"]
         calls["n"] += 1
         base = n * cs.AUTO_CHUNK_SECONDS
@@ -44,7 +44,7 @@ def fake_model(monkeypatch):
     async def story(segments, video_title=""):
         return {}
 
-    async def keep_all(clips, segments, num_clips, mode="viral"):
+    async def keep_all(clips, segments, num_clips, mode="viral", video_path=None):
         for clip in clips:
             clip["judge_decision"] = "keep"
             clip["judge_score"] = 0.8

@@ -6,6 +6,75 @@ from loguru import logger
 
 from services.llm_router import call_llm_json, pick_model
 
+_STORY_TYPES = ["question_answer", "reveal", "challenge", "emotion", "lesson", "reaction"]
+
+STORY_SCHEMA = {
+	"type": "object",
+	"properties": {
+		"story_summary": {"type": "string"},
+		"hook": {"type": "string"},
+		"story_type": {"type": "string", "enum": _STORY_TYPES},
+		"recommended_layout": {"type": "string", "enum": ["centered_face", "split_screen", "screen_share_face"]},
+		"cta": {"type": "string"},
+		"key_moments": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"start": {"type": "number"},
+					"end": {"type": "number"},
+					"reason": {"type": "string"},
+				},
+				"required": ["start", "end", "reason"],
+				"additionalProperties": False,
+			},
+		},
+	},
+	"required": ["story_summary", "hook", "story_type", "recommended_layout", "cta", "key_moments"],
+	"additionalProperties": False,
+}
+
+
+def transcript_block(segments: List[Dict[str, Any]]) -> str:
+	"""The timestamped transcript every pass over a video reads.
+
+	Story analysis and candidate selection must send byte-identical text: on
+	Claude it is the cached prefix, and one differing character makes the second
+	call pay full price for the whole transcript again.
+	"""
+	lines = "".join(
+		f"[{float(seg.get('start', 0)):.1f}s - {float(seg.get('end', 0)):.1f}s] {str(seg.get('text', '')).strip()}\n"
+		for seg in segments
+		if str(seg.get("text", "")).strip()
+	)
+	return f"Transcript:\n{lines}"
+
+
+async def _story_json(transcript: str, instructions: str) -> str:
+	"""Claude when a key is set (the transcript cached for the selection pass), else the free chain."""
+	from services.claude_client import SHORTS_SYSTEM, call_claude_json, claude_available
+
+	if claude_available():
+		try:
+			return await call_claude_json(
+				prompt=instructions,
+				system=SHORTS_SYSTEM,
+				schema=STORY_SCHEMA,
+				max_tokens=16000,
+				effort="medium",
+				context=transcript,
+			)
+		except Exception as exc:
+			logger.warning(f"Claude story analysis failed ({type(exc).__name__}: {exc}); trying OmniRoute")
+
+	return await call_llm_json(
+		prompt=f"{transcript}\n{instructions}",
+		system=SHORTS_SYSTEM,
+		model=pick_model(),
+		temperature=0.3,
+		max_tokens=1500,
+	)
+
 
 async def analyze_story_segments(segments: List[Dict[str, Any]], video_title: Optional[str] = None) -> Dict[str, Any]:
 	"""Detect the strongest story arc and hook in a transcript.
@@ -23,50 +92,34 @@ async def analyze_story_segments(segments: List[Dict[str, Any]], video_title: Op
 			"key_moments": [],
 		}
 
-	transcript_text = "\n".join(
-		f"[{seg.get('start', 0):.1f}s - {seg.get('end', 0):.1f}s] {str(seg.get('text', '')).strip()}"
-		for seg in segments
-		if str(seg.get('text', '')).strip()
-	)
+	transcript = transcript_block(segments)
+	title_context = f"\nSource video title: {video_title}\n" if video_title else ""
 
-	title_context = f"\nSource Video Title / Context: {video_title}\n" if video_title else ""
+	instructions = f"""
+The transcript above is the whole video, with timestamps.{title_context}
+As a short-form producer, find the highest-stakes, most gripping narrative arc in it.
 
-	prompt = f"""
-	You are a master YouTube Shorts & TikTok viral producer.
-	Read the transcript{title_context}and identify the highest-stakes, most gripping narrative arc for short-form viral videos.
+- story_summary: one or two sentences on what the video is about and where its tension is.
+- hook: the line or idea that creates the most tension, curiosity or emotional shock.
+- story_type: question_answer, reveal, challenge, emotion, lesson, or reaction.
+- recommended_layout: centered_face, split_screen, or screen_share_face.
+- cta: a short call to action for the end of a clip.
+- key_moments: up to 8 moments where a climax, confrontation, reveal or key insight
+  happens, each with start and end in seconds from the transcript and a one-line reason.
 
-	Focus on:
-	- The HIGHEST STAKES Hook: Identify what creates the most tension, suspense, curiosity gap, or emotional shock.
-	- Core Conflict: What is the most shocking revelation, confrontation, danger, or twist?
-	- High-Energy Moments: Exactly where the climax, confrontation, or critical insight happens.
-	- Story Type: question_answer, reveal, challenge, emotion, lesson, or reaction.
-	- Recommended Layout: centered_face, split_screen, or screen_share_face.
-	- A snappy CTA for the end.
-
-	Transcript:
-	{transcript_text}
-
-	Return ONLY valid JSON with this exact schema:
-	{{
-	  "story_summary": "string",
-	  "hook": "string",
-	  "story_type": "question_answer|reveal|challenge|emotion|lesson|reaction",
-	  "recommended_layout": "centered_face|split_screen|screen_share_face",
-	  "cta": "string",
-	  "key_moments": [
-		{{"start": float, "end": float, "reason": "string"}}
-	  ]
-	}}
-	"""
+Return ONLY valid JSON in this shape:
+{{
+  "story_summary": "string",
+  "hook": "string",
+  "story_type": "question_answer|reveal|challenge|emotion|lesson|reaction",
+  "recommended_layout": "centered_face|split_screen|screen_share_face",
+  "cta": "string",
+  "key_moments": [{{"start": float, "end": float, "reason": "string"}}]
+}}
+"""
 
 	try:
-		response_text = await call_llm_json(
-			prompt=prompt,
-			system="You are an expert storyteller for short-form viral video. Extract the strongest hook and story angle.",
-			model=pick_model(),
-			temperature=0.3,
-			max_tokens=1500,
-		)
+		response_text = await _story_json(transcript, instructions)
 		response_text = response_text.replace("```json", "").replace("```", "").strip()
 		data = json.loads(response_text)
 

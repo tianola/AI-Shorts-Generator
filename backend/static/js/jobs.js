@@ -11,6 +11,9 @@ import { playErrorSound, playSuccessChime, setStatus, setupWebSocket, updateProg
 import { openClipStudio, uploadClip } from './studio.js';
 import { API_PREFIX, asMediaUrl, escapeHtml, fetchJson, formatTimeLabel, isYouTubeVideoId, pct } from './util.js';
 
+// Same set as database/models.py TERMINAL_JOB_STATUSES: no worker is on these.
+const TERMINAL_JOB_STATUSES = ['completed', 'completed_with_errors', 'failed'];
+
 
 export async function loadSystemInfo() {
   try {
@@ -145,10 +148,18 @@ export function renderJobs(jobs) {
 	    // Add job control buttons: Start, Resume, Restart
 	    const actionsDiv = clone.querySelector('.job-actions') || document.createElement('div');
 	    actionsDiv.className = 'job-actions';
+	    // Mirror what the API accepts. Resume only moves a finished job
+	    // (completed, completed_with_errors, failed) back to the queue, so it was
+	    // backwards to disable it exactly for those. Restart is refused by the API
+	    // only while a worker holds a live lease, and it answers 409 with the
+	    // reason, so it stays clickable: that is how an abandoned 'processing'
+	    // job gets restarted.
+	    const queued = job.status === 'processing' || job.status === 'created';
+	    const finished = TERMINAL_JOB_STATUSES.includes(job.status);
 	    actionsDiv.innerHTML = `
-	      <button class="job-control-btn start-btn" title="Start Job" ${job.status === 'processing' || job.status === 'created' ? 'disabled' : ''}>▶️ Start</button>
-	      <button class="job-control-btn resume-btn" title="Resume Job" ${job.status === 'failed' || job.status === 'completed' ? 'disabled' : ''}>🔁 Resume</button>
-	      <button class="job-control-btn restart-btn" title="Restart Job" ${job.status === 'failed' || job.status === 'completed' ? 'disabled' : ''}>🔄 Restart</button>
+	      <button class="job-control-btn start-btn" title="Start Job" ${queued ? 'disabled' : ''}>▶️ Start</button>
+	      <button class="job-control-btn resume-btn" title="Resume Job" ${finished ? '' : 'disabled'}>🔁 Resume</button>
+	      <button class="job-control-btn restart-btn" title="Restart Job">🔄 Restart</button>
 	    `;
 	    if (!clone.querySelector('.job-actions')) {
 	      const footer = clone.querySelector('.job-card-footer') || clone.querySelector('.job-card');
@@ -175,8 +186,12 @@ export function renderJobs(jobs) {
 	          }
 	          if (endpoint) {
 	            const response = await fetchJson(`${endpoint}`, { method: 'POST' });
-	            // Optimistically update UI
-	            if (btn.classList.contains('start-btn')) {
+	            // start and resume answer 200 with the unchanged status when they
+	            // did nothing; showing 'created' then would claim a requeue that
+	            // never happened.
+	            if (response && response.status && response.status !== 'created') {
+	              setStatus(response.message || `Job is ${response.status}.`);
+	            } else if (btn.classList.contains('start-btn')) {
 	              statusEl.textContent = 'created';
 	              statusEl.className = 'job-status created';
 	              if (progressWrap) progressWrap.style.display = 'block';

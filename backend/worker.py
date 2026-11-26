@@ -939,8 +939,11 @@ async def stage_select_clips(job_id: int, job: Job, segments_file: str, source_t
     update_progress("Analyzing virality & selecting top clips...", 52)
     
     num_target_clips = job.target_clips if (job and getattr(job, "target_clips", None)) else 0  # 0: automatic
+    # The source sits next to the transcript; the Claude judge samples frames from it.
+    source_video = os.path.join(os.path.dirname(segments_file), "source.mp4")
     clips = await select_clips(segments_file, num_target_clips, video_title=source_title, temporal_events=temporal_events,
-                               mode=getattr(job, "clip_mode", None) or "auto")
+                               mode=getattr(job, "clip_mode", None) or "auto",
+                               video_path=source_video if os.path.exists(source_video) else None)
     job_info(job_id, f"Selected {len(clips)} clips")
     update_progress(f"Selected {len(clips)} clips", 56)
     
@@ -2498,11 +2501,23 @@ async def process_job_async(job_id: int):
                                           lease_stop=lease_stop)
 
     except Exception as e:
-        # Mark job as failed
-        job.status = "failed"
-        job.error_message = str(e)
-        job.updated_at = datetime.utcnow()
-        db.commit()
+        # Mark job as failed. A stage that died on a database error leaves the
+        # session in "rollback required", and committing on top of it raised
+        # PendingRollbackError from inside this handler: the row stayed at
+        # 'processing' with a live heartbeat, so nobody saw the failure until
+        # the lease ran out. Roll back first, then record the failure.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first() or job
+            job.status = "failed"
+            job.error_message = str(e)
+            job.updated_at = datetime.utcnow()
+            db.commit()
+        except Exception as record_err:
+            logger.error(f"Job {job_id}: could not record the failure ({record_err})")
 
         job_error(job_id, f"Job failed: {str(e)}")
         raise
