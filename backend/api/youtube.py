@@ -195,7 +195,7 @@ async def upload_clip_to_youtube_endpoint(
     moment the channel allows it and the worker ships it then.
     """
     from services.youtube_upload import get_youtube_auth_status
-    from worker import publish_clip_for_operator
+    from publish_queue import publish_clip_for_operator
 
     auth_status = get_youtube_auth_status()
     if not auth_status["authenticated"]:
@@ -314,7 +314,7 @@ async def upload_all_clips_to_youtube_endpoint(
     ships the first one immediately and the rest one per hour by itself.
     """
     from services.youtube_upload import get_youtube_auth_status
-    from worker import publish_clips_of_job_for_operator
+    from publish_queue import publish_clips_of_job_for_operator
 
     auth_status = get_youtube_auth_status()
     if not auth_status["authenticated"]:
