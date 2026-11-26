@@ -189,15 +189,6 @@ def _hardware_probe() -> dict:
 
 def _collect_system_info(duration: Optional[float]) -> dict:
     """Blocking hardware probe (``wmic``, psutil, torch) run in a thread."""
-    try:
-        import psutil
-    except ImportError:
-        psutil = None
-    try:
-        import torch
-    except ImportError:
-        torch = None
-
     hw = _hardware_probe()
     cpu_label = f"{hw['cpu_name']} ({hw['threads']} Threads)"
     ram_gb = hw["ram_gb"]
