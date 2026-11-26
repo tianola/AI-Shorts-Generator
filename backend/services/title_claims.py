@@ -9,7 +9,8 @@ that in two steps:
    words from the clip that back it up. A "supported" verdict only counts when the quoted words
    really appear in the transcript; otherwise it is downgraded to "unclear".
 
-A title with an unsupported claim is rejected, and the caller replaces it with the clip's own words.
+A title with an unsupported claim is rejected and rewritten once as an honest hook; if the rewrite
+also fails the check, the caller falls back to the clip's own words.
 If the model call fails, the title is kept: the code check still ran, and nothing was proven false.
 """
 
@@ -181,11 +182,58 @@ async def verify_title_claims(title: str, transcript: str, caller=None) -> Dict:
     return result
 
 
-async def resolve_title(title: str, transcript: str, topic: str = "", caller=None) -> Tuple[str, Optional[Dict]]:
-    """The title to burn in, and the check's record. A rejected title becomes the clip's own words."""
+def _rewrite_prompt(title: str, transcript: str, reasons: List[str]) -> str:
+    return (
+        f'This short-video title was rejected: "{title}"\n'
+        f"Why: {'; '.join(reasons)}\n\n"
+        f'What the clip says:\n"{transcript[:2500]}"\n\n'
+        "Write one new title (12 to 45 characters, the clip's language) that makes a viewer need "
+        "to watch: tease the most surprising concrete thing the clip actually says (a number it "
+        "says, a named thing, a consequence) and leave the answer open, as a question or an "
+        "unfinished reveal. Every claim must be stated in the clip; no number the clip does not "
+        "say; no hashtags or emojis; not a sentence fragment. "
+        'Return JSON only: {"title": "..."}'
+    )
+
+
+async def _rewrite_hook(title: str, transcript: str, reasons: List[str], caller=None) -> str:
+    """A truthful curiosity-hook title in place of a rejected one, or "" when none is produced."""
+    try:
+        if caller is None:
+            from services.llm_router import call_llm_json, pick_model
+
+            async def caller(prompt):
+                return await call_llm_json(
+                    prompt=prompt, system="You write honest, curiosity-driven short-video titles. JSON only.",
+                    model=pick_model(), temperature=0.7, max_tokens=120)
+        data = json.loads(await caller(_rewrite_prompt(title, transcript, reasons)))
+        new = str((data or {}).get("title") or "").strip().strip('"')
+    except Exception as exc:
+        logger.warning(f"Title rewrite skipped: {type(exc).__name__}: {exc}")
+        return ""
+    return new if 8 <= len(new) <= 60 else ""
+
+
+async def resolve_title(title: str, transcript: str, topic: str = "", caller=None,
+                        rewrite_caller=None) -> Tuple[str, Optional[Dict]]:
+    """The title to burn in, and the check's record.
+
+    A rejected title is rewritten once as a hook that only claims what the clip says, and the
+    rewrite goes through the same check. Only when that fails does the title become the clip's own
+    words, which read as a fragment ("the powered interview employees") rather than a headline.
+    """
     check = await verify_title_claims(title, transcript, caller=caller)
     if check["accepted"]:
         return title, check
+    rewrite = await _rewrite_hook(title, transcript, check["reasons"], caller=rewrite_caller)
+    if rewrite and rewrite.lower() != title.lower():
+        recheck = await verify_title_claims(rewrite, transcript, caller=caller)
+        if recheck["accepted"] and recheck["checked"]:
+            check["replaced"] = True
+            check["original_title"] = title
+            check["final_title"] = rewrite
+            check["rewritten"] = True
+            return rewrite, check
     replacement = derive_from_transcript(transcript, topic)
     if not replacement:
         return title, check              # nothing true to replace it with; the record still says why

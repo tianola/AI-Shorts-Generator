@@ -190,7 +190,8 @@ def test_malformed_json_from_the_caller_keeps_the_title_unchecked():
 def test_a_rejected_title_is_replaced_by_the_clips_own_words():
     payload = {"claims": [{"claim": "he won the lottery", "verdict": "unsupported", "quote": ""}]}
     title = "He won the lottery"
-    final, record = asyncio.run(tc.resolve_title(title, TRANSCRIPT, caller=_caller(payload)))
+    final, record = asyncio.run(tc.resolve_title(title, TRANSCRIPT, caller=_caller(payload),
+                                                 rewrite_caller=_raising(RuntimeError("down"))))
 
     expected = derive_from_transcript(TRANSCRIPT, "")
     assert expected
@@ -216,7 +217,35 @@ def test_a_rejected_title_with_an_empty_replacement_keeps_the_title(monkeypatch)
     monkeypatch.setattr(tc, "derive_from_transcript", lambda transcript, topic="": "")
     payload = {"claims": [{"claim": "he won the lottery", "verdict": "unsupported", "quote": ""}]}
     title = "He won the lottery"
-    final, record = asyncio.run(tc.resolve_title(title, TRANSCRIPT, caller=_caller(payload)))
+    final, record = asyncio.run(tc.resolve_title(title, TRANSCRIPT, caller=_caller(payload),
+                                                 rewrite_caller=_caller("{}")))
     assert final == title
     assert record["accepted"] is False
     assert "replaced" not in record
+
+
+def test_a_rejected_title_is_rewritten_as_a_hook_that_passes_the_check():
+    verdicts = iter([
+        {"claims": [{"claim": "he won the lottery", "verdict": "unsupported", "quote": ""}]},
+        {"claims": [{"claim": "he missed the ending", "verdict": "supported",
+                     "quote": "he missed the good ending"}]},
+    ])
+
+    async def caller(prompt):
+        return json.dumps(next(verdicts))
+
+    final, record = asyncio.run(tc.resolve_title(
+        "He won the lottery", TRANSCRIPT, caller=caller,
+        rewrite_caller=_caller({"title": "Why did he miss the ending?"})))
+    assert final == "Why did he miss the ending?"
+    assert record["replaced"] is True and record["rewritten"] is True
+    assert record["original_title"] == "He won the lottery"
+
+
+def test_a_rewrite_that_also_fails_falls_back_to_the_clips_words():
+    payload = {"claims": [{"claim": "x", "verdict": "unsupported", "quote": ""}]}
+    final, record = asyncio.run(tc.resolve_title(
+        "He won the lottery", TRANSCRIPT, caller=_caller(payload),
+        rewrite_caller=_caller({"title": "He won a car too"})))
+    assert final == derive_from_transcript(TRANSCRIPT, "")
+    assert "rewritten" not in record
